@@ -138,9 +138,23 @@ sub cmd_group {
 }
 
 sub cmd_group_find {
+    my ($map);
+    GetOptions(
+        'm' => \$map,
+    ) or usage;
     my ($query) = @ARGV;
-    my $groups = content(get("/groups?query=$query"));
-    print $json->encode($groups);
+    my $groups = eval { content(get("/groups?query=$query"))->{'usergroups'} };
+    if (!defined $groups) {
+        fatal "group find: undefined output";
+    }
+    elsif ($map) {
+        foreach (sort { $a->{'group'} cmp $b->{'group'} } @$groups) {
+            print $_->{'id'}, ' ', $_->{'group'}, "\n";
+        }
+    }
+    else {
+        print $json->encode($groups);
+    }
 }
 
 sub cmd_group_get {
