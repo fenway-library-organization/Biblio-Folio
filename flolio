@@ -17,7 +17,7 @@ my $progfile = File::Spec->rel2abs($0);
 usage if @ARGV < 2;
 my $inst = shift @ARGV;
 
-my ($usr, $var);
+my ($root, $idir);
 my (%config, %state);
 my $json = JSON->new->pretty;
 
@@ -310,7 +310,7 @@ sub req {
 }
 
 sub read_state {
-    open my $fh, '<', "$var/state.json"
+    open my $fh, '<', "$idir/var/state.json"
         or return;
     local $/;
     my $str = <$fh>;
@@ -320,16 +320,16 @@ sub read_state {
 
 sub write_state {
     my $str = $json->encode(\%state);
-    open my $fh, '>', "$var/state.json"
-        or fatal "open $var/state.json for writing: $!";
+    open my $fh, '>', "$idir/var/state.json"
+        or fatal "open $idir/var/state.json for writing: $!";
     print $fh $str;
 }
 
 sub init {
     my ($inst) = @_;
-    $usr = "/usr/local/flolio/instance/$inst";
-    $var = "/var/local/flolio/$inst";
-    my $config_file = "$usr/instance.conf";
+    $root = '/usr/local/flolio';
+    $idir = "$root/instance/$inst";
+    my $config_file = "$idir/instance.conf";
     die "no config file for $inst" if !defined $config_file;
     open my $fh, '<', $config_file or die "open $config_file: $!";
     while (<$fh>) {
@@ -351,6 +351,10 @@ sub hook {
 
 sub hook_login {
     my $token = $state{'token'};
+}
+
+sub convert_users {
+    my ($f, $dom) = @_;
 }
 
 sub usage {
