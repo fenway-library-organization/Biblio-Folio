@@ -1,0 +1,372 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+sub usage;
+sub fatal;
+
+use LWP::UserAgent;
+use HTTP::Headers;
+use JSON;
+use File::Spec;
+
+(my $prog = $0) =~ s{.*/}{};
+my $progfile = File::Spec->rel2abs($0);
+
+usage if @ARGV < 2;
+my $inst = shift @ARGV;
+
+my ($usr, $var);
+my (%config, %state);
+my $json = JSON->new->pretty;
+
+init($inst);
+
+my $ua = LWP::UserAgent->new;
+$ua->agent("flolio/0.1");
+
+my $cmd = shift @ARGV;
+$cmd =~ tr/-/_/;
+
+&{ __PACKAGE__->can('cmd_'.$cmd) or usage };
+
+# --- Command handlers
+
+sub cmd_login {
+    printf STDERR <<'EOS', $state{'user_id'} // '<null>', $state{'token'};
+Logged in:
+  userId = %s
+  token  = %s
+EOS
+}
+
+sub cmd_instance {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    $subcmd =~ tr/-/_/;
+    goto &{ __PACKAGE__->can('cmd_instance_'.$subcmd) or usage };
+}
+
+sub cmd_instance_get {
+    usage "instance get INSTANCE_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $irec = eval { get_instance($id) };
+        my ($err) = split /\n/, $@;
+        if ($irec) {
+            my $instance = $json->decode($irec->content);
+            print $json->encode($instance);
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "instance $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_source {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    $subcmd =~ tr/-/_/;
+    goto &{ __PACKAGE__->can('cmd_source_'.$subcmd) or usage };
+}
+
+sub cmd_source_get {
+    usage "source get SOURCE_RECORD_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $srec = eval { get_source_record($id) };
+        my ($err) = split /\n/, $@;
+        if (defined $srec) {
+            1;
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "record $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_source_search {
+    usage "source search CQL"
+        if @ARGV != 1;
+    my ($cql) = @ARGV;
+    my $srec = eval { search_source_record_storage($cql) };
+    print $srec->content;
+}
+
+sub cmd_job {
+    subcmd();
+}
+
+sub cmd_job_begin {
+	my $jobexec = content(post('/change-manager/jobExecutions'));
+    my $j = $jobexec->{'id'};
+    my $snapshot = content(post('/source-storage/snapshots', {
+        'jobExecutionId' => $j,
+        'status' => 'NEW',
+    }));
+    print <<"EOS";
+OK
+    job: $j
+    snapshot: $snapshot->{'id'}
+
+EOS
+}
+
+sub cmd_source_batch {
+    subcmd();
+}
+
+sub cmd_source_batch_create {
+    usage "source batch create FILE"
+        if @ARGV != 1;
+    my $records = read_marc_records(shift @ARGV);
+    my $batch = content(post('/source-storage/batch/records', {
+        'records' => $records,
+        'totalRecords' => scalar(@$records),
+    }));
+}
+
+sub cmd_user {
+    subcmd();
+}
+
+sub cmd_group {
+    subcmd();
+}
+
+sub cmd_group_find {
+    my ($query) = @ARGV;
+    my $groups = content(get("/groups?query=$query"));
+    print $json->encode($groups);
+}
+
+sub cmd_group_get {
+    usage if !@ARGV;
+    my @groups;
+    foreach my $id (@ARGV) {
+        my $group = eval { content(get("/groups/$id")) };
+        if (defined $group) {
+            push @groups, $group;
+        }
+        else {
+            print STDERR "no such group: $id\n";
+        }
+    }
+    print $json->encode(\@groups) if @groups;
+}
+
+sub cmd_user_find {
+    my ($query) = @ARGV;
+    my $users = content(get("/users?query=$query&orderBy=username"));
+    print $json->encode($users);
+}
+
+sub cmd_user_get {
+    usage if !@ARGV;
+    my @users;
+    foreach my $id (@ARGV) {
+        my $user = eval { content(get("/users/$id")) };
+        if (defined $user) {
+            push @users, $user;
+        }
+        else {
+            print STDERR "no such user: $id\n";
+        }
+    }
+    print $json->encode(\@users) if @users;
+}
+
+# --- Supporting functions
+
+sub read_marc_records {
+    my ($f) = @_;
+    my $fh = oread($f);
+    my @records;
+    while (1) {
+        local $/ = "\x1d";
+        my $marc = <$fh>;
+        last if !defined $marc;
+        push @records, $marc;
+    }
+    return \@records;
+}
+
+sub oread {
+    my ($f) = @_;
+    my $fh;
+    if ($f =~ /\.gz/) {
+        open $fh, '-|', 'gunzip', '--stdout', $f
+            or fatal "exec gunzip $f: $!";
+    }
+    else {
+        open $fh, '<', $f
+            or fatal "open $f: $!";
+    }
+    return $fh;
+}
+
+sub content {
+    my ($res) = @_;
+    die "no response" if !defined $res;
+    my $str = $res->content;
+    die "no content" if !defined $str;
+    my $content = eval { $json->decode($str) }
+        or die "unparseable content";
+    return $content;
+}
+
+sub subcmd {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    my @caller = caller 1;
+    $caller[3] =~ /(cmd_\w+)$/ or die;
+    goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
+}
+
+sub get_instance {
+    my ($id) = @_;
+    return get("/inventory/instances/$id");
+}
+
+sub get_source_record {
+    my ($id) = @_;
+    return get("/source-storage/records/$id");
+}
+
+sub search_source_record_storage {
+    my ($cql) = @_;
+    return get("/source-storage/records", {
+        'query' => $cql,
+    });
+}
+
+sub login_if_necessary {
+    my $new = 0;
+    my ($token, $user_id) = @state{qw(token user_id)} ;
+    if (read_state() && $state{'logged_in'}) {
+        ($token, $user_id) = @state{qw(token user_id)} ;
+        return 0;
+    }
+    else {
+        ($token, $user_id) = login();
+        @state{qw(token user_id logged_in)} = ($token, $user_id, 1);
+        hook('login');
+        write_state();
+        return 1;
+    }
+}
+
+sub login {
+    my $res = post('/authn/login', {
+        'username' => $config{'user'},
+        'password' => $config{'password'},
+    }) or die "login failed";
+    my $token = $res->header('X-Okapi-Token')
+        or die "login didn't yield a token";
+    my $content = $json->decode($res->content);
+    my $user_id = $content->{'userId'};
+    return ($token, $user_id);
+}
+
+sub get {
+    my ($url, $content) = @_;
+    unshift @_, 'GET';
+    goto &req;
+}
+
+sub post {
+    my ($url, $content) = @_;
+    unshift @_, 'POST';
+    goto &req;
+}
+
+sub req {
+    my ($method, $url, $content) = @_;
+    my $uri = URI->new($config{'endpoint'} . $url);
+    if ($content && ($method eq 'GET' || $method eq 'DELETE')) {
+        $uri->query_form(%$content);
+    }
+    my $req = HTTP::Request->new($method, $uri);
+    $req->header('X-Okapi-Tenant' => $config{'tenant'});
+    $req->header('Accept' => 'application/json');
+    # $req->header('X-Forwarded-For' => '69.43.75.60');
+    if ($state{'logged_in'}) {
+        $req->header('X-Okapi-Token' => $state{'token'});
+    }
+    if ($method eq 'POST' || $method eq 'PUT') {
+        $req->content_type('application/json');
+        $req->content($json->encode($content));
+    }
+    my $res = $ua->request($req);
+    if ($res->is_success) {
+        return $res;
+    }
+    else {
+        die "FAIL: $method $url -> ", $res->status_line, "\n";
+    }
+}
+
+sub read_state {
+    open my $fh, '<', "$var/state.json"
+        or return;
+    local $/;
+    my $str = <$fh>;
+    %state = %{ $json->decode($str) };
+    return 1;
+}
+
+sub write_state {
+    my $str = $json->encode(\%state);
+    open my $fh, '>', "$var/state.json"
+        or fatal "open $var/state.json for writing: $!";
+    print $fh $str;
+}
+
+sub init {
+    my ($inst) = @_;
+    $usr = "/usr/local/flolio/instance/$inst";
+    $var = "/var/local/flolio/$inst";
+    my $config_file = "$usr/instance.conf";
+    die "no config file for $inst" if !defined $config_file;
+    open my $fh, '<', $config_file or die "open $config_file: $!";
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        chomp;
+        die "config syntax: $_" if !/^(\S+)\s+(.*)$/;
+        $config{$1} = $2;
+    }
+    print STDERR "Reusing login for $inst\n"
+        if !login_if_necessary();
+}
+
+sub hook {
+    my $what = shift;
+    my $sub = __PACKAGE__->can('hook_'.$what)
+        or return;
+    $sub->(@_);
+}
+
+sub hook_login {
+    my $token = $state{'token'};
+}
+
+sub usage {
+    my ($str) = @_;
+    $str ||= 'COMMAND [ARG...]';
+    print STDERR "usage: $prog $str\n";
+    if (!@_) {
+        if (open my $fh, '<', $progfile) {
+            my @commands;
+            while (<$fh>) {
+                push @commands, '  '.$1 if /^(?:    |\t)usage "(.+)"$/;
+            }
+            print STDERR $_, "\n" for 'commands:', sort @commands;
+        }
+    }
+    exit 1;
+}
+
+# vim:set et ts=4 sw=4 cin si ai:
