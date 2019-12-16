@@ -1,0 +1,423 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+sub usage;
+sub fatal;
+
+use Biblio::Folio;
+use LWP::UserAgent;
+use HTTP::Headers;
+use JSON;
+use File::Spec;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+(my $prog = $0) =~ s{.*/}{};
+my $progfile = File::Spec->rel2abs($0);
+
+my ($root, $folio, $site_name, $site, $json, $usage);
+
+usage if !@ARGV;
+if ($ARGV[0] =~ s/^\@(.+)//) {
+    $site_name = $1;
+    shift @ARGV;
+    usage if !@ARGV;
+}
+my $cmd = shift @ARGV;
+$cmd =~ tr/-/_/;
+
+&{ __PACKAGE__->can('cmd_'.$cmd) or usage };
+
+# --- Command handlers
+
+sub cmd_login {
+    orient();
+    $site->login;
+    my $state = $site->state;
+    printf STDERR <<'EOS', $state->{'user_id'} // '<null>', $state->{'token'};
+Logged in:
+  userId = %s
+  token  = %s
+EOS
+}
+
+sub cmd_get {
+    orient();
+    $usage = "get URI [KEY=VAL]...";
+    usage if !@ARGV;
+    my @args = (shift @ARGV);
+    if (@ARGV) {
+        my %arg;
+        foreach (@ARGV) {
+            usage if !/^([^=]+)=(.*)$/;
+            $arg{$1} = $2;
+        }
+        push @args, \%arg;
+    }
+    my $res = $site->get(@args);
+    print $json->encode($json->decode($res->content));
+}
+
+sub cmd_instance {
+    subcmd();
+}
+
+sub cmd_instance_get {
+    orient();
+    usage "instance get INSTANCE_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $irec = eval { get_instance($id) };
+        my ($err) = split /\n/, $@;
+        if ($irec) {
+            my $instance = $json->decode($irec->content);
+            print $json->encode($instance);
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "instance $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_instance_search {
+    orient();
+    usage "instance search CQL"
+        if @ARGV != 1;
+    my ($cql) = @ARGV;
+    my $srec = $site->get("/inventory/instances", {
+        'query' => $cql,
+    });
+    print $srec->content;
+}
+
+sub cmd_source {
+    subcmd();
+}
+
+sub cmd_source_get {
+    orient();
+    usage "source get SOURCE_RECORD_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $srec = eval { get_source_record($id) };
+        my ($err) = split /\n/, $@;
+        if (defined $srec) {
+            1;
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "record $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_source_search {
+    orient();
+    usage "source search CQL"
+        if @ARGV != 1;
+    my ($cql) = @ARGV;
+    my $srec = eval { search_source_record_storage($cql) };
+    print $srec->content;
+}
+
+sub cmd_job {
+    subcmd();
+}
+
+sub cmd_job_begin {
+    orient();
+	my $jobexec = content($site->post('/change-manager/jobExecutions'));
+    my $j = $jobexec->{'id'};
+    my $snapshot = content($site->post('/source-storage/snapshots', {
+        'jobExecutionId' => $j,
+        'status' => 'NEW',
+    }));
+    print <<"EOS";
+OK
+    job: $j
+    snapshot: $snapshot->{'id'}
+
+EOS
+}
+
+sub cmd_source_batch {
+    subcmd();
+}
+
+sub cmd_source_batch_create {
+    orient();
+    my $batch_size = 500;
+    orient(
+        'n|batch-size=i' => \$batch_size,
+    ) or usage;
+    usage "source batch create [FILE]" if @ARGV > 1;
+    my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
+    while (my $records = read_marc_records($fh, $batch_size)) {
+        my $batch = content($site->post('/source-storage/batch/records', {
+            'records' => $records,
+            'totalRecords' => scalar(@$records),
+        }));
+    }
+}
+
+sub cmd_user {
+    subcmd();
+}
+
+sub cmd_group {
+    subcmd();
+}
+
+sub cmd_group_find {
+    my ($map);
+    orient(
+        'm' => \$map,
+    ) or usage;
+    my ($query) = @ARGV;
+    my $groups = eval {
+        my $res = $site->get("/groups", {
+            query => $query,
+        });
+        $json->decode($res->content)->{'usergroups'};
+    };
+    if (!defined $groups) {
+        fatal "group find: undefined output";
+    }
+    elsif ($map) {
+        foreach (sort { $a->{'group'} cmp $b->{'group'} } @$groups) {
+            print $_->{'id'}, ' ', $_->{'group'}, "\n";
+        }
+    }
+    else {
+        print $json->encode($groups);
+    }
+}
+
+sub cmd_group_get {
+    orient();
+    usage if !@ARGV;
+    my @groups;
+    foreach my $id (@ARGV) {
+        my $group = eval { content($site->get("/groups/$id")) };
+        if (defined $group) {
+            push @groups, $group;
+        }
+        else {
+            print STDERR "no such group: $id\n";
+        }
+    }
+    print $json->encode(\@groups) if @groups;
+}
+
+sub cmd_user_find {
+    orient();
+    my ($query) = @ARGV;
+    my $users = content($site->get("/users", {
+        'query' => $query,
+        # 'orderBy' => 'username'
+    }));
+    print $json->encode($users);
+}
+
+sub cmd_user_get {
+    orient();
+    usage if !@ARGV;
+    my @users;
+    foreach my $id (@ARGV) {
+        my $user = eval { content($site->get("/users/$id")) };
+        if (defined $user) {
+            push @users, $user;
+        }
+        else {
+            print STDERR "no such user: $id\n";
+        }
+    }
+    print $json->encode(\@users) if @users;
+}
+
+sub cmd_user_match {
+    my ($batch_size, $parser_cls);
+    orient(
+        'n|batch-size=i' => \$batch_size,
+        'p|parser=s' => \$parser_cls,
+    );
+    my $config = $site->config;
+    $batch_size ||= 20;
+    $parser_cls ||= $config->{'import-users'}{'parser-class'} || 'Biblio::FolioX::Util::JSONParser';
+    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+    usage "source user match FILE" if @ARGV != 1;
+    my ($file) = @ARGV;
+    use_class($parser_cls);
+    my $parser = $parser_cls->new('site' => $site, 'file' => $file);
+    $parser->iterate(
+        'batch_size' => 10,
+        'each' => sub {
+            foreach ($site->match_users(@_)) {
+                my ($user, @matches) = @$_;
+                if (@matches == 0) {
+                    1;
+                }
+                elsif (@matches == 1) {
+                    1;
+                }
+                else {
+                    1;
+                }
+            }
+        },
+    );
+}
+
+sub cmd_address {
+    subcmd();
+}
+
+sub cmd_address_types {
+    orient();
+    my $res = content($site->get('/addresstypes'));
+    print $json->encode($res);
+}
+
+# --- Supporting functions
+
+sub read_marc_records {
+    my ($fh, $n) = @_;
+    my @records;
+    while ($n--) {
+        local $/ = "\x1d";
+        my $marc = <$fh>;
+        last if !defined $marc;
+        push @records, $marc;
+    }
+    return \@records;
+}
+
+sub oread {
+    my ($f) = @_;
+    my $fh;
+    if ($f =~ /\.gz/) {
+        open $fh, '-|', 'gunzip', '--stdout', $f
+            or fatal "exec gunzip $f: $!";
+    }
+    else {
+        open $fh, '<', $f
+            or fatal "open $f: $!";
+    }
+    return $fh;
+}
+
+sub content {
+    my ($res) = @_;
+    die "no response" if !defined $res;
+    my $str = $res->content;
+    die "no content" if !defined $str;
+    my $content = eval { $json->decode($str) }
+        or die "unparseable content";
+    return $content;
+}
+
+sub subcmd {
+    usage if !@ARGV;
+    my $subcmd = shift @ARGV;
+    my @caller = caller 1;
+    $caller[3] =~ /(cmd_\w+)$/ or die;
+    goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
+}
+
+sub get_instance {
+    my ($id) = @_;
+    return $site->get("/inventory/instances/$id");
+}
+
+sub get_source_record {
+    my ($id) = @_;
+    return $site->get("/source-storage/records/$id");
+}
+
+sub search_source_record_storage {
+    my ($cql) = @_;
+    return $site->get("/source-storage/records", {
+        'query' => $cql,
+    });
+}
+
+sub login_if_necessary {
+    my $token = $site->token;
+    $site->login('reuse_token' => 1);
+    return 0 if defined $token && $token eq $site->token;
+    hook('login');
+    return 1;
+}
+
+sub hook {
+    my $what = shift;
+    my $sub = __PACKAGE__->can('hook_'.$what)
+        or return;
+    $sub->(@_);
+}
+
+sub hook_login {
+    1;
+}
+
+sub use_class {
+    my ($cls) = @_;
+    my $ok;
+    eval qq{
+        use $cls;
+        \$ok = 1;
+    };
+    return if $ok;
+    my ($err) = split /\n/, $@;
+    fatal "use class $cls: $err";
+}
+
+sub orient {
+    $root = '/usr/local/folio';
+    $site_name ||= 'default';
+    # $site_name = $1, shift @ARGV
+    #     if $ARGV[0] =~ /^[@](.+)/;
+    GetOptions(
+        @_,
+        'r|root' => \$root,
+        's|site=s' => \$site_name,
+    ) or usage;
+    $folio = Biblio::Folio->new('root' => $root);
+    if (-l "$root/site/$site_name") {
+        $site_name = readlink "$root/site/$site_name"
+            or fatal "readlink $root/site/$site_name: $!";
+        $site_name =~ s{.*/}{};
+    }
+    $site = $folio->site($site_name);
+    $json = JSON->new->pretty;
+    if ($cmd ne 'login') {
+        print STDERR "Reusing login for $site_name\n"
+            if !login_if_necessary();
+    }
+}
+
+sub fatal {
+    print STDERR "$prog: @_\n";
+    exit 2;
+}
+
+sub usage {
+    $usage = shift if @_;
+    $usage ||= 'COMMAND [ARG...]';
+    print STDERR "usage: $prog $usage\n";
+    if (!@_) {
+        if (open my $fh, '<', $progfile) {
+            my @commands;
+            while (<$fh>) {
+                push @commands, '  '.$1 if /^(?:    |\t)usage "(.+)"$/;
+            }
+            print STDERR $_, "\n" for 'commands:', sort @commands;
+        }
+    }
+    exit 1;
+}
+
+# vim:set et ts=4 sw=4 cin si ai:
