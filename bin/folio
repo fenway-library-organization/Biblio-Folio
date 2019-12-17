@@ -7,6 +7,8 @@ sub usage;
 sub fatal;
 
 use Biblio::Folio;
+use Biblio::Folio::Site;
+
 use LWP::UserAgent;
 use HTTP::Headers;
 use JSON;
@@ -239,36 +241,10 @@ sub cmd_user_get {
 }
 
 sub cmd_user_match {
-    my ($batch_size, $parser_cls);
-    orient(
-        'n|batch-size=i' => \$batch_size,
-        'p|parser=s' => \$parser_cls,
-    );
-    my $config = $site->config;
-    $batch_size ||= 20;
-    $parser_cls ||= $config->{'import-users'}{'parser-class'} || 'Biblio::FolioX::Util::JSONParser';
-    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
-    usage "source user match FILE" if @ARGV != 1;
-    my ($file) = @ARGV;
-    use_class($parser_cls);
-    my $parser = $parser_cls->new('site' => $site, 'file' => $file);
-    $parser->iterate(
-        'batch_size' => 10,
-        'each' => sub {
-            foreach ($site->match_users(@_)) {
-                my ($user, @matches) = @$_;
-                if (@matches == 0) {
-                    1;
-                }
-                elsif (@matches == 1) {
-                    1;
-                }
-                else {
-                    1;
-                }
-            }
-        },
-    );
+    match_or_load_users('match');
+}
+
+sub cmd_user_load {
 }
 
 sub cmd_address {
@@ -282,6 +258,92 @@ sub cmd_address_types {
 }
 
 # --- Supporting functions
+
+sub match_or_load_users {
+    my ($verb) = @_;
+    my ($batch_size, $parser_cls);
+    orient(
+        'n|batch-size=i' => \$batch_size,
+        'p|parser=s' => \$parser_cls,
+    );
+    my $config = $site->config;
+# $batch_size ||= 5;
+    $parser_cls ||= $config->{'users'}{'import'}{'parserClass'} || 'Biblio::FolioX::Util::JSONParser';
+    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+    usage "source user $verb [-n NUM] [-p CLASS] FILE" if @ARGV != 1;
+    my ($file) = @ARGV;
+    use_class($parser_cls);
+    my $parser = $parser_cls->new('site' => $site, 'file' => $file);
+    my $sub = $verb eq 'match' ? \&show_matching_users : \&update_matching_users;
+    my %count;
+    my $n = 0;
+    $parser->iterate(
+        'batch_size' => $batch_size,
+        'each' => sub {
+            foreach my $result ($site->match_users(@_)) {
+                my ($user, $matches) = @$result{qw(user matches)};
+                my $res = $sub->($file, ++$n, $user, @$matches);
+                $count{$res}++;
+            }
+        },
+    );
+    print "result counts {\n";
+    foreach my $k (sort keys %count) {
+        printf "  %6d %s\n", $count{$k}, $k;
+    }
+    print "}\n";
+}
+
+sub show_matching_users {
+    my ($file, $n, $user, @matches) = @_;
+    my $m = @matches;
+    printf "user %d \{\n", $n;
+    # printf "  id:           %s\n", $user->{'id'};
+    printf "  patronGroup:      %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
+    printf "  hrid:             %s\n", $user->{'hrid'}             if defined $user->{'hrid'};
+    printf "  username:         %s\n", $user->{'username'}         if defined $user->{'username'};
+    printf "  externalSystemId: %s\n", $user->{'externalSystemId'} if defined $user->{'externalSystemId'};
+    printf "  lastName:         %s\n", $user->{'personal'}{'lastName'};
+    printf "  firstName:        %s\n", $user->{'personal'}{'firstName'};
+    printf "  file:             %s\n", $file;
+    printf "  row number:       %s\n", $n;
+    printf "  raw data:         %s\n", $user->{'_raw'};
+    printf "  matches:          %d\n", $m;
+    my $i = 0;
+    foreach my $match (@matches) {
+        $i++;
+        my ($matched_user, $matched_by) = @$match{qw(user by)};
+        my $bystr = join(', ', @$matched_by);
+        printf "  match %d on %s \{\n", $i, $bystr;
+        printf "    id:           %s\n", $matched_user->{'id'};
+        printf "    patron group: %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
+        printf "    hrid:         %s\n", $matched_user->{'hrid'}             if defined $matched_user->{'hrid'};
+        printf "    username:     %s\n", $matched_user->{'username'}         if defined $matched_user->{'username'};
+        printf "    external id:  %s\n", $matched_user->{'externalSystemId'} if defined $matched_user->{'externalSystemId'};
+        printf "    last name:    %s\n", $matched_user->{'personal'}{'lastName'};
+        printf "    first name:   %s\n", $matched_user->{'personal'}{'firstName'};
+        print  "  \}\n";
+    }
+    print "\}\n";
+    return $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
+}
+
+sub update_matching_users {
+    my ($file, $n, $user, @matches) = @_;
+    if (@matches == 0) {
+        print STDERR "no match: record $n in $file\n";
+        return;
+    }
+    elsif (@matches == 1) {
+        my $match = $matches[0];
+        $site->apply_update_to_user($matches[0], $user);
+        my $id = $match->{'hrid'} || $match->{'id'};
+        print STDERR "updated: user $id from record $n in $file\n";
+    }
+    else {
+        print STDERR "multiple matches: record $n in $file\n";
+    }
+}
 
 sub read_marc_records {
     my ($fh, $n) = @_;
