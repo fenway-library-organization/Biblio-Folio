@@ -1,5 +1,7 @@
 #!/usr/bin/perl
 
+$| = 1;
+
 use strict;
 use warnings;
 
@@ -20,6 +22,8 @@ use Getopt::Long
 my $progfile = File::Spec->rel2abs($0);
 
 my ($root, $folio, $site_name, $site, $json, $usage);
+# Common options
+my ($dryrun, $verbose);
 
 usage if !@ARGV;
 if ($ARGV[0] =~ s/^\@(.+)//) {
@@ -241,10 +245,23 @@ sub cmd_user_get {
 }
 
 sub cmd_user_match {
-    match_or_load_users('match');
+    my %arg;
+    orient(
+        's|batch-size=i' => \$arg{'batch_size'},
+        'p|parser=s' => \$arg{'parser_cls'},
+        'j|as_json' => \$arg{'as_json'},
+    );
+    match_or_load_users('match', %arg);
 }
 
 sub cmd_user_load {
+    my %arg;
+    orient(
+        'n|dry-run' => \$dryrun,
+        's|batch-size=i' => \$arg{'batch_size'},
+        'p|parser=s' => \$arg{'parser_cls'},
+    );
+    match_or_load_users('load', %arg);
 }
 
 sub cmd_address {
@@ -260,12 +277,8 @@ sub cmd_address_types {
 # --- Supporting functions
 
 sub match_or_load_users {
-    my ($verb) = @_;
-    my ($batch_size, $parser_cls);
-    orient(
-        'n|batch-size=i' => \$batch_size,
-        'p|parser=s' => \$parser_cls,
-    );
+    my ($verb, %arg) = @_;
+    my ($batch_size, $parser_cls) = @arg{qw(batch_size parser_cls)};
     my $config = $site->config;
 # $batch_size ||= 5;
     $parser_cls ||= $config->{'users'}{'import'}{'parserClass'} || 'Biblio::FolioX::Util::JSONParser';
@@ -274,7 +287,7 @@ sub match_or_load_users {
     my ($file) = @ARGV;
     use_class($parser_cls);
     my $parser = $parser_cls->new('site' => $site, 'file' => $file);
-    my $sub = $verb eq 'match' ? \&show_matching_users : \&update_matching_users;
+    my $sub = $verb eq 'match' ? \&show_matching_users : \&update_or_create_user;
     my %count;
     my $n = 0;
     $parser->iterate(
@@ -282,7 +295,7 @@ sub match_or_load_users {
         'each' => sub {
             foreach my $result ($site->match_users(@_)) {
                 my ($user, $matches) = @$result{qw(user matches)};
-                my $res = $sub->($file, ++$n, $user, @$matches);
+                my $res = $sub->($file, ++$n, \%arg, $user, @$matches);
                 $count{$res}++;
             }
         },
@@ -295,53 +308,85 @@ sub match_or_load_users {
 }
 
 sub show_matching_users {
-    my ($file, $n, $user, @matches) = @_;
+    my ($file, $n, $arg, $user, @matches) = @_;
     my $m = @matches;
-    printf "user %d \{\n", $n;
-    # printf "  id:           %s\n", $user->{'id'};
-    printf "  patronGroup:      %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
-    printf "  hrid:             %s\n", $user->{'hrid'}             if defined $user->{'hrid'};
-    printf "  username:         %s\n", $user->{'username'}         if defined $user->{'username'};
-    printf "  externalSystemId: %s\n", $user->{'externalSystemId'} if defined $user->{'externalSystemId'};
-    printf "  lastName:         %s\n", $user->{'personal'}{'lastName'};
-    printf "  firstName:        %s\n", $user->{'personal'}{'firstName'};
-    printf "  file:             %s\n", $file;
-    printf "  row number:       %s\n", $n;
-    printf "  raw data:         %s\n", $user->{'_raw'};
-    printf "  matches:          %d\n", $m;
-    my $i = 0;
-    foreach my $match (@matches) {
-        $i++;
-        my ($matched_user, $matched_by) = @$match{qw(user by)};
-        my $bystr = join(', ', @$matched_by);
-        printf "  match %d on %s \{\n", $i, $bystr;
-        printf "    id:           %s\n", $matched_user->{'id'};
-        printf "    patron group: %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
-        printf "    hrid:         %s\n", $matched_user->{'hrid'}             if defined $matched_user->{'hrid'};
-        printf "    username:     %s\n", $matched_user->{'username'}         if defined $matched_user->{'username'};
-        printf "    external id:  %s\n", $matched_user->{'externalSystemId'} if defined $matched_user->{'externalSystemId'};
-        printf "    last name:    %s\n", $matched_user->{'personal'}{'lastName'};
-        printf "    first name:   %s\n", $matched_user->{'personal'}{'firstName'};
-        print  "  \}\n";
+    my $res = $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
+    if ($arg->{'as_json'}) {
+        print "# ------------------------------------------------------------------------------\n"
+            if $n > 1;
+        print $json->encode({
+            'index' => $n,
+            'input' => $user,
+            'matches' => \@matches,
+            'result' => $res,
+        });
     }
-    print "\}\n";
-    return $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
+    else {
+        printf "user %d \{\n", $n;
+        # printf "  id:           %s\n", $user->{'id'};
+        printf "  patronGroup:      %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
+        printf "  hrid:             %s\n", $user->{'hrid'}             if defined $user->{'hrid'};
+        printf "  username:         %s\n", $user->{'username'}         if defined $user->{'username'};
+        printf "  externalSystemId: %s\n", $user->{'externalSystemId'} if defined $user->{'externalSystemId'};
+        printf "  lastName:         %s\n", $user->{'personal'}{'lastName'};
+        printf "  firstName:        %s\n", $user->{'personal'}{'firstName'};
+        printf "  file:             %s\n", $file;
+        printf "  row number:       %s\n", $n;
+        printf "  raw data:         %s\n", $user->{'_raw'};
+        printf "  matches:          %d\n", $m;
+        my $i = 0;
+        foreach my $match (@matches) {
+            $i++;
+            my ($matched_user, $matched_by) = @$match{qw(user by)};
+            my $bystr = join(', ', @$matched_by);
+            printf "  match %d on %s \{\n", $i, $bystr;
+            printf "    id:           %s\n", $matched_user->{'id'};
+            printf "    patron group: %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
+            printf "    hrid:         %s\n", $matched_user->{'hrid'}             if defined $matched_user->{'hrid'};
+            printf "    username:     %s\n", $matched_user->{'username'}         if defined $matched_user->{'username'};
+            printf "    external id:  %s\n", $matched_user->{'externalSystemId'} if defined $matched_user->{'externalSystemId'};
+            printf "    last name:    %s\n", $matched_user->{'personal'}{'lastName'};
+            printf "    first name:   %s\n", $matched_user->{'personal'}{'firstName'};
+            print  "  \}\n";
+        }
+        print "\}\n";
+    }
+    return $res;
 }
 
-sub update_matching_users {
-    my ($file, $n, $user, @matches) = @_;
+sub update_or_create_user {
+    my ($file, $n, $arg, $user, @matches) = @_;
+    my $res;
     if (@matches == 0) {
-        print STDERR "no match: record $n in $file\n";
-        return;
+        $res = $site->post('/users', $user);
+        if ($res->is_success) {
+            $user = content($res);
+            my $id = $user->{'id'};
+            print STDERR "ADD user $id created: record $n in $file\n";
+        }
+        else {
+            print STDERR "ERR user not created: record $n in $file: ", $res->status_line, "\n";
+        }
     }
     elsif (@matches == 1) {
         my $match = $matches[0];
-        $site->apply_update_to_user($matches[0], $user);
-        my $id = $match->{'hrid'} || $match->{'id'};
-        print STDERR "updated: user $id from record $n in $file\n";
+        my $id = $match->{'id'};
+        my @changes = $site->_apply_update_to_user($match, $user);
+        if (!@changes) {
+            print STDERR "IGN user $id unchanged: record $n in $file\n";
+        }
+        else {
+            my $res = $site->put("/users/$id", $match);
+            if ($res->is_success) {
+                print STDERR "UPD user $id updated: record $n in $file\n";
+            }
+            else {
+                print STDERR "ERR user $id not updated: record $n in $file: ", $res->status_line, "\n";
+            }
+        }
     }
     else {
-        print STDERR "multiple matches: record $n in $file\n";
+        print STDERR "UNR user unresolved: record $n in $file\n";
     }
 }
 
@@ -454,7 +499,7 @@ sub orient {
         $site_name =~ s{.*/}{};
     }
     $site = $folio->site($site_name);
-    $json = JSON->new->pretty;
+    $json = JSON->new->pretty->canonical;
     if ($cmd ne 'login') {
         print STDERR "Reusing login for $site_name\n"
             if !login_if_necessary();

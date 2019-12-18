@@ -410,12 +410,13 @@ sub camelize {
     return $_;
 }
 
-sub apply_update_to_user {
+sub _apply_update_to_user {
     my ($self, $existing, $incoming) = @_;
     # Apply changes from $incoming to $existing
-    my @changes = (
-        1,
-    );
+    my @changes;
+    my $updating = $self->config->{'users'}{'update'};
+    1;  # TODO
+    return @changes;
 }
 
 1;
