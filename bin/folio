@@ -8,6 +8,9 @@ use warnings;
 sub usage;
 sub fatal;
 
+use FindBin qw($Bin);
+use lib "$Bin/../lib";
+
 use Biblio::Folio;
 use Biblio::Folio::Site;
 
@@ -99,6 +102,72 @@ sub cmd_instance_search {
     print $srec->content;
 }
 
+sub cmd_holding {
+    subcmd();
+}
+
+sub cmd_holding_get {
+    orient();
+    usage "holding get HOLDING_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $irec = eval { get_holding($id) };
+        my ($err) = split /\n/, $@;
+        if ($irec) {
+            my $holding = $json->decode($irec->content);
+            print $json->encode($holding);
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "holding $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_holding_search {
+    orient();
+    usage "holding search CQL"
+        if @ARGV != 1;
+    my ($cql) = @ARGV;
+    my $srec = $site->get("/holdings-storage/holdings", {
+        'query' => $cql,
+    });
+    print $srec->content;
+}
+
+sub cmd_item {
+    subcmd();
+}
+
+sub cmd_item_get {
+    orient();
+    usage "item get ITEM_ID..."
+        if !@ARGV;
+    foreach my $id (@ARGV) {
+        my $irec = eval { get_item($id) };
+        my ($err) = split /\n/, $@;
+        if ($irec) {
+            my $item = $json->decode($irec->content);
+            print $json->encode($item);
+        }
+        else {
+            $err = ': ' if $err =~ /\S/;
+            print STDERR "item $id not found$err\n";
+        }
+    }
+}
+
+sub cmd_item_search {
+    orient();
+    usage "item search CQL"
+        if @ARGV != 1;
+    my ($cql) = @ARGV;
+    my $srec = $site->get("/item-storage/items", {
+        'query' => $cql,
+    });
+    print $srec->content;
+}
+
 sub cmd_source {
     subcmd();
 }
@@ -135,6 +204,8 @@ sub cmd_job {
 
 sub cmd_job_begin {
     orient();
+    usage "job begin"
+        if @ARGV;
 	my $jobexec = content($site->post('/change-manager/jobExecutions'));
     my $j = $jobexec->{'id'};
     my $snapshot = content($site->post('/source-storage/snapshots', {
@@ -154,12 +225,12 @@ sub cmd_source_batch {
 }
 
 sub cmd_source_batch_create {
-    orient();
     my $batch_size = 500;
     orient(
         'n|batch-size=i' => \$batch_size,
     ) or usage;
-    usage "source batch create [FILE]" if @ARGV > 1;
+    usage "source batch create [FILE]"
+        if @ARGV > 1;
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
     while (my $records = read_marc_records($fh, $batch_size)) {
         my $batch = content($site->post('/source-storage/batch/records', {
@@ -177,11 +248,13 @@ sub cmd_group {
     subcmd();
 }
 
-sub cmd_group_find {
+sub cmd_group_search {
     my ($map);
     orient(
         'm' => \$map,
     ) or usage;
+    usage "group search CQL"
+        if @ARGV != 1;
     my ($query) = @ARGV;
     my $groups = eval {
         my $res = $site->get("/groups", {
@@ -204,7 +277,8 @@ sub cmd_group_find {
 
 sub cmd_group_get {
     orient();
-    usage if !@ARGV;
+    usage "group get ID..."
+        if !@ARGV;
     my @groups;
     foreach my $id (@ARGV) {
         my $group = eval { content($site->get("/groups/$id")) };
@@ -218,11 +292,21 @@ sub cmd_group_get {
     print $json->encode(\@groups) if @groups;
 }
 
-sub cmd_user_find {
-    orient();
+sub cmd_user_search {
+    my ($offset, $limit, $order_by);
+    orient(
+        'm|offset=i' => \$offset,
+        'n|limit=i' => \$limit,
+        'o|order-by=s' => \$order_by,
+    );
+    usage "user search CQL"
+        if @ARGV != 1;
     my ($query) = @ARGV;
     my $users = content($site->get("/users", {
         'query' => $query,
+        _optional('offset' => $offset),
+        _optional('limit' => $limit),
+        _optional('order_by' => $order_by),
         # 'orderBy' => 'username'
     }));
     print $json->encode($users);
@@ -230,7 +314,8 @@ sub cmd_user_find {
 
 sub cmd_user_get {
     orient();
-    usage if !@ARGV;
+    usage "user get ID..."
+        if !@ARGV;
     my @users;
     foreach my $id (@ARGV) {
         my $user = eval { content($site->get("/users/$id")) };
@@ -251,6 +336,8 @@ sub cmd_user_match {
         'p|parser=s' => \$arg{'parser_cls'},
         'j|as_json' => \$arg{'as_json'},
     );
+    usage "user match [-j] [-s NUM] [-p CLASS] FILE"
+        if @ARGV != 1;
     match_or_load_users('match', %arg);
 }
 
@@ -261,6 +348,8 @@ sub cmd_user_load {
         's|batch-size=i' => \$arg{'batch_size'},
         'p|parser=s' => \$arg{'parser_cls'},
     );
+    usage "user load [-n] [-s NUM] [-p CLASS] FILE"
+        if @ARGV != 1;
     match_or_load_users('load', %arg);
 }
 
@@ -270,6 +359,8 @@ sub cmd_address {
 
 sub cmd_address_types {
     orient();
+    usage "address types"
+        if @ARGV;
     my $res = content($site->get('/addresstypes'));
     print $json->encode($res);
 }
@@ -283,7 +374,6 @@ sub match_or_load_users {
 # $batch_size ||= 5;
     $parser_cls ||= $config->{'users'}{'import'}{'parserClass'} || 'Biblio::FolioX::Util::JSONParser';
     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
-    usage "source user $verb [-n NUM] [-p CLASS] FILE" if @ARGV != 1;
     my ($file) = @ARGV;
     use_class($parser_cls);
     my $parser = $parser_cls->new('site' => $site, 'file' => $file);
@@ -444,6 +534,16 @@ sub get_source_record {
     return $site->get("/source-storage/records/$id");
 }
 
+sub get_holding {
+    my ($id) = @_;
+    return $site->get("/holdings-storage/holdings/$id");
+}
+
+sub get_item {
+    my ($id) = @_;
+    return $site->get("/item-storage/items/$id");
+}
+
 sub search_source_record_storage {
     my ($cql) = @_;
     return $site->get("/source-storage/records", {
@@ -501,9 +601,16 @@ sub orient {
     $site = $folio->site($site_name);
     $json = JSON->new->pretty->canonical;
     if ($cmd ne 'login') {
-        print STDERR "Reusing login for $site_name\n"
-            if !login_if_necessary();
+        login_if_necessary();
+        # print STDERR "Reusing login for $site_name\n"
+        #     if !login_if_necessary();
     }
+}
+
+sub _optional {
+    my ($k, $v) = @_;
+    return if !defined $v;
+    return ($k, $v);
 }
 
 sub fatal {

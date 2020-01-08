@@ -5,8 +5,14 @@ use warnings;
 
 use JSON;
 use Digest;
+use Text::Balanced qw(extract_delimited);
 
 my $json = JSON->new->pretty;
+my %tok2const = (
+    'null' => JSON::null,
+    'true' => JSON::true,
+    'false' => JSON::false,
+);
 
 sub new {
     my $cls = shift;
@@ -184,13 +190,26 @@ sub _build_matching {
             'order' => 1<<15,
             'exact' => 0,
         );
-        foreach (map { norm($_) } split /,\s*/, $matching->{$k}) {
-            if (/^copy from (.+)$/) {
+        local $_ = $matching->{$k};
+        my $n = 0;
+        while (/\S/) {
+            if ($n++) {
+                s/^\s*,\s+// or die "invalid matching parameters: $k = $matching->{$k}";
+            }
+            if (s/^copy from (\w+)//) {
                 $fm{'copy_from'} = $1;
             }
-            elsif (/^([^:\s]+)(?::\s*(.+))?$/) {
-                my ($pk, $pv) = ($1, $2);
-                $pv = 1 if !defined $pv;
+            elsif (s/^default://) {
+                my $dv = extract_value();
+                die "invalid default: $_" if !defined $dv;
+                $fm{'default'} = $dv;
+            }
+            elsif (s/^([^:,\s]+)//) {
+                my ($pk, $pv) = ($1, 1);
+                if (s/^:\s*//) {
+                    $pv = extract_value();
+                    die "invalid value for $pk: $_" if !defined $pv;
+                }
                 # if ($pk =~ /^(lowest|highest)$/) {
                 #     ($pk, $pv) = ('qualifier', _matchpoint_qualifier($pk));
                 # }
@@ -201,6 +220,25 @@ sub _build_matching {
             if $fm{'required'} && $fm{'optional'};
         $matching->{$k} = \%fm;
     }
+}
+
+sub extract_value {
+    # This function operates (destructively) on $_
+    my $v = extract_delimited(undef, q{"'}, '\s*');
+    if (defined $v) {
+        $v =~ /^(["'])(.*)$1$/ or die "wtf?";
+        $v = $2;
+    }
+    elsif (s/^(true|false|null)//) {
+        $v = $tok2const{$1};
+    }
+    elsif (s/^([0-9]+(?:\.[0-9]+)?)//) {
+        $v = $1;
+    }
+    elsif (s/^(\w+)//) {
+        $v = $1;
+    }
+    return $v;
 }
 
 sub match_users {
