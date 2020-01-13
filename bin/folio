@@ -74,9 +74,12 @@ sub cmd_instance {
 }
 
 sub cmd_instance_get {
-    orient();
-    usage "instance get INSTANCE_ID..."
-        if !@ARGV;
+    my ($with_holdings, $with_items);
+    orient(
+        'h|with-holdings' => \$with_holdings,
+        'i|with-items' => \$with_items,
+    );
+    usage "instance get INSTANCE_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $irec = eval { get_instance($id) };
         my ($err) = split /\n/, $@;
@@ -93,8 +96,7 @@ sub cmd_instance_get {
 
 sub cmd_instance_search {
     orient();
-    usage "instance search CQL"
-        if @ARGV != 1;
+    usage "instance search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->get("/inventory/instances", {
         'query' => $cql,
@@ -108,8 +110,7 @@ sub cmd_holding {
 
 sub cmd_holding_get {
     orient();
-    usage "holding get HOLDING_ID..."
-        if !@ARGV;
+    usage "holding get HOLDING_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $irec = eval { get_holding($id) };
         my ($err) = split /\n/, $@;
@@ -126,8 +127,7 @@ sub cmd_holding_get {
 
 sub cmd_holding_search {
     orient();
-    usage "holding search CQL"
-        if @ARGV != 1;
+    usage "holding search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->get("/holdings-storage/holdings", {
         'query' => $cql,
@@ -141,8 +141,7 @@ sub cmd_item {
 
 sub cmd_item_get {
     orient();
-    usage "item get ITEM_ID..."
-        if !@ARGV;
+    usage "item get ITEM_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $irec = eval { get_item($id) };
         my ($err) = split /\n/, $@;
@@ -159,8 +158,7 @@ sub cmd_item_get {
 
 sub cmd_item_search {
     orient();
-    usage "item search CQL"
-        if @ARGV != 1;
+    usage "item search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->get("/item-storage/items", {
         'query' => $cql,
@@ -174,8 +172,7 @@ sub cmd_source {
 
 sub cmd_source_get {
     orient();
-    usage "source get SOURCE_RECORD_ID..."
-        if !@ARGV;
+    usage "source get SOURCE_RECORD_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $srec = eval { get_source_record($id) };
         my ($err) = split /\n/, $@;
@@ -191,8 +188,7 @@ sub cmd_source_get {
 
 sub cmd_source_search {
     orient();
-    usage "source search CQL"
-        if @ARGV != 1;
+    usage "source search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = eval { search_source_record_storage($cql) };
     print $srec->content;
@@ -204,8 +200,7 @@ sub cmd_job {
 
 sub cmd_job_begin {
     orient();
-    usage "job begin"
-        if @ARGV;
+    usage "job begin" if @ARGV;
 	my $jobexec = content($site->post('/change-manager/jobExecutions'));
     my $j = $jobexec->{'id'};
     my $snapshot = content($site->post('/source-storage/snapshots', {
@@ -229,8 +224,7 @@ sub cmd_source_batch_create {
     orient(
         'n|batch-size=i' => \$batch_size,
     ) or usage;
-    usage "source batch create [FILE]"
-        if @ARGV > 1;
+    usage "source batch create [FILE]" if @ARGV > 1;
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
     while (my $records = read_marc_records($fh, $batch_size)) {
         my $batch = content($site->post('/source-storage/batch/records', {
@@ -253,8 +247,7 @@ sub cmd_group_search {
     orient(
         'm' => \$map,
     ) or usage;
-    usage "group search CQL"
-        if @ARGV != 1;
+    usage "group search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
     my $groups = eval {
         my $res = $site->get("/groups", {
@@ -277,8 +270,7 @@ sub cmd_group_search {
 
 sub cmd_group_get {
     orient();
-    usage "group get ID..."
-        if !@ARGV;
+    usage "group get ID..." if !@ARGV;
     my @groups;
     foreach my $id (@ARGV) {
         my $group = eval { content($site->get("/groups/$id")) };
@@ -299,8 +291,7 @@ sub cmd_user_search {
         'n|limit=i' => \$limit,
         'o|order-by=s' => \$order_by,
     );
-    usage "user search CQL"
-        if @ARGV != 1;
+    usage "user search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
     my $users = content($site->get("/users", {
         'query' => $query,
@@ -314,8 +305,7 @@ sub cmd_user_search {
 
 sub cmd_user_get {
     orient();
-    usage "user get ID..."
-        if !@ARGV;
+    usage "user get ID..." if !@ARGV;
     my @users;
     foreach my $id (@ARGV) {
         my $user = eval { content($site->get("/users/$id")) };
@@ -336,8 +326,7 @@ sub cmd_user_match {
         'p|parser=s' => \$arg{'parser_cls'},
         'j|as_json' => \$arg{'as_json'},
     );
-    usage "user match [-j] [-s NUM] [-p CLASS] FILE"
-        if @ARGV != 1;
+    usage "user match [-j] [-s NUM] [-p CLASS] FILE" if @ARGV != 1;
     match_or_load_users('match', %arg);
 }
 
@@ -348,8 +337,7 @@ sub cmd_user_load {
         's|batch-size=i' => \$arg{'batch_size'},
         'p|parser=s' => \$arg{'parser_cls'},
     );
-    usage "user load [-n] [-s NUM] [-p CLASS] FILE"
-        if @ARGV != 1;
+    usage "user load [-n] [-s NUM] [-p CLASS] FILE" if @ARGV != 1;
     match_or_load_users('load', %arg);
 }
 
@@ -359,8 +347,7 @@ sub cmd_address {
 
 sub cmd_address_types {
     orient();
-    usage "address types"
-        if @ARGV;
+    usage "address types" if @ARGV;
     my $res = content($site->get('/addresstypes'));
     print $json->encode($res);
 }
@@ -625,8 +612,12 @@ sub usage {
     if (!@_) {
         if (open my $fh, '<', $progfile) {
             my @commands;
+            my $incmd;
             while (<$fh>) {
-                push @commands, '  '.$1 if /^(?:    |\t)usage "(.+)"$/;
+                $incmd = 1, next if /^sub cmd_/;
+                $incmd = 0, next if /^\}/;
+                push @commands, '  '.$1
+                    if /^(?:    |\t)usage "(.+)"/ && $incmd;
             }
             print STDERR $_, "\n" for 'commands:', sort @commands;
         }
