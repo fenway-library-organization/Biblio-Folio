@@ -124,18 +124,29 @@ sub cmd_instance_search {
 }
 
 sub cmd_instance_harvest {
-    my $format = 'MARC';
+    my %format;
     my %with;
     orient(
-        'j|as-json' => sub { $format = 'JSON' },
-        'm|as-marc' => sub { $format = 'MARC' },
-        't|as-text' => sub { $format = 'TEXT' },
+        'j|as-json' => sub { $format{'JSON'} = 1 },
+        'm|as-marc' => sub { $format{'MARC'} = 1 },
+        't|as-text' => sub { $format{'TEXT'} = 1 },
         'H|with-holdings' => \$with{'holdings'},
         'I|with-items'    => \$with{'items'},
     );
+    usage "instance harvest [-jmt] [-HI] [FILE]" if @ARGV > 1;
+    usage if keys(%format) > 1;
+    $format{'JSON'} = 1 if keys(%format) == 0;
     $with{'holdings'} = 1 if $with{'items'};
-    usage "instance harvest [FILE]" if @ARGV > 1;
     my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+    my @json_preamble = <<'EOS';
+{
+"instances":[
+EOS
+    my @json_postamble = <<'EOS';
+]
+}
+EOS
+    print @json_preamble if $format{'JSON'};
     while (<$fh>) {
         chomp;
         s/\s+.*//;
@@ -157,14 +168,22 @@ sub cmd_instance_harvest {
                 }
             }
         }
-        if ($format eq 'MARC') {
+        if ($format{'MARC'}) {
             my $marc = eval { $source->as_marc };
             print($marc), next if defined $marc;
             print STDERR "not a MARC record: $id\n";
         }
-        elsif ($format eq 'JSON') {
+        elsif ($format{'JSON'}) {
+            my %instance = %$instance;
+            delete $instance{'_site'};
+            my $str = $json->encode(\%instance);
+            print ",\n" if !@json_preamble;
+            $str =~ s/\n\z//;
+            print $str;
+            @json_preamble = ();
         }
     }
+    print "\n", @json_postamble if $format{'JSON'};
 }
 
 sub cmd_holding {
@@ -676,6 +695,9 @@ sub orient {
     usage if !defined $site_name;
     # $site_name = $1, shift @ARGV
     #     if $ARGV[0] =~ /^[@](.+)/;
+    local $SIG{__WARN__} = sub {
+        print @_ if $_[0] !~ /^Unknown option/;
+    };
     GetOptions(
         @_,
         'r|root' => \$root,
@@ -688,7 +710,7 @@ sub orient {
         $site_name =~ s{.*/}{};
     }
     $site = $folio->site($site_name);
-    $json = JSON->new->pretty->canonical;
+    $json = JSON->new->pretty->canonical->convert_blessed;
     if ($cmd ne 'login') {
         login_if_necessary();
         # print STDERR "Reusing login for $site_name\n"
@@ -710,12 +732,18 @@ sub fatal {
 sub usage {
     my $usage;
     my @commands;
-    my @caller = caller(1);
-    (my $cmd = $caller[3] || '') =~ s/^([^:]+::)*cmd_//;
+    my $cmd;
+    foreach my $i (1..3) {
+        my @caller = caller($i);
+        last if !@caller;
+        $cmd = $caller[3];
+        last if $cmd =~ s/.+::cmd_//;
+        undef $cmd;
+    }
     if (@_) {
         $usage = '@SITE ' . shift;
     }
-    if (open my $fh, '<', $progfile) {
+    if (defined $cmd && open my $fh, '<', $progfile) {
         my $incmd;
         while (<$fh>) {
             $incmd = $1, next if /^sub cmd_(\S+)/;

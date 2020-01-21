@@ -132,7 +132,7 @@ sub _read_cache {
     my ($self) = @_;
     my %cache;
     # TODO
-    $self->{'cached_object'} = \%cache;
+    $self->{'_cached_object'} = \%cache;
 }
 
 sub decode_uuid {
@@ -202,13 +202,13 @@ sub cached {
     my ($self, $kind, $id) = @_;
     return if !defined $id;
     my $key = $kind . ':' . $id;
-    my $cached = $self->{'cached_object'}{$key};
+    my $cached = $self->{'_cached_object'}{$key};
     my $t = time;
     return $cached->{'object'} if $cached && $cached->{'expiry'} >= $t;
     my $obj = eval { $self->object($kind, $id) };
     my $ttl = $obj->ttl || 3600;  # One hour
     if ($ttl != -1) {
-        $self->{'cached_object'}{$key} = {
+        $self->{'_cached_object'}{$key} = {
             'object' => $obj,
             'expiry' => $t + $ttl,
         };
@@ -709,6 +709,12 @@ sub initialize_classes_and_properties {
     die "unresolved property aliases: @unresolved" if @unresolved;
 }
 
+sub TO_JSON {
+    my %self = %{ shift() };
+    delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)$/ } keys %self};
+    return \%self;
+}
+
 package Biblio::Folio::Object;
 
 @Biblio::Folio::Instance::ISA =
@@ -755,6 +761,12 @@ sub init {
 ###     }
     }
     return $self;
+}
+
+sub TO_JSON {
+    my %self = %{ shift() };
+    delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)$/ } keys %self};
+    return \%self;
 }
 
 sub cached {
