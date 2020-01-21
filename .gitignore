@@ -3,3 +3,6 @@
 /aux
 /lib/Biblio/FolioX
 /config.mk
+*.bak
+*.old
+/old

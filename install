@@ -1,11 +1,27 @@
 #!/bin/sh
 
+dryrun=NO
+if [ $1 = '-n' ]; then
+    dryrun=YES
+    shift
+fi
+
 PREFIX=${1:-/usr/local/folio}
 
 for dir in bin lib; do
     if [ -e $dir ]; then
-        mkdir -p $PREFIX/$dir
-        rsync -av $dir/ $PREFIX/$dir/
+        if [ $dryrun = YES ]; then
+            echo "mkdir -p $PREFIX/$dir" >&2
+            echo "rsync -av $dir/ $PREFIX/$dir/"
+            if [ -e $PREFIX/$dir/ ]; then
+                rsync -av --dry-run $dir/ $PREFIX/$dir/
+            else
+                rsync -av --dry-run $dir/ /tmp/
+            fi
+        else
+            mkdir -p $PREFIX/$dir
+            rsync -av $dir/ $PREFIX/$dir/
+        fi
     fi
 done
 
