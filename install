@@ -1,0 +1,12 @@
+#!/bin/sh
+
+PREFIX=${1:-/usr/local/folio}
+
+for dir in bin lib; do
+    if [ -e $dir ]; then
+        mkdir -p $PREFIX/$dir
+        rsync -av $dir/ $PREFIX/$dir/
+    fi
+done
+
+chmod a+x $PREFIX/bin/
