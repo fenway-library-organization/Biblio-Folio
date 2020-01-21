@@ -13,13 +13,14 @@ my %tok2const = (
     'true' => JSON::true,
     'false' => JSON::false,
 );
+my (%class, %property);
+initialize_classes_and_properties();
 
 sub new {
     my $cls = shift;
     unshift @_, 'name' if @_ % 2;
     my $self = bless { @_ }, $cls;
-    $self->init;
-    return $self;
+    return $self->init;
 }
 
 sub name { @_ > 1 ? $_[0]{'name'} = $_[1] : $_[0]{'name'} }
@@ -58,7 +59,7 @@ sub _read_config {
         else {
             my ($k, $v) = split /=/, $_, 2;
             die "config syntax: $_" if !defined $v;
-            ($k, $v) = (camelize(trim($k)), trim($v));
+            ($k, $v) = (camel(trim($k)), trim($v));
             $k =~ s/\s+/-/g;
             $hash->{$k} = $v;
         }
@@ -82,6 +83,7 @@ sub init {
     $self->{'root'} = $folio->root . "/site/$name";
     $self->_read_config_files;
     $self->_read_map_files;
+    $self->_read_cache;
     $self->_build_matching($_) for qw(users);
     my $ua = LWP::UserAgent->new;
     $ua->agent("folio/0.1");
@@ -126,6 +128,13 @@ sub _read_map_files {
     $self->{'uuidunmap'} = \%uuidunmap;
 }
 
+sub _read_cache {
+    my ($self) = @_;
+    my %cache;
+    # TODO
+    $self->{'cached_object'} = \%cache;
+}
+
 sub decode_uuid {
     my ($self, $name, $uuid) = @_;
     return $self->{'uuidunmap'}{$name}{$uuid};
@@ -164,7 +173,7 @@ sub state {
 sub login {
     my ($self, %arg) = @_;
     my %state = %{ $self->state };
-    return if $state{'logged_in'} && $arg{'reuse_token'};
+    return $self if $state{'logged_in'} && $arg{'reuse_token'};
     my $config = $self->config;
     my $res = $self->post('/authn/login', {
         'username' => $config->{'endpoint'}{'user'},
@@ -177,6 +186,83 @@ sub login {
     @state{qw(token logged_in user_id)} = ($token, 1, $user_id);
     $self->state(\%state);
     return $self;
+}
+
+sub instance {
+    my $self = shift;
+    return $self->object('instance', @_);
+}
+
+sub location {
+    my $self = shift;
+    return $self->object('location', @_);
+}
+
+sub cached {
+    my ($self, $kind, $id) = @_;
+    return if !defined $id;
+    my $key = $kind . ':' . $id;
+    my $cached = $self->{'cached_object'}{$key};
+    my $t = time;
+    return $cached->{'object'} if $cached && $cached->{'expiry'} >= $t;
+    my $obj = eval { $self->object($kind, $id) };
+    my $ttl = $obj->ttl || 3600;  # One hour
+    if ($ttl != -1) {
+        $self->{'cached_object'}{$key} = {
+            'object' => $obj,
+            'expiry' => $t + $ttl,
+        };
+    }
+    return $obj;
+}
+
+sub object {
+    my ($self, $kind, @args) = @_;
+    my $cls = 'Biblio::Folio::' . ucfirst camel($kind);
+    if (@args == 1) {
+        my ($arg) = @args;
+        if (ref $arg) {
+            @args = %$arg;
+        }
+        else {
+            @args = ('id' => $arg);
+        }
+    }
+    if (!eval "keys %${cls}::") {
+        define_class($cls);
+    }
+    return $cls->new('_site' => $self, @args)->fetch;
+}
+    
+sub define_class {
+    my ($cls) = @_;
+    my $ttl = $class{$cls}{'ttl'} || 1;
+    my $uri = $class{$cls}{'uri'} || die;
+    my $pkg_code = qq{
+        package $cls;
+        \@${cls}::ISA = qw(Biblio::Folio::Object);
+        sub ttl { $ttl }
+        sub _obj_uri { q{$uri} }
+    };
+    # TODO
+}
+
+sub objects {
+    my ($self, $uri, %arg) = @_;
+    my $key = delete $arg{'key'};
+    my $res = eval { $self->get($uri, \%arg) };
+    return if !$res;
+    my $content = $json->decode($res->content);
+    my $n = delete $content->{'totalRecords'};
+    delete @$content{qw(resultInfo errorMessages)};
+    if (!defined $key) {
+        my @keys = keys %$content;
+        die "which key?" if @keys != 1;
+        ($key) = @keys;
+    }
+    my $objects = $content->{$key};
+    die "not an array: $key" if !$objects || ref($objects) ne 'ARRAY';
+    return $objects;
 }
 
 sub _build_matching {
@@ -406,7 +492,7 @@ sub req {
     my $config = $self->config;
     my $state = $self->state;
     my $uri = URI->new($config->{'endpoint'}{'uri'} . $url);
-    if ($content && ($method eq 'GET' || $method eq 'DELETE')) {
+    if ($content && keys %$content && ($method eq 'GET' || $method eq 'DELETE')) {
         $uri->query_form(%$content);
     }
     my $req = HTTP::Request->new($method, $uri);
@@ -442,10 +528,16 @@ sub norm {
     return $_;
 }
 
-sub camelize {
+sub camel {
     local $_ = shift;
-    s/\s+(.)/\U$1/g;
+    s/[_\s]+(.)/\U$1/g;
     return $_;
+}
+
+sub uncamel {
+    local $_ = shift;
+    s/(?<=[a-z])(?=[A-Z])/_/g;
+    return lc $_;
 }
 
 sub _apply_update_to_user {
@@ -456,6 +548,394 @@ sub _apply_update_to_user {
     1;  # TODO
     return @changes;
 }
+
+sub source {
+    my $self = shift;
+    my $res;
+    if (@_ == 1) {
+        my $id = shift;
+        return $self->object('source' => $id);
+        #$res = eval { $self->get("/source-storage/records/$id", { @_ }) }
+        #    or return;
+        #$res = $json->decode($res->content);
+    }
+    else {
+        my %arg = @_;
+        if ($arg{'instance'}) {
+            my $id = $arg{'instance'};
+            $res = eval { $self->get('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'}) }
+                or return;
+            $res = $json->decode($res->content);
+        }
+        elsif ($arg{'query'}) {
+            my $query = $arg{'query'};
+            $res = eval { $self->get('/source-storage/records', {'query' => $query, 'limit' => 2}) }
+                or return;
+            $res = $res->{'records'}
+                or return;
+            return if ref($res) ne 'ARRAY' || @$res != 1;
+            $res = $res->[0];
+        }
+        else {
+            die '$site->source($id|instance=>$id|query=>$cql)';
+        }
+    }
+    return Biblio::Folio::SourceRecord->new('_site' => $self, %$res);
+}
+
+sub initialize_classes_and_properties {
+    my %unresolved;
+    my %class;
+    # Property name (without Id/Ids)    Definition
+    # Key to property definitions:
+    #   =PROP   same as PROP (must be the only flag)
+    #   +       cached (default TTL)
+    #   NUM     cached TTL
+    #   auto    auto-instantiated
+    #   :CLASS  class to use
+    my $properties = q{
+        addressTypeId                       +3600   /addresstypes/{addresstypeId}
+        alternativeTitleTypeId              +3600   /alternative-title-types/{id}
+        callNumberTypeId                    +3600   /call-number-types/{id}
+        campusId                            +       /location-units/campuses/{id}
+        classificationTypeId                +3600   /classification-types/{classificationTypeId}
+        contributorNameTypeId               +3600   /contributor-name-types/{contributorNameTypeId}
+        contributorTypeId                   +3600   /contributor-types/{contributorTypeId}
+        copyrightStatusId                   +       /coursereserves/copyrightstatuses/{status_id}
+    ### countryId -- not a dereferenceable identifier
+        courseId                            +       /coursereserves/courses/{course_id}
+        courseListingId                     +       /coursereserves/courselistings/{listing_id}
+        courseTypeId                        +       /coursereserves/coursetypes/{type_id}
+        defaultServicePointId               =servicePointId
+        departmentId                        +       /coursereserves/departments/{department_id}
+        effectiveLocationId                 =locationId
+    ### externalId -- not a dereferenceable identifier
+    ### externalSystemId -- not a dereferenceable identifier
+        formerId                            +
+        holdingsNoteTypeId                  +
+        holdingsRecordId                    1
+        holdingsTypeId                      +
+        identifierTypeId                    +
+        illPolicyId                         +
+        inTransitDestinationServicePointId  =servicePointId
+        instanceId                          1
+        instanceFormatId                    +
+        instanceNoteTypeId                  +
+        instanceRelationshipTypeId          +
+        instanceTypeId                      +
+        institutionId                       +       /location-units/campuses/{id}
+        intervalId                          +
+        itemId                              +       /item-storage/items/%s
+        itemDamagedStatusId                 +
+        itemLevelCallNumberTypeId           =callNumberTypeId
+        itemNoteTypeId                      +
+        libraryId                           +       /location-units/campuses/{id}
+        locationId                          +
+        materialTypeId                      +
+        modeOfIssuanceId                    +
+        natureOfContentTermId               +
+        permanentLoanTypeId                 +
+        permanentLocationId                 +
+        platformId                          +
+        preferredContactTypeId              +
+        processingStatusId                  +
+        proxyUserId                         +
+        registerId                          +
+        registrarId                         +
+        relationshipId                      +
+        scheduleId                          +
+        servicePointId                      +
+        servicePointsId                     =servicePointId
+        servicepointId                      =servicePointId
+        sourceRecordId                      +
+        staffMemberId                       +
+        statisticalCodeId                   +
+        statisticalCodeTypeId               +
+        statusId                            +
+        subInstanceId                       +
+        superInstanceId                     +
+        temporaryLoanTypeId                 +
+        temporaryLocationId                 +
+        termId                              +
+        typeId                              +
+        userId                              +
+    };
+    foreach (split /\n/, $properties) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        s/^\s*(\S+)// or die "wtf?";
+        my $name = $1;
+        my @names = $name =~ m{Id/s$} ? ($name, $name.'s') : ($name);
+        foreach $name (@names) {
+            $unresolved{$name} = $1, next if /^\s+=\s*(\w+)/;
+            my %p = ('name' => $name);
+            my $kind;
+            if ($name =~ m{(.+)Ids?$}) {
+                $p{'kind'} = uncamel($1);
+            }
+            while (s/^\s+(?=\S)//) {
+                if (s/^[+]([0-9]*|(?=\s)|$)//) {
+                    $p{'ttl'} = length $1 ? $1 : 1;
+                }
+                elsif (s/^-(?:(?=\s)|$)//) {
+                    $p{'ttl'} = 0;
+                }
+                elsif (s/^!(\S+)//) {
+                    $p{'method'} = $1;
+                }
+                elsif (s/^%(\S+)//) {
+                    $kind = $p{'kind'} = $1;
+                }
+                elsif (s{^(/\S+)}{}) {
+                    $p{'uri'} = $1;
+                }
+            }
+            if (defined $kind) {
+                $p{'class'} = 'Biblio::Folio::' . ucfirst camel($kind);
+            }
+            $property{$name} = \%p;
+        }
+    }
+    my $n = 5;
+    while (keys(%unresolved) && $n--) {
+        foreach my $alias (keys %unresolved) {
+            my $name = $unresolved{$alias};
+            if (exists $property{$name}) {
+                $property{$alias} = $property{$name};
+                delete $unresolved{$alias};
+            }
+        }
+    }
+    my @unresolved = sort keys %unresolved;
+    die "unresolved property aliases: @unresolved" if @unresolved;
+}
+
+package Biblio::Folio::Object;
+
+@Biblio::Folio::Instance::ISA =
+@Biblio::Folio::HoldingsRecord::ISA =
+@Biblio::Folio::Item::ISA =
+@Biblio::Folio::SourceRecord::ISA =
+@Biblio::Folio::Location::ISA =
+@Biblio::Folio::CallNumberType::ISA =
+    qw(Biblio::Folio::Object);
+
+*camel = *Biblio::Folio::Site::camel;
+
+our $AUTOLOAD;
+
+sub ttl { 3600 }
+
+sub new {
+    my $cls = shift;
+    my $self = bless { @_ }, $cls;
+    return $self->init;
+}
+
+sub DESTROY { }
+
+sub init {
+    my ($self) = @_;
+    return $self;
+    # XXX
+    my $site = $self->site;
+    my @auto_deref = eval { $self->_auto_deref };
+    foreach my $method (@auto_deref) {
+        $self->$method;
+        next;
+# Old code:
+###     $prop =~ /^([-+]?)(.+)Id(s?)$/;
+###     my ($nocache, $newprop, $plural) = ($1, $2, $3);
+###     $newprop .= $plural;
+###     my $sub = $nocache ? $site->can('object') : $site->can('cached');
+###     if ($plural) {
+###         $self->{$newprop} = [ map { $sub->($site, $kind, $_) } @{ $self->{$prop} } ];
+###     }
+###     else {
+###         $self->{$newprop} = $sub->($site, $kind, $_);
+###     }
+    }
+    return $self;
+}
+
+sub cached {
+    unshift @_, shift(@_)->{'_site'};
+    goto &Biblio::Folio::Site::cached;
+}
+
+sub site {
+    return $_[0]{'_site'} = $_[1] if @_ > 1;
+    return $_[0]{'_site'};
+}
+
+sub fetch {
+    my ($self) = @_;
+    my $site = $self->site;
+    my $id = $self->{'id'};
+    my $res;
+    if (defined $id) {
+        my $uri = $self->_obj_uri;
+        $res = eval {
+            $self->site->get(sprintf $uri, $id);
+        };
+    }
+    else {
+        die "not yet implemented";
+    }
+    return if !$res;
+    %$self = (%$self, %{ $json->decode($res->content) });
+    return $self;
+}
+
+sub AUTOLOAD {
+    die if @_ > 1;
+    my ($self) = @_;
+    (my $called_as = $AUTOLOAD) =~ s/.*:://;
+    # NOTE:
+    #   ($key, $val) = (key under which the returned value is stored, the returned value)
+    #       ('title', '...')
+    #       ('callNumberType', { ... })
+    #   ($rkey, $rval) = (reference key, reference value)
+    #       ('callNumberTypeId', '84f4e01c-41fd-44e6-b0f1-a76330a56bed')
+    my $key = camel($called_as);
+    my $val = $self->{$key};
+    my $rkey;
+    if (exists $self->{$key.'Id'}) {
+        $rkey = $key.'Id';
+    }
+    elsif ($key =~ /^(.+)s$/ && exists $self->{$1.'Ids'}) {
+        ($key, $rkey) = ($1, $1.'Ids');
+    }
+    my $prop = $property{$key};
+    if (!defined $rkey || !defined $prop) {
+        # No dereferencing is possible
+        no strict 'refs';
+        *$AUTOLOAD = sub {
+            my ($self) = @_;
+            return $self->{$key};
+        };
+        return $val;
+    }
+    my $rval = $self->{$rkey};
+    my $kind = $prop->{'kind'};
+    my $ttl  = $prop->{'ttl'};
+    my $get_method = $self->can($prop->{'method'} || ($ttl ? 'cached' : 'object'));
+    if ($rkey =~ /Ids$/) {
+        no strict 'refs';
+        *$AUTOLOAD = sub {
+            my ($self) = @_;
+            my @vals = map { $get_method->($self, $kind, $self->{$key.'Id'}) } @$rval;
+            $val = $self->{$key} = \@vals;
+            return wantarray ? @vals : $val;
+        };
+    }
+    else {
+        no strict 'refs';
+        *$AUTOLOAD = sub {
+            my ($self) = @_;
+            return $self->{$key} = $get_method->($self, $kind, $self->{$key.'Ids'});
+        }
+    }
+    return if !defined $rval;  # NULL reference
+    goto &$AUTOLOAD;
+}
+
+package Biblio::Folio::Instance;
+
+sub ttl { 1 }
+
+sub _obj_uri { '/instance-storage/instances/%s' }
+
+sub holdings {
+    my ($self, $id_or_query) = @_;
+    my $site = $self->site;
+    my $holdings;
+    if (!defined $id_or_query) {
+        return @{ $self->{'holdings'} }
+            if $self->{'holdings'};
+        my $id = $self->{'id'};
+        $holdings = $site->objects('/holdings-storage/holdings', 'query' => "instanceId==$id");
+    }
+    elsif (!ref $id_or_query) {
+        $holdings = $site->objects('/holdings-storage/holdings', 'query' => $id_or_query);
+    }
+    else {
+        $holdings = $site->objects('/holdings-storage/holdings', %$id_or_query);
+    }
+    return if !$holdings;
+    $self->{'holdings'} = $holdings;
+    return map { Biblio::Folio::HoldingsRecord->new('_site' => $site, 'instance' => $self, %$_) } @$holdings;
+}
+
+package Biblio::Folio::HoldingsRecord;
+
+sub ttl { 1 }
+
+sub _obj_uri { '/holdings-storage/holdings/%s' }
+
+sub call_number { shift()->{'callNumber'} }
+
+sub items {
+    my ($self, $id_or_query) = @_;
+    my $site = $self->site;
+    my $items;
+    if (!defined $id_or_query) {
+        return @{ $self->{'items'} }
+            if $self->{'items'};
+        my $id = $self->{'id'};
+        $items = $site->objects('/item-storage/items', 'query' => "holdingsRecordId==$id");
+    }
+    elsif (!ref $id_or_query) {
+        $items = $site->objects('/item-storage/items', 'query' => $id_or_query);
+    }
+    else {
+        $items = $site->objects('/item-storage/items', %$id_or_query);
+    }
+    return if !$items;
+    $self->{'items'} = $items;
+    return map { Biblio::Folio::Item->new('_site' => $site, 'holdingsRecord' => $self, %$_) } @$items;
+}
+
+sub permanent_location {
+    my ($self) = @_;
+    return $self->{'permanentLocation'} = $self->cached('location' => $self->{'permanentLocationId'});
+}
+
+sub effective_location {
+    my ($self) = @_;
+    return $self->{'effectiveLocation'} = $self->cached('location' => $self->{'effectiveLocationId'});
+}
+
+sub call_number_type {
+    my ($self) = @_;
+    return $self->{'callNumberType'} = $self->cached('call_number_type' => $self->{'callNumberTypeId'});
+}
+
+package Biblio::Folio::SourceRecord;
+
+sub ttl { 1 }
+
+sub as_marc {
+    my ($self) = @_;
+    return $self->{'rawRecord'}{'content'};
+}
+
+package Biblio::Folio::Item;
+
+sub ttl { 1 }
+
+sub _obj_uri { '/item-storage/items/%s' }
+
+sub location {
+    my ($self) = @_;
+    return $self->cached('location' => $self->{'effectiveLocationId'});
+}
+
+sub Biblio::Folio::Location::_obj_uri       { '/locations/%s' }
+sub Biblio::Folio::CallNumberType::_obj_uri { '/call-number-types/%s' }
+sub Biblio::Folio::LoanType::_obj_uri       { '/loan-types/%s' }
+sub Biblio::Folio::Institution::_obj_uri    { '/location-units/institutions/%s' }
+sub Biblio::Folio::Campus::_obj_uri         { '/location-units/campuses/%s' }
+sub Biblio::Folio::Library::_obj_uri        { '/location-units/libraries/%s' }
 
 1;
 
