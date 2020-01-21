@@ -54,8 +54,7 @@ EOS
 
 sub cmd_get {
     orient();
-    $usage = "get URI [KEY=VAL]...";
-    usage if !@ARGV;
+    usage "get URI [KEY=VAL]..." if !@ARGV;
     my @args = (shift @ARGV);
     if (@ARGV) {
         my %arg;
@@ -66,6 +65,26 @@ sub cmd_get {
         push @args, \%arg;
     }
     my $res = $site->get(@args);
+    print $json->encode($json->decode($res->content));
+}
+
+sub cmd_post {
+    orient();
+    usage "post URI JSONFILE|[KEY=VAL]..." if !@ARGV;
+    my $uri = shift @ARGV;
+    my @args;
+    if (@ARGV == 1 && $ARGV[0] !~ /^([^=]+)=(.*)$/) {
+        push @args, read_json(oread(shift @ARGV));
+    }
+    elsif (@ARGV) {
+        my %arg;
+        foreach (@ARGV) {
+            usage if !/^([^=]+)=(.*)$/;
+            $arg{$1} = $2;
+        }
+        push @args, \%arg;
+    }
+    my $res = $site->post($uri, @args);
     print $json->encode($json->decode($res->content));
 }
 
@@ -102,6 +121,50 @@ sub cmd_instance_search {
         'query' => $cql,
     });
     print $srec->content;
+}
+
+sub cmd_instance_harvest {
+    my $format = 'MARC';
+    my %with;
+    orient(
+        'j|as-json' => sub { $format = 'JSON' },
+        'm|as-marc' => sub { $format = 'MARC' },
+        't|as-text' => sub { $format = 'TEXT' },
+        'H|with-holdings' => \$with{'holdings'},
+        'I|with-items'    => \$with{'items'},
+    );
+    $with{'holdings'} = 1 if $with{'items'};
+    usage "instance harvest [FILE]" if @ARGV > 1;
+    my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+    while (<$fh>) {
+        chomp;
+        s/\s+.*//;
+        my $id = $_;
+        my $instance = $site->instance($id);
+        my $source = $site->source('instance' => $id);
+        if ($with{'holdings'}) {
+            my @holdings = $instance->holdings;
+            foreach my $holding (@holdings) {
+                my $eff_loc = $holding->effective_location;
+                my $perm_loc = $holding->permanent_location;
+                my $cnum_type = $holding->call_number_type;
+                my $cnum = $holding->call_number;
+                if ($with{'items'}) {
+                    my @items = $holding->items;
+                    foreach my $item (@items) {
+                        1;
+                    }
+                }
+            }
+        }
+        if ($format eq 'MARC') {
+            my $marc = eval { $source->as_marc };
+            print($marc), next if defined $marc;
+            print STDERR "not a MARC record: $id\n";
+        }
+        elsif ($format eq 'JSON') {
+        }
+    }
 }
 
 sub cmd_holding {
@@ -187,11 +250,29 @@ sub cmd_source_get {
 }
 
 sub cmd_source_search {
-    orient();
+    my %arg;
+    orient(
+        'm|offset=i' => \$arg{'offset'},
+        'n|limit=i' => \$arg{'limit'},
+        'o|order-by=s' => \$arg{'order_by'},
+    );
     usage "source search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    my $srec = eval { search_source_record_storage($cql) };
-    print $srec->content;
+    print cql_search_results('/source-storage/records', $cql, %arg);
+}
+
+sub cmd_source_replace {
+	orient();
+	usage "source replace [MARCFILE]" if @ARGV != 1;
+    my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
+    while (my ($record) = read_marc_records($fh, 1)) {
+		my $id = marc_source_record_id($record);
+        my $res = $site->post("/source-storage/records/$id", 
+			'recordType' => 'MARC',
+			# ...
+		);
+		1;
+	}
 }
 
 sub cmd_job {
@@ -201,7 +282,10 @@ sub cmd_job {
 sub cmd_job_begin {
     orient();
     usage "job begin" if @ARGV;
-	my $jobexec = content($site->post('/change-manager/jobExecutions'));
+    my %job = (
+        'id' => $folio->uuid,
+    );
+	my $jobexec = content($site->post('/change-manager/jobExecutions', \%job));
     my $j = $jobexec->{'id'};
     my $snapshot = content($site->post('/source-storage/snapshots', {
         'jobExecutionId' => $j,
@@ -354,6 +438,19 @@ sub cmd_address_types {
 
 # --- Supporting functions
 
+sub cql_search_results {
+    my ($uri, $cql, %arg) = @_;
+    my $srec = eval {
+        $site->get($uri, {
+            'query' => $cql,
+            _optional('offset' => $arg{'offset'}),
+            _optional('limit' => $arg{'limit'}),
+            _optional('order_by' => $arg{'order_by'}),
+        })
+    };
+    return $srec->content if $srec;
+}
+
 sub match_or_load_users {
     my ($verb, %arg) = @_;
     my ($batch_size, $parser_cls) = @arg{qw(batch_size parser_cls)};
@@ -470,6 +567,7 @@ sub update_or_create_user {
 sub read_marc_records {
     my ($fh, $n) = @_;
     my @records;
+	$n ||= 1000;
     while ($n--) {
         local $/ = "\x1d";
         my $marc = <$fh>;
@@ -479,10 +577,21 @@ sub read_marc_records {
     return \@records;
 }
 
+sub read_json {
+    my ($fh) = @_;
+    local $/;
+    my $str = <$fh>;
+    return if !defined $str;
+    return $json->decode($str);
+}
+
 sub oread {
     my ($f) = @_;
     my $fh;
-    if ($f =~ /\.gz/) {
+    if ($f eq '-' || $f eq '/dev/stdin') {
+        return \*STDIN;
+    }
+    elsif ($f =~ /\.gz/) {
         open $fh, '-|', 'gunzip', '--stdout', $f
             or fatal "exec gunzip $f: $!";
     }
@@ -531,13 +640,6 @@ sub get_item {
     return $site->get("/item-storage/items/$id");
 }
 
-sub search_source_record_storage {
-    my ($cql) = @_;
-    return $site->get("/source-storage/records", {
-        'query' => $cql,
-    });
-}
-
 sub login_if_necessary {
     my $token = $site->token;
     $site->login('reuse_token' => 1);
@@ -571,7 +673,7 @@ sub use_class {
 
 sub orient {
     $root = '/usr/local/folio';
-    $site_name ||= 'default';
+    usage if !defined $site_name;
     # $site_name = $1, shift @ARGV
     #     if $ARGV[0] =~ /^[@](.+)/;
     GetOptions(
@@ -606,23 +708,41 @@ sub fatal {
 }
 
 sub usage {
-    $usage = shift if @_;
-    $usage ||= 'COMMAND [ARG...]';
-    print STDERR "usage: $prog $usage\n";
-    if (!@_) {
-        if (open my $fh, '<', $progfile) {
-            my @commands;
-            my $incmd;
-            while (<$fh>) {
-                $incmd = 1, next if /^sub cmd_/;
-                $incmd = 0, next if /^\}/;
-                push @commands, '  '.$1
-                    if /^(?:    |\t)usage "(.+)"/ && $incmd;
-            }
-            print STDERR $_, "\n" for 'commands:', sort @commands;
+    my $usage;
+    my @commands;
+    my @caller = caller(1);
+    (my $cmd = $caller[3] || '') =~ s/^([^:]+::)*cmd_//;
+    if (@_) {
+        $usage = '@SITE ' . shift;
+    }
+    if (open my $fh, '<', $progfile) {
+        my $incmd;
+        while (<$fh>) {
+            $incmd = $1, next if /^sub cmd_(\S+)/;
+            undef($incmd), next if /^\}/;
+            next if !/^(?:    |\t)usage "(.+)"/ || !$incmd;
+            push @commands, $1;
+            $usage = '@SITE ' . $1 if $incmd eq $cmd;
         }
     }
+    $usage ||= '@SITE COMMAND [ARG...]';
+    print STDERR "usage: $prog $usage\n";
+    print STDERR "commands:\n" if @commands;
+    print STDERR '  ', $_, "\n" for sort @commands;
     exit 1;
 }
 
 # vim:set et ts=4 sw=4 cin si ai:
+
+__END__
+{
+    "files": [],
+    "sourceType": "ONLINE",
+    "jobProfileInfo": {
+      "id": "ef17e108-5e13-5dc0-a617-4c8270514264",
+      "name": "Default job profile",
+      "dataType": "MARC"
+    },
+    "userId": "ef17e108-5e13-5dc0-a617-4c8270514264"
+}
+

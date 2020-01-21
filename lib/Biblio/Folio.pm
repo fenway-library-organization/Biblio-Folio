@@ -3,10 +3,14 @@ package Biblio::Folio;
 use strict;
 use warnings;
 
+use Data::UUID;
+
+my $ug = Data::UUID->new;
+
 sub new {
     my $cls = shift;
     my $self = bless {
-        'root' => '/usr/local/flolio',
+        'root' => '/usr/local/folio',
         @_,
     }, $cls;
     $self->init;
@@ -23,6 +27,10 @@ sub site {
 sub init {
     my ($self) = @_;
     my $root = $self->root;
+}
+
+sub uuid {
+    return $ug->create_str;
 }
 
 1;
