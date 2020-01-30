@@ -5,17 +5,12 @@ use warnings;
 
 use JSON;
 use Digest;
-use DBI;
 use Text::Balanced qw(extract_delimited);
 
-use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Site::Stash;
 
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
-
-our $AUTOLOAD;
 
 my $rxuuid = qr/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 my %tok2const = (
@@ -34,7 +29,6 @@ sub new {
     return $self->init;
 }
 
-sub folio { @_ > 1 ? $_[0]{'folio'} = $_[1] : $_[0]{'folio'} }
 sub name { @_ > 1 ? $_[0]{'name'} = $_[1] : $_[0]{'name'} }
 sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
 sub config { @_ > 1 ? $_[0]{'config'} = $_[1] : $_[0]{'config'} }
@@ -92,7 +86,7 @@ sub _read_config_files {
 sub init {
     my ($self) = @_;
     my $name = $self->name;
-    my $folio = $self->folio;
+    my $folio = $self->{'folio'};
     $self->{'root'} = $folio->root . "/site/$name";
     $self->_initialize_classes_and_properties;
     $self->_read_config_files;
@@ -163,7 +157,7 @@ sub expand_uuid {
 
 sub state {
     my $self = shift;
-    my $state_file = $self->file('var/state.json');
+    my $state_file = $self->root . '/var/state.json';
     my $state =  $self->{'state'};
     if (@_ == 0) {
         return $state if defined $state;
@@ -184,55 +178,12 @@ sub state {
     }
 }
 
-sub _stash {
-    my ($self, $name) = @_;
-    my $stashes = $self->{'_stash'};
-    return $stashes->{$name}
-        if exists $stashes->{$name};
-    my $dbh = $self->_dbh;
-    return $stashes->{$name} = Biblio::Folio::Site::Stash->new(
-        'name' => $name,
-        'site' => $self,
-        'dbh' => $dbh,
-    );
-}
-
-sub _dbh {
-    my ($self) = @_;
-    my $dbfile = $self->file("var/stash/main.sqlite");
-    return $self->{'_dbh'}
-        ||= DBI->connect("dbi:SQLite:dbname=$dbfile", '', '');
-}
-
-sub stash {
-    my $self = shift;
-    my $name = shift;
-    my $table = shift;
-    my $stash = $self->_stash($name);
-    if (@_ == 0) {
-        return;
-    }
-    elsif (@_ > 1) {
-        # @values = $site->stash($name, $table, @columns);
-        die "not yet implemented";
-    }
-    elsif (ref $_[0]) {
-        # $site->stash($name, $table, \%hash);
-        my %hash = %{ shift() };
-        my $id = delete $hash{'id'};
-        $stash->put($table, shift());
-    }
-    else {
-        die "bad call";
-    }
-}
-
 sub login {
     my ($self, %arg) = @_;
     my %state = %{ $self->state };
     return $self if $state{'logged_in'} && $arg{'reuse_token'};
     my $config = $self->config;
-    my $res = $self->POST('/authn/login', {
+    my $res = $self->post('/authn/login', {
         'username' => $config->{'endpoint'}{'user'},
         'password' => $config->{'endpoint'}{'password'},
     }) or die "login failed";
@@ -275,29 +226,13 @@ sub cached {
 
 sub class {
     my ($self, $pkg) = @_;
-    my $class = $self->{'_classes'}{$pkg};
-    return $class if $class && $class->is_defined;
-    my $kind = _pkg2kind($pkg);
-    $class ||= Biblio::Folio::Class->new(
-        'site' => $self,
-        'package' => $pkg,
-        'kind' => $kind,
-        'ttl' => 1,
-        'uri' => {},  # XXX
-    );
-    $class->define;
-}
-
-sub property {
-    my ($self, $p) = @_;
-    my $prop = $self->{'_properties'}{$p};
-    return $prop if $prop;
-    die "no such property: $prop";
+    return $self->{'_classes'}{$pkg} || die "no such class: $pkg";
 }
 
 sub object {
     my ($self, $kind, @args) = @_;
-    my $pkg = _kind2pkg($kind);
+    my $pkg = ($kind =~ /^[a-z]/) ? ucfirst camel($kind) : $kind;
+    $pkg = 'Biblio::Folio::' . $pkg if $pkg !~ /^Biblio::Folio/;
     if (@args == 1) {
         my ($arg) = @args;
         if (ref $arg) {
@@ -307,7 +242,6 @@ sub object {
             @args = ('id' => $arg);
         }
     }
-    my $class = $self->class($pkg);
     return $self->fetch($pkg->new('_site' => $self, '_json' => $self->json, @args));
 }
 
@@ -316,8 +250,8 @@ sub fetch {
     my $id = $obj->{'id'};
     my $res;
     if (defined $id) {
-        my $uri = $obj->_uri('fetch');
-        $res = eval { $self->GET(sprintf $uri, $id) };
+        my $uri = $obj->_uri;
+        $res = eval { $self->get(sprintf $uri, $id) };
     }
     else {
         die "not yet implemented";
@@ -327,19 +261,19 @@ sub fetch {
     return $obj->init;
 }
 
-### sub property {
-###     my ($self, $obj, $name) = @_;
-###     my $ref = ref $obj;
-###     return if $ref eq '';
-###     return $obj->property($name)
-###         if $ref =~ /::/ && $obj->can('property');
-###     die;
-### }
+sub property {
+    my ($self, $obj, $name) = @_;
+    my $ref = ref $obj;
+    return if $ref eq '';
+    return $obj->property($name)
+        if $ref =~ /::/ && $obj->can('property');
+    die;
+}
 
 sub objects {
     my ($self, $uri, %arg) = @_;
     my $key = delete $arg{'key'};
-    my $res = eval { $self->GET($uri, \%arg) };
+    my $res = eval { $self->get($uri, \%arg) };
     return if !$res;
     my $content = $self->json->decode($res->content);
     my $n = delete $content->{'totalRecords'};
@@ -453,7 +387,7 @@ sub match_users {
     my $query = _cql_or(@clauses);
     $query =~ s/\)$// or die "unbalanced parentheses"
         if $query =~ s/^\(//;
-    my $res = $self->GET('/users', {
+    my $res = $self->get('/users', {
         query => $query,
     });
     my $all_matches = $self->json->decode($res->content);
@@ -564,27 +498,15 @@ sub _get_attribute_from_dotted {
     return $obj->{$k};
 }
 
-sub GET {
+sub get {
     my $self = shift;
     unshift @_, $self, 'GET';
     goto &req;
 }
 
-sub POST {
+sub post {
     my $self = shift;
     unshift @_, $self, 'POST';
-    goto &req;
-}
-
-sub PUT {
-    my $self = shift;
-    unshift @_, $self, 'PUT';
-    goto &req;
-}
-
-sub DELETE {
-    my $self = shift;
-    unshift @_, $self, 'DELETE';
     goto &req;
 }
 
@@ -742,7 +664,7 @@ sub source {
     if (@_ == 1) {
         my $id = shift;
         return $self->object('source' => $id);
-        #$res = eval { $self->GET("/source-storage/records/$id", { @_ }) }
+        #$res = eval { $self->get("/source-storage/records/$id", { @_ }) }
         #    or return;
         #$res = $self->json->decode($res->content);
     }
@@ -750,13 +672,13 @@ sub source {
         my %arg = @_;
         if ($arg{'instance'}) {
             my $id = $arg{'instance'};
-            $res = eval { $self->GET('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'}) }
+            $res = eval { $self->get('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'}) }
                 or return;
             $res = $self->json->decode($res->content);
         }
         elsif ($arg{'query'}) {
             my $query = $arg{'query'};
-            $res = eval { $self->GET('/source-storage/records', {'query' => $query, 'limit' => 2}) }
+            $res = eval { $self->get('/source-storage/records', {'query' => $query, 'limit' => 2}) }
                 or return;
             $res = $res->{'records'}
                 or return;
@@ -772,7 +694,7 @@ sub source {
 
 sub _initialize_classes_and_properties {
     my ($self) = @_;
-    my (%class, %prop2class, %unresolved);
+    my (%class, %property, %unresolved);
     # Property name (without Id/Ids)    Definition
     # Key to property definitions:
     #   =PROP   same as PROP (must be the only flag)
@@ -780,66 +702,63 @@ sub _initialize_classes_and_properties {
     #   NUM     cached TTL
     #   auto    auto-instantiated
     #   :CLASS  class to use
-    my $file = $self->
     my $properties = q{
         ### UUIDs for short-lived objects:
-            courseId                   UUID +1      fetch:/coursereserves/courses/{course_id}
-            courseListingId            UUID +1      fetch:/coursereserves/courselistings/{listing_id}
-            holdingsRecordId           UUID +1      fetch:/holdings-storage/holdings/{holdingsRecordId}
-            instanceId                 UUID +1      fetch:/inventory/instances/{instanceId}
-            itemId                     UUID +1      fetch:/item-storage/items/%s
-            userId                     UUID +1      fetch:/users/{userId}
-        ### Non-properties:
-            jobExecutionId             UUID +1      fetch:/change-manager/jobExecutions/{id}
+            courseId                            UUID +1      /coursereserves/courses/{course_id}
+            courseListingId                     UUID +1      /coursereserves/courselistings/{listing_id}
+            holdingsRecordId                    UUID +1      /holdings-storage/holdings/{holdingsRecordId}
+            instanceId                          UUID +1      /inventory/instances/{instanceId}
+            itemId                              UUID +1      /item-storage/items/%s
+            userId                              UUID +1      /users/{userId}
         ### UUIDs for long-lived objects:
-            addressTypeId              UUID +3600   fetch:/addresstypes/{addresstypeId}
-            alternativeTitleTypeId     UUID +3600   fetch:/alternative-title-types/{id}
-            callNumberTypeId           UUID +3600   fetch:/call-number-types/{id}
-            campusId                   UUID +3600   fetch:/location-units/campuses/{id}
-            classificationTypeId       UUID +3600   fetch:/classification-types/{classificationTypeId}
-            contributorNameTypeId      UUID +3600   fetch:/contributor-name-types/{contributorNameTypeId}
-            contributorTypeId          UUID +3600   fetch:/contributor-types/{contributorTypeId}
-            copyrightStatusId          UUID +3600   fetch:/coursereserves/copyrightstatuses/{status_id}
-            courseTypeId               UUID +3600   fetch:/coursereserves/coursetypes/{type_id}
-            departmentId               UUID +3600   fetch:/coursereserves/departments/{department_id}
-            holdingsNoteTypeId         UUID +3600   fetch:/holdings-note-types/{id}
-            holdingsTypeId             UUID +3600   fetch:/holdings-types/{id}
-            identifierTypeId           UUID +3600   fetch:/identifier-types/{identifierTypeId}
-            illPolicyId                UUID +3600   fetch:/ill-policies/{id}
-            instanceFormatId           UUID +3600   fetch:/instance-formats/{instanceFormatId}
-            instanceNoteTypeId         UUID +3600   fetch:/instance-note-types/{id}
-            instanceRelationshipTypeId UUID +3600   fetch:/instance-relationship-types/{relationshipTypeId}
-            instanceTypeId             UUID +3600   fetch:/instance-types/{instanceTypeId}
-            institutionId              UUID +3600   fetch:/location-units/institutions/{id}
-            itemDamagedStatusId        UUID +3600   fetch:/item-damaged-statuses/{id}
-            itemNoteTypeId             UUID +3600   fetch:/item-note-types/{id}
-            libraryId                  UUID +3600   fetch:/location-units/libraries/{id}
-            locationId                 UUID +3600   fetch:/locations/{id}
-            materialTypeId             UUID +3600   fetch:/material-types/{materialtypeId}
-            modeOfIssuanceId           UUID +3600   fetch:/modes-of-issuance/{modeOfIssuanceId}
-            natureOfContentTermId      UUID +3600   fetch:/nature-of-content-terms/{id}
-            permanentLoanTypeId        UUID +3600   fetch:/loan-types/{loantypeId}
-            platformId                 UUID +3600   fetch:/platforms/{platformId}
-            preferredContactTypeId     UUID +3600   fetch:/no-api/{id}
-            processingStatusId         UUID +3600   fetch:/coursereserves/processingstatuses/{status_id}
-            scheduleId                 UUID +3600   fetch:/no-api/{id}
-            servicePointId             UUID +3600   fetch:/service-points/{servicepointId}
-            sourceRecordId             UUID +3600   fetch:/source-storage/records/{id}
-            statisticalCodeId          UUID +3600   fetch:/statistical-codes/{statisticalCodeId}
-            statisticalCodeTypeId      UUID +3600   fetch:/statistical-code-types/{statisticalCodeTypeId}
-            temporaryLoanTypeId        UUID +3600   fetch:/loan-types/{loantypeId}
-            termId                     UUID +3600   fetch:/coursereserves/terms/{term_id}
-        ### XXX not sure:
-            relationshipId             UUID +3600   fetch:/instance-relationship-types/{relationshipTypeId}
-            statusId                   UUID +3600   fetch:/instance-statuses/{instanceStatusId}
+            addressTypeId                       UUID +3600   /addresstypes/{addresstypeId}
+            alternativeTitleTypeId              UUID +3600   /alternative-title-types/{id}
+            callNumberTypeId                    UUID +3600   /call-number-types/{id}
+            campusId                            UUID +3600   /location-units/campuses/{id}
+            classificationTypeId                UUID +3600   /classification-types/{classificationTypeId}
+            contributorNameTypeId               UUID +3600   /contributor-name-types/{contributorNameTypeId}
+            contributorTypeId                   UUID +3600   /contributor-types/{contributorTypeId}
+            copyrightStatusId                   UUID +3600   /coursereserves/copyrightstatuses/{status_id}
+            courseTypeId                        UUID +3600   /coursereserves/coursetypes/{type_id}
+            departmentId                        UUID +3600   /coursereserves/departments/{department_id}
+            holdingsNoteTypeId                  UUID +3600   /holdings-note-types/{id}
+            holdingsTypeId                      UUID +3600   /holdings-types/{id}
+            identifierTypeId                    UUID +3600   /identifier-types/{identifierTypeId}
+            illPolicyId                         UUID +3600   /ill-policies/{id}
+            instanceFormatId                    UUID +3600   /instance-formats/{instanceFormatId}
+            instanceNoteTypeId                  UUID +3600   /instance-note-types/{id}
+            instanceRelationshipTypeId          UUID +3600   /instance-relationship-types/{relationshipTypeId}
+            instanceTypeId                      UUID +3600   /instance-types/{instanceTypeId}
+            institutionId                       UUID +3600   /location-units/institutions/{id}
+            itemDamagedStatusId                 UUID +3600   /item-damaged-statuses/{id}
+            itemNoteTypeId                      UUID +3600   /item-note-types/{id}
+            libraryId                           UUID +3600   /location-units/libraries/{id}
+            locationId                          UUID +3600   /locations/{id}
+            materialTypeId                      UUID +3600   /material-types/{materialtypeId}
+            modeOfIssuanceId                    UUID +3600   /modes-of-issuance/{modeOfIssuanceId}
+            natureOfContentTermId               UUID +3600   /nature-of-content-terms/{id}
+            permanentLoanTypeId                 UUID +3600   /loan-types/{loantypeId}
+            platformId                          UUID +3600   /platforms/{platformId}
+            preferredContactTypeId              UUID +3600   /no-api/{id}
+            processingStatusId                  UUID +3600   /coursereserves/processingstatuses/{status_id}
+            scheduleId                          UUID +3600   /no-api/{id}
+            servicePointId                      UUID +3600   /service-points/{servicepointId}
+            sourceRecordId                      UUID +3600   /source-storage/records/{id}
+            statisticalCodeId                   UUID +3600   /statistical-codes/{statisticalCodeId}
+            statisticalCodeTypeId               UUID +3600   /statistical-code-types/{statisticalCodeTypeId}
+            temporaryLoanTypeId                 UUID +3600   /loan-types/{loantypeId}
+            termId                              UUID +3600   /coursereserves/terms/{term_id}
+        ### Properties I'm not sure about:
+            relationshipId                      UUID +3600   /instance-relationship-types/{relationshipTypeId}
+            statusId                            UUID +3600   /instance-statuses/{instanceStatusId}
         ### Literals:
-            countryId                  LITERAL
-            externalId                 LITERAL
-            externalSystemId           LITERAL
-            formerId                   LITERAL
-            intervalId                 LITERAL
-            registerId                 LITERAL
-            registrarId                LITERAL
+            countryId                           LITERAL
+            externalId                          LITERAL
+            externalSystemId                    LITERAL
+            formerId                            LITERAL
+            intervalId                          LITERAL
+            registerId                          LITERAL
+            registrarId                         LITERAL
         ### Aliases:
             defaultServicePointId               = servicePointId
             effectiveLocationId                 = locationId
@@ -867,7 +786,7 @@ sub _initialize_classes_and_properties {
         foreach $name (@names) {
             local $_ = $propdef;
             $unresolved{$name} = $1, next if /^ = (\w+)/;
-            my %p;
+            my %p = ('name' => $name);
             my $kind;
             if ($name =~ m{(.+)Ids?$}) {
                 $kind = $p{'kind'} = uncamel($1);
@@ -875,7 +794,6 @@ sub _initialize_classes_and_properties {
             while (s/^ (?=\S)//) {
                 if (s/^[+]([0-9]*|(?= )|$)//) {
                     $p{'ttl'} = length $1 ? $1 : 1;
-                    $p{'cache'} = 1;
                 }
                 elsif (s/^-(?:(?= )|$)//) {
                     $p{'ttl'} = 0;
@@ -886,15 +804,9 @@ sub _initialize_classes_and_properties {
                 elsif (s/^%(\S+)//) {
                     $kind = $p{'kind'} = $1;
                 }
-                elsif (s{^(?:fetch:)?(/\S+)}{}) {
+                elsif (s{^(/\S+)}{}) {
                     (my $uri = $1) =~ s/{[^{}]+}/%s/;
-                    $p{'uri'}{'fetch'} = $uri;
-                }
-                elsif (s{^uri:(/\S+)}{}) {
-                    $p{'uri'}{'base'} = $1;
-                }
-                elsif (s{^search:(/\S+)}{}) {
-                    $p{'uri'}{'search'} = $1;
+                    $p{'uri'} = $uri;
                 }
                 elsif (s/^(UUID|LITERAL)//) {
                     $p{'type'} = $1;
@@ -908,11 +820,7 @@ sub _initialize_classes_and_properties {
                 $p{'package'} = $pkg;
                 $class{$pkg} = \%p;
             }
-            $prop2class{$name} = Biblio::Folio::Class->new(
-                'site' => $self,
-                'name' => $name,
-                %p,
-            );
+            $property{$name} = \%p;
         }
     }
     my $n = 5;
@@ -927,7 +835,6 @@ sub _initialize_classes_and_properties {
     }
     my @unresolved = sort keys %unresolved;
     die "unresolved property aliases: @unresolved" if @unresolved;
-    $self->{'_properties'} = \%property;
     my $blessings = q{
         Metadata                *.metadata
         Classification          Instance.classifications[]
@@ -949,11 +856,10 @@ sub _initialize_classes_and_properties {
             my ($from_cls, $from_property, $each) = ($1, $2, defined $3);
             $from_cls = 'Biblio::Folio::' . $from_cls if $from_cls ne '*';
             $class{$from_cls} ||= {
-                'site' => $site,
                 'kind' => uncamel($from_cls),
                 'blessings' => [],
                 'ttl' => 1,
-                'uri' => {},  # XXX
+                'uri' => q{/},  # XXX
             };
             push @{ $class{$from_cls}{'blessings'} }, {
                 'property' => $from_property,
@@ -963,25 +869,26 @@ sub _initialize_classes_and_properties {
         }
     }
     $self->{'_classes'} = \%class;
-    $self->_define_classes(values %class);
+    $self->defined_classes(values %class);
 }
 
-sub _quote {
-    my $str = shift;
-    return 'undef' if !defined $str;
-    die if ref $str;
-    return qq{"\Q$str\E"};
-}
-
-sub _kind2pkg {
-    my ($kind) = @_;
-    return 'Biblio::Folio::' . ucfirst camel($kind);
-}
-
-sub _pkg2kind {
-    my ($pkg) = @_;
-    $pkg =~ s/^Biblio::Folio:://;
-    return lcfirst uncamel($pkg);
+sub define_classes {
+    my $self = shift;
+    foreach my $class (@_) {
+        my $pkg = $class->{'package'} or next;
+        my $ttl = $class->{'ttl'} || 1;
+        my $uri = $class->{'uri'} || die;
+        my $pkg_code = qq{
+            package $pkg;
+            \@${pkg}::ISA = qw(Biblio::Folio::Object);
+            sub _ttl { $ttl }
+            sub _uri { q{$uri} }
+            1
+        };
+        my $ok = eval { eval $pkg_code };
+        eval { eval "use $pkg" };  # In case we have a separate module for it
+        die $@ if !$ok;
+    }
 }
 
 ### sub Biblio::Folio::Location::_uri       { '/locations/%s' }
@@ -995,29 +902,6 @@ sub TO_JSON {
     my %self = %{ shift() };
     delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)$/ } keys %self};
     return \%self;
-}
-
-sub AUTOLOAD {
-    # $site->user($user_id) --> $site->object('user', $user_id);
-    # $site->campus('query' => 'name = "Riverside Campus"');
-    my $self = shift;
-    die if !@_;
-    (my $kind = $AUTOLOAD) =~ s/.*:://;
-    my $pkg = ucfirst camel($kind);
-    my $class = eval { $self->class($pkg) };
-    if ($class) {
-        my $cache = $class->{'cache'};
-        unshift @_, $kind;
-        if ($cache && @_ == 2) {
-            goto &cached;
-        }
-        else {
-            goto &object;
-        }
-    }
-    else {
-        die $@;
-    }
 }
 
 1;

@@ -18,13 +18,15 @@ use LWP::UserAgent;
 use HTTP::Headers;
 use JSON;
 use File::Spec;
+use Time::HiRes qw(time);
+use MARC::Loop qw(marcparse marcfield marcbuild TAG VALREF SUBS);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
 (my $prog = $0) =~ s{.*/}{};
 my $progfile = File::Spec->rel2abs($0);
 
-my ($root, $folio, $site_name, $site, $json, $usage);
+my ($root, $folio, $site_name, $site, $json);
 # Common options
 my ($dryrun, $verbose);
 
@@ -40,6 +42,12 @@ $cmd =~ tr/-/_/;
 &{ __PACKAGE__->can('cmd_'.$cmd) or usage };
 
 # --- Command handlers
+
+sub cmd_status {
+    orient();
+    my $state = $site->state;
+	print $json->encode($state);
+}
 
 sub cmd_login {
     orient();
@@ -64,7 +72,7 @@ sub cmd_get {
         }
         push @args, \%arg;
     }
-    my $res = $site->get(@args);
+    my $res = $site->GET(@args);
     print $json->encode($json->decode($res->content));
 }
 
@@ -84,7 +92,27 @@ sub cmd_post {
         }
         push @args, \%arg;
     }
-    my $res = $site->post($uri, @args);
+    my $res = $site->POST($uri, @args);
+    print $json->encode($json->decode($res->content));
+}
+
+sub cmd_put {
+    orient();
+    usage "put URI JSONFILE|[KEY=VAL]..." if !@ARGV;
+    my $uri = shift @ARGV;
+    my @args;
+    if (@ARGV == 1 && $ARGV[0] !~ /^([^=]+)=(.*)$/) {
+        push @args, read_json(oread(shift @ARGV));
+    }
+    elsif (@ARGV) {
+        my %arg;
+        foreach (@ARGV) {
+            usage if !/^([^=]+)=(.*)$/;
+            $arg{$1} = $2;
+        }
+        push @args, \%arg;
+    }
+    my $res = $site->PUT($uri, @args);
     print $json->encode($json->decode($res->content));
 }
 
@@ -93,22 +121,26 @@ sub cmd_instance {
 }
 
 sub cmd_instance_get {
-    my ($with_holdings, $with_items);
+    my ($with_holdings, $with_items, @properties);
     orient(
         'h|with-holdings' => \$with_holdings,
         'i|with-items' => \$with_items,
+        'p|properties=s' => sub { push @properties, split /\,/, $_[1] },
     );
     usage "instance get INSTANCE_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
-        my $irec = eval { get_instance($id) };
+        my $instance = $site->instance($id);
         my ($err) = split /\n/, $@;
-        if ($irec) {
-            my $instance = $json->decode($irec->content);
-            print $json->encode($instance);
-        }
-        else {
+        if (!$instance) {
             $err = ': ' if $err =~ /\S/;
             print STDERR "instance $id not found$err\n";
+        }
+        elsif (@properties) {
+            my $propvals = $instance->properties(@properties);
+            print $json->encode($propvals);
+        }
+        else {
+            print $json->encode($instance);
         }
     }
 }
@@ -117,19 +149,63 @@ sub cmd_instance_search {
     orient();
     usage "instance search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    my $srec = $site->get("/inventory/instances", {
+    my $srec = $site->GET("/inventory/instances", {
         'query' => $cql,
     });
     print $srec->content;
+}
+
+sub cmd_instance_source {
+    subcmd();
+}
+
+sub cmd_instance_source_get {
+    my %format;
+    orient(
+        'J|as-json' => sub { $format{'JSON'} = 1 },
+        'M|as-marc' => sub { $format{'MARC'} = 1 },
+        'T|as-text' => sub { $format{'TEXT'} = 1 },
+    );
+    usage "instance source get [-jmt] INSTANCE_ID..." if !@ARGV;
+    usage if keys(%format) > 1;
+    $format{'JSON'} = 1 if keys(%format) == 0;
+    foreach my $id (@ARGV) {
+        my $res = $site->GET("/source-storage/formattedRecords/$id", {
+            identifier => 'INSTANCE',
+        });
+        my $content = $json->decode($res->content);
+        my $rectype = $content->{'recordType'};
+        if ($format{'MARC'}) {
+            if ($rectype ne 'MARC') {
+                print STDERR "record not in MARC format; $id\n";
+                next;
+            }
+            my $marc = $content->{'rawRecord'}{'content'};
+            print $marc;
+        }
+        elsif ($format{'TEXT'}) {
+            if ($rectype ne 'MARC') {
+                print STDERR "record not in MARC format; $id\n";
+                next;
+            }
+            print $content->{'parsedRecord'}{'formattedContent'};
+        }
+        else {
+            print $json->encode($content->{'parsedRecord'}{'content'});
+        }
+    }
+}
+
+sub cmd_instance_source_replace {
 }
 
 sub cmd_instance_harvest {
     my %format;
     my %with;
     orient(
-        'j|as-json' => sub { $format{'JSON'} = 1 },
-        'm|as-marc' => sub { $format{'MARC'} = 1 },
-        't|as-text' => sub { $format{'TEXT'} = 1 },
+        'J|as-json' => sub { $format{'JSON'} = 1 },
+        'M|as-marc' => sub { $format{'MARC'} = 1 },
+        'T|as-text' => sub { $format{'TEXT'} = 1 },
         'H|with-holdings' => \$with{'holdings'},
         'I|with-items'    => \$with{'items'},
     );
@@ -137,39 +213,59 @@ sub cmd_instance_harvest {
     usage if keys(%format) > 1;
     $format{'JSON'} = 1 if keys(%format) == 0;
     $with{'holdings'} = 1 if $with{'items'};
+    my $t0 = time;
     my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
     my @json_preamble = <<'EOS';
 {
 "instances":[
 EOS
-    my @json_postamble = <<'EOS';
-]
-}
-EOS
     print @json_preamble if $format{'JSON'};
+    my $num = 0;
+    my ($id, $instance, $source, @holdings);
     while (<$fh>) {
+        $num++;
         chomp;
         s/\s+.*//;
-        my $id = $_;
-        my $instance = $site->instance($id);
-        my $source = $site->source('instance' => $id);
-        if ($with{'holdings'}) {
-            my @holdings = $instance->holdings;
-            foreach my $holding (@holdings) {
-                my $eff_loc = $holding->effective_location;
-                my $perm_loc = $holding->permanent_location;
-                my $cnum_type = $holding->call_number_type;
-                my $cnum = $holding->call_number;
-                if ($with{'items'}) {
-                    my @items = $holding->items;
-                    foreach my $item (@items) {
-                        1;
+        $id = $_;
+        $instance = $site->instance($id);
+        if (!$instance) {
+            $instance = {
+                'id' => $id,
+                'deleted' => JSON::true,
+            };
+        }
+        else {
+            $instance->{'source'} = $source = $site->source('instance' => $id);
+            if ($with{'holdings'}) {
+                @holdings = $instance->holdings;
+                foreach my $holding (@holdings) {
+                    my $eff_loc = $holding->effective_location;
+                    my $perm_loc = $holding->permanent_location;
+                    my $cnum_type = $holding->call_number_type;
+                    my $cnum = $holding->call_number;
+                    if ($with{'items'}) {
+                        my @items = $holding->items;
+                        foreach my $item (@items) {
+                            1;
+                        }
                     }
                 }
             }
         }
+    }
+    continue {
         if ($format{'MARC'}) {
-            my $marc = eval { $source->as_marc };
+            my $marc;
+            if (defined $source) {
+                $marc = eval { $source->as_marc };
+            }
+            else {
+                my $leader = '00000dam a2200000 a 4500';
+                my @fields = ( marcfield('999', 'f', 'f', 'i' => $id) );
+                foreach my $holding (@holdings) {
+                }
+                $marc = marcbuild($leader, \@fields);
+            }
             print($marc), next if defined $marc;
             print STDERR "not a MARC record: $id\n";
         }
@@ -183,6 +279,13 @@ EOS
             @json_preamble = ();
         }
     }
+    my $dur = sprintf('%.1f', time - $t0);
+    my @json_postamble = <<EOS;
+],
+"totalRecords":$num
+"time":"$dur seconds"
+}
+EOS
     print "\n", @json_postamble if $format{'JSON'};
 }
 
@@ -211,7 +314,7 @@ sub cmd_holding_search {
     orient();
     usage "holding search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    my $srec = $site->get("/holdings-storage/holdings", {
+    my $srec = $site->GET("/holdings-storage/holdings", {
         'query' => $cql,
     });
     print $srec->content;
@@ -242,7 +345,7 @@ sub cmd_item_search {
     orient();
     usage "item search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    my $srec = $site->get("/item-storage/items", {
+    my $srec = $site->GET("/item-storage/items", {
         'query' => $cql,
     });
     print $srec->content;
@@ -270,28 +373,54 @@ sub cmd_source_get {
 
 sub cmd_source_search {
     my %arg;
+    my %format = ('JSON' => 1);
     orient(
         'm|offset=i' => \$arg{'offset'},
         'n|limit=i' => \$arg{'limit'},
         'o|order-by=s' => \$arg{'order_by'},
+        'd|deleted' => sub { $arg{'deleted'} = JSON::true },
+        'J|as-json' => sub { %format = ('JSON' => 1) },
+        'M|as-json' => sub { %format = ('MARC' => 1) },
     );
-    usage "source search CQL" if @ARGV != 1;
+    usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    print cql_search_results('/source-storage/records', $cql, %arg);
+    my $content = cql_search_results('/source-storage/records', $cql, %arg);
+    my ($total, $sources) = @$content{qw(totalRecords records)};
+    my $n = 0;
+    foreach my $srec (@$sources) {
+        $n++;
+        my $rectype = $srec->{'recordType'};
+        if ($format{'MARC'}) {
+            if ($rectype ne 'MARC') {
+                print STDERR "record not in MARC format: $cql [$n]\n";
+                next;
+            }
+            my $marc = $srec->{'rawRecord'}{'content'};
+            print $marc;
+        }
+        else {
+            print $json->encode($srec->{'parsedRecord'}{'content'});
+        }
+    }
 }
 
 sub cmd_source_replace {
-	orient();
-	usage "source replace [MARCFILE]" if @ARGV != 1;
+    orient();
+    usage "source replace [MARCFILE]" if @ARGV != 1;
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
-    while (my ($record) = read_marc_records($fh, 1)) {
-		my $id = marc_source_record_id($record);
-        my $res = $site->post("/source-storage/records/$id", 
-			'recordType' => 'MARC',
-			# ...
-		);
-		1;
-	}
+    while (my ($marcref) = read_marc_records($fh, 1)) {
+        my $id = marc_source_record_id($marcref);
+        my $res = $site->PUT("/source-storage/records/$id", 
+            'recordType' => 'MARC',
+            'rawRecord' => {
+                'id' => $folio->uuid,
+                'content' => $$marcref,
+            },
+            'snapshotId' => '',
+            'matchedId' => $id,
+        );
+        1;
+    }
 }
 
 sub cmd_job {
@@ -301,21 +430,98 @@ sub cmd_job {
 sub cmd_job_begin {
     orient();
     usage "job begin" if @ARGV;
+    my $user_id = $site->state->{'user_id'};
     my %job = (
-        'id' => $folio->uuid,
+        'files' => [],
+        'sourceType' => 'ONLINE',
+        'jobProfileInfo' => {
+            'id' => $folio->uuid,
+            'name' => 'Random job profile',
+            'dataType' => 'MARC'
+        },
+        'userId' => $user_id || $folio->uuid,
     );
-	my $jobexec = content($site->post('/change-manager/jobExecutions', \%job));
-    my $j = $jobexec->{'id'};
-    my $snapshot = content($site->post('/source-storage/snapshots', {
-        'jobExecutionId' => $j,
-        'status' => 'NEW',
-    }));
-    print <<"EOS";
-OK
-    job: $j
-    snapshot: $snapshot->{'id'}
+    my $jobexecs = content($site->POST('/change-manager/jobExecutions', \%job));
+    if ($jobexecs) {
+        my @jobexecs = @{ $jobexecs->{'jobExecutions'} };
+        foreach my $jobexec (@jobexecs) {
+            my $j = $jobexec->{'id'};
+            print "OK $j\n";
+        }
+        if (@jobexecs > 1) {
+            fatal "multiple jobs";
+        }
+    }
+    else {
+        fatal "no jobexecs returned";
+    }
+    # my $snapshot = content($site->POST('/source-storage/snapshots', {
+    #     'jobExecutionId' => $j,
+    #     'status' => 'NEW',
+    # }));
+    #     print <<"EOS";
+    # OK
+    #     job: $j
+    #     snapshot: $snapshot->{'id'}
+    # 
+    # EOS
+}
 
-EOS
+sub cmd_job_add {
+    # Add a batch of records to a job
+    my ($skip, $batch_size) = (0, 1000);
+    orient(
+        'p|skip=i' => \$skip,
+        'n|batch-size=i' => \$batch_size,
+    );
+    usage "job add JOB [FILE]" if @ARGV > 2 || @ARGV < 1;
+    my $j = shift @ARGV;
+    my $uri = "/change-manager/jobExecutions/$j/records";
+    my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
+    my $n = 0;
+    my $num_skipped;
+    if ($skip) {
+        $num_skipped = skip_marc_records($fh, $skip);
+    }
+    my %metadata = (
+        'contentType' => 'MARC_RAW',
+        'counter' => $skip,
+    );
+    my @records;
+    # Read the desired number of records (or until EOF)
+    if ($skip == 0 || $num_skipped == $skip) {
+        my $marcrefs = read_marc_records($fh, $batch_size);
+        foreach (@$marcrefs) {
+            push @records, { 'record' => $$_ };
+        }
+        $n += @$marcrefs;
+    }
+    my %dto = (
+        'recordsMetadata' => \%metadata,
+        'initialRecords' => \@records,
+    );
+    if ($n) {
+        $metadata{'last'} = JSON::false;
+        $metadata{'counter'} += $n;
+    }
+    elsif ($skip) {
+        $metadata{'last'} = JSON::true;
+    }
+    else {
+        fatal "no records to add to the job\n";
+    }
+    my $res = $site->POST($uri, \%dto);
+    if ($res->code eq '204') {
+        # Success
+        print "OK $j : $n records posted\n";
+    }
+    elsif ($res->code eq '404') {
+        fatal "no such job: $j";
+    }
+    elsif ($res->code eq '422') {
+        # Validation records
+        die;
+    }
 }
 
 sub cmd_source_batch {
@@ -326,13 +532,13 @@ sub cmd_source_batch_create {
     my $batch_size = 500;
     orient(
         'n|batch-size=i' => \$batch_size,
-    ) or usage;
+    );
     usage "source batch create [FILE]" if @ARGV > 1;
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
-    while (my $records = read_marc_records($fh, $batch_size)) {
-        my $batch = content($site->post('/source-storage/batch/records', {
-            'records' => $records,
-            'totalRecords' => scalar(@$records),
+    if (my $marcrefs = read_marc_records($fh, $batch_size)) {
+        my $batch = content($site->POST('/source-storage/batch/records', {
+            'records' => map { $$_ } $marcrefs,
+            'totalRecords' => scalar(@$marcrefs),
         }));
     }
 }
@@ -349,11 +555,11 @@ sub cmd_group_search {
     my ($map);
     orient(
         'm' => \$map,
-    ) or usage;
+    );
     usage "group search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
     my $groups = eval {
-        my $res = $site->get("/groups", {
+        my $res = $site->GET("/groups", {
             query => $query,
         });
         $json->decode($res->content)->{'usergroups'};
@@ -376,7 +582,7 @@ sub cmd_group_get {
     usage "group get ID..." if !@ARGV;
     my @groups;
     foreach my $id (@ARGV) {
-        my $group = eval { content($site->get("/groups/$id")) };
+        my $group = eval { content($site->GET("/groups/$id")) };
         if (defined $group) {
             push @groups, $group;
         }
@@ -396,7 +602,7 @@ sub cmd_user_search {
     );
     usage "user search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
-    my $users = content($site->get("/users", {
+    my $users = content($site->GET("/users", {
         'query' => $query,
         _optional('offset' => $offset),
         _optional('limit' => $limit),
@@ -411,7 +617,7 @@ sub cmd_user_get {
     usage "user get ID..." if !@ARGV;
     my @users;
     foreach my $id (@ARGV) {
-        my $user = eval { content($site->get("/users/$id")) };
+        my $user = eval { content($site->GET("/users/$id")) };
         if (defined $user) {
             push @users, $user;
         }
@@ -451,23 +657,29 @@ sub cmd_address {
 sub cmd_address_types {
     orient();
     usage "address types" if @ARGV;
-    my $res = content($site->get('/addresstypes'));
+    my $res = content($site->GET('/addresstypes'));
     print $json->encode($res);
 }
 
 # --- Supporting functions
 
+sub marc_source_record_id {
+    my ($marcref) = @_;
+    my ($leader, $fields) = marcparse($marcref, 'only' => ['999']);
+    return map { $$_ =~ /\x1fs([^\s\x1d-\x1f]+)/ ? ($1) : () } @$fields;
+}
+
 sub cql_search_results {
     my ($uri, $cql, %arg) = @_;
     my $srec = eval {
-        $site->get($uri, {
+        $site->GET($uri, {
             'query' => $cql,
             _optional('offset' => $arg{'offset'}),
             _optional('limit' => $arg{'limit'}),
             _optional('order_by' => $arg{'order_by'}),
         })
-    };
-    return $srec->content if $srec;
+    } or fatal "search failed: $cql";
+    return $json->decode($srec->content);
 }
 
 sub match_or_load_users {
@@ -551,7 +763,7 @@ sub update_or_create_user {
     my ($file, $n, $arg, $user, @matches) = @_;
     my $res;
     if (@matches == 0) {
-        $res = $site->post('/users', $user);
+        $res = $site->POST('/users', $user);
         if ($res->is_success) {
             $user = content($res);
             my $id = $user->{'id'};
@@ -569,7 +781,7 @@ sub update_or_create_user {
             print STDERR "IGN user $id unchanged: record $n in $file\n";
         }
         else {
-            my $res = $site->put("/users/$id", $match);
+            my $res = $site->PUT("/users/$id", $match);
             if ($res->is_success) {
                 print STDERR "UPD user $id updated: record $n in $file\n";
             }
@@ -583,15 +795,26 @@ sub update_or_create_user {
     }
 }
 
-sub read_marc_records {
+sub skip_marc_records {
     my ($fh, $n) = @_;
-    my @records;
-	$n ||= 1000;
+    my $n0 = $n;
     while ($n--) {
         local $/ = "\x1d";
         my $marc = <$fh>;
         last if !defined $marc;
-        push @records, $marc;
+    }
+    return $n - $n0;
+}
+
+sub read_marc_records {
+    my ($fh, $n) = @_;
+    my @records;
+    $n ||= 1000;
+    while ($n--) {
+        local $/ = "\x1d";
+        my $marc = <$fh>;
+        last if !defined $marc;
+        push @records, \$marc;
     }
     return \@records;
 }
@@ -641,22 +864,22 @@ sub subcmd {
 
 sub get_instance {
     my ($id) = @_;
-    return $site->get("/inventory/instances/$id");
+    return $site->GET("/inventory/instances/$id");
 }
 
 sub get_source_record {
     my ($id) = @_;
-    return $site->get("/source-storage/records/$id");
+    return $site->GET("/source-storage/records/$id");
 }
 
 sub get_holding {
     my ($id) = @_;
-    return $site->get("/holdings-storage/holdings/$id");
+    return $site->GET("/holdings-storage/holdings/$id");
 }
 
 sub get_item {
     my ($id) = @_;
-    return $site->get("/item-storage/items/$id");
+    return $site->GET("/item-storage/items/$id");
 }
 
 sub login_if_necessary {
@@ -761,16 +984,3 @@ sub usage {
 }
 
 # vim:set et ts=4 sw=4 cin si ai:
-
-__END__
-{
-    "files": [],
-    "sourceType": "ONLINE",
-    "jobProfileInfo": {
-      "id": "ef17e108-5e13-5dc0-a617-4c8270514264",
-      "name": "Default job profile",
-      "dataType": "MARC"
-    },
-    "userId": "ef17e108-5e13-5dc0-a617-4c8270514264"
-}
-
