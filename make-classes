@@ -1,0 +1,274 @@
+#!/usr/bin/perl
+
+use warnings;
+use strict;
+
+use constant OBJECT => 'Object';
+use constant qw(ONE ONE);
+use constant qw(MANY MANY);
+
+use String::Expando;
+
+my $expando = String::Expando->new;
+my $cls = OBJECT;
+my %object = (
+    'package' => x2pkg(OBJECT),
+    'kind' => undef,
+    'ttl' => undef,
+    'uri' => undef,
+    'methods' => {},
+);
+my $class = \%object;
+my %class = ( OBJECT() => $class );
+my %method;
+
+parse();
+build();
+
+# --- Functions
+
+sub parse {
+    while (<STDIN>) {
+        if (/^\[\*\]$/) {
+            $class = \%object;
+        }
+        elsif (/^\[(.+)\]$/) {
+            # Class def
+            $cls = $1;
+            my $pl;
+            if ($cls =~ s{/(.+)/(.+)}{$1}) {
+                $pl = $1;
+            }
+            elsif ($cls =~ s{/(.+)}{}) {
+                $pl = $cls . $1;
+            }
+            else {
+                $pl = $cls . 's';
+            }
+            my $pkg = x2pkg($cls);
+            my $kind = x2kind($cls);
+            $class = $class{$cls} ||= {
+                'package' => $pkg,
+                'kind' => $kind,
+                'ttl' => undef,
+                'uri' => undef,
+            };
+            my $methods = $method{OBJECT()} ||= {};
+            foreach my $x ($cls, $pl) {
+                my $meth = x2meth($x);
+                $methods->{$meth} ||= {
+                    'bless' => $pkg,
+                    'kind' => $kind,
+                    'property' => $x eq $cls ? x2ref($cls) : x2refs($cls),
+                    'method' => $meth,
+                };
+            }
+            #push @{ $methods->{x2meth($cls)}{'properties'} }, x2ref($cls);
+            #push @{ $methods->{x2meth($pl)}{'properties'} }, x2refs($cls);
+        }
+        elsif (/^$/) {
+            next;
+        }
+        elsif (/^(ttl|uri)\s*=\s*(.+)$/) {
+            $class->{$1} = $2;
+        }
+        elsif (/^(blessed\s*)?references\s*=\s*(.+)$/) {
+            my $bless = defined $1;
+            foreach my $p (split /,\s*/, $2) {
+                my $multi = $p =~ s/\[\]$//;
+                my $from_cls = OBJECT;
+                $from_cls = x2cls($1)
+                    if $p =~ s/^([^.]+)\.//;
+                my $prop = x2ref($p);
+                my $meth = x2meth($p);
+                my $methods = $method{$from_cls} ||= {};
+                # warn "redefined reference from $from_cls to $cls via $meth"
+                #     if exists $methods->{$meth};
+                $methods->{$meth} ||= {
+                    'bless' => x2pkg($cls),
+                    'property' => $p,
+                    'method' => $meth,
+                };
+                #push @{ $methods->{$meth}{'properties'} }, $p;
+            }
+        }
+        elsif (/^method\s*(\w+)\s*=\s*(.+)$/) {
+            my ($meth, $to_cls) = ($1, $2);
+            my ($multi, $uri, $prop);
+            if ($to_cls =~ s/\[\]//) {
+                $multi = 1;
+            }
+            if ($to_cls =~ s/\s+(\S+)$//) {
+                ($uri = $1) =~ s/{[^{}]+}/%s/;
+            }
+            if ($to_cls =~ s/\((\w+)\)$//) {
+                $prop = $1;
+            }
+            else {
+                $prop = $multi ? x2refs($to_cls) : x2ref($to_cls);
+            }
+            my $methods = $method{$cls} ||= {};
+            $methods->{$meth} = {
+                'bless' => x2pkg($to_cls),
+                'kind' => x2kind($to_cls),
+                'multi' => $multi,
+                'property' => $prop,
+                defined($uri) ? ('uri' => $uri) : (),
+            };
+        }
+### elsif (/^blessed\s+references\s*=\s*(.+)$/) {
+###     foreach my $p (split /,\s*/, $1) {
+###         my $prop = $p;
+###         my $from_cls = OBJECT;
+###         $from_cls = ucfirst camel($1)
+###             if $prop =~ s/^([^.]+)\.//;
+###         my $methods = $method{$from_cls} ||= {};
+###         my $meth = x2meth($prop);
+###         #warn "redefined reference from $from_cls to $cls via $meth"
+###         #    if exists $methods->{$meth};
+###         $methods->{$meth} = {
+###             'class' => $class,
+###             'method' => $prop,
+###             'properties' => [],
+###             'multi' => $multi,
+###             'bless' => 1,
+###         };
+###         push @{ $methods->{$meth}{'properties'} }, $p;
+###     }
+### }
+        elsif (/^(\w+)\s*=\s*(.+)$/) {
+            my ($k, $v) = ($1, $2);
+            $class->{$k} = $2;
+        }
+    }
+}
+
+sub build {
+    print <<'EOS';
+use strict;
+use warnings;
+
+use Biblio::Folio::Object;
+
+EOS
+    my $object = delete $class{OBJECT()};
+    foreach my $class ($object, sort { $a->{'package'} cmp $b->{'package'} } values %class) {
+        print <<'EOS';
+# ------------------------------------------------------------------------------
+
+EOS
+        my $pkg = $class->{'package'};
+        my $cls = x2cls($pkg);
+        my ($ttl, $uri) = @$class{qw(ttl uri)};
+        $uri =~ s/{[^{}]+}/%s/ if defined $uri;
+        printf qq{package %s;\n}, $pkg;
+        printf qq{\n\@%s::ISA = qw(Biblio::Folio::%s);\n}, $pkg, OBJECT
+            if $cls ne OBJECT;
+        printf qq{\nsub _ttl { %s }}, quote($ttl) if defined $ttl;
+        printf qq{\nsub _uri { %s }}, qq{'$uri'} if defined $uri;
+        print  qq{\n\n};
+        my $methods = $class->{'methods'} = $method{$cls} || {};
+        foreach my $m (sort keys %$methods) {
+            my $method = $methods->{$m};
+            my ($kind, $prop) = @$method{qw(kind property)};
+            if (defined $kind) {
+                my $to_cls = x2cls($kind);
+                my $accessor = $class{$to_cls}{'ttl'} ? 'cached' : 'object';
+                printf <<'EOS', $m, $accessor, $kind, $prop;
+sub %s {
+    my ($self) = @_;
+    return $self->site->%s('%s', $self->{'%s'});
+}
+
+EOS
+            }
+            else {
+                printf <<'EOS', $m, $prop;
+sub %s {
+    my ($self) = @_;
+    return $self->{'%s'};
+}
+
+EOS
+            }
+        }
+    }
+    print "1;\n\n";
+}
+
+sub trim {
+    local $_ = shift;
+    s/^\s+|\s+$//g;
+    return $_;
+}
+
+sub camel {
+    local $_ = shift;
+    s/[-_\s]+(.)/\U$1/g;
+    return $_;
+}
+
+sub uncamel {
+    local $_ = shift;
+    s/(?<=[a-z])(?=[A-Z])/_/g;
+    return lc $_;
+}
+
+sub quote {
+    my $str = shift;
+    return 'undef' if !defined $str;
+    die if ref $str;
+    return $str if $str =~ /^[0-9]+$/;
+    $str = qq{"\Q$str\E"};
+    $str =~ s{(\\\\)|\\/}{$1 ? $1 : '/' }eg;
+    return $str;
+}
+
+sub x2pkg {
+    my ($x) = @_;
+    return $x if $x =~ /^Biblio::Folio/;
+    return kind2pkg($x) if $x =~ /^[a-z_]+$/;
+    return kind2pkg(pkg2kind($x));
+}
+
+sub x2kind {
+    my ($x) = @_;
+    return pkg2kind(kind2pkg($x));
+}
+
+sub x2meth {
+    goto &x2kind;
+}
+
+sub x2ref {
+    my ($x) = @_;
+    $x =~ s/^Biblio::Folio:://;
+    $x = lcfirst camel($x);
+    $x =~ s/Id$//;
+    return $x . 'Id';
+}
+
+sub x2refs {
+    my ($x) = @_;
+    return x2ref($x) . 's';
+}
+
+sub x2cls {
+    my ($x) = @_;
+    $x = x2pkg($x);
+    $x =~ s/^Biblio::Folio:://;
+    return $x;
+}
+
+sub kind2pkg {
+    my ($kind) = @_;
+    return 'Biblio::Folio::' . ucfirst camel($kind);
+}
+
+sub pkg2kind {
+    my ($pkg) = @_;
+    $pkg =~ s/^Biblio::Folio:://;
+    return lcfirst uncamel($pkg);
+}
+
+1;

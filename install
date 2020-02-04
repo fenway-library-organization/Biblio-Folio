@@ -8,7 +8,7 @@ fi
 
 PREFIX=${1:-/usr/local/folio}
 
-for dir in bin lib; do
+for dir in bin lib conf; do
     if [ -e $dir ]; then
         if [ $dryrun = YES ]; then
             echo "mkdir -p $PREFIX/$dir" >&2

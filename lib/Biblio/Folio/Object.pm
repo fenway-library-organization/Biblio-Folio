@@ -11,7 +11,7 @@ use constant qw(UUID    UUID   );
 @Biblio::Folio::CallNumberType::ISA =
     qw(Biblio::Folio::Object);
 
-*camel = *Biblio::Folio::Site::camel;
+*_camel = *Biblio::Folio::Site::_camel;
 
 our $AUTOLOAD;
 
@@ -102,7 +102,7 @@ sub AUTOLOAD {
     #   ($rkey, $rval) = (reference key, reference value)
     #       ('callNumberTypeId', '84f4e01c-41fd-44e6-b0f1-a76330a56bed')
     my $site = $self->site;
-    my $key = camel($called_as);
+    my $key = _camel($called_as);
     my $val = $self->{$key};
     my ($prop, $rkey);
     if (exists $self->{$key.'Id'}) {

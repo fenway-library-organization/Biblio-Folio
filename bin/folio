@@ -5,6 +5,7 @@ $| = 1;
 use strict;
 use warnings;
 
+sub dd;
 sub usage;
 sub fatal;
 
@@ -12,14 +13,14 @@ use FindBin qw($Bin);
 use lib "$Bin/../lib";
 
 use Biblio::Folio;
-use Biblio::Folio::Site;
 
 use LWP::UserAgent;
 use HTTP::Headers;
 use JSON;
+use YAML::XS;
 use File::Spec;
 use Time::HiRes qw(time);
-use MARC::Loop qw(marcparse marcfield marcbuild TAG VALREF SUBS);
+use MARC::Loop qw(marcparse marcfield marcbuild TAG VALREF DELETE IND1 IND2 SUBS);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -28,10 +29,16 @@ my $progfile = File::Spec->rel2abs($0);
 
 my ($root, $folio, $site_name, $site, $json);
 # Common options
-my ($dryrun, $verbose);
+my ($dryrun, $verbose, %tracing);
 
+GetOptions(
+    's|site=s' => \$site_name,
+    'T|tracing:s' => sub {_parse_tracing($_[1]) },
+);
 usage if !@ARGV;
 if ($ARGV[0] =~ s/^\@(.+)//) {
+    fatal "ambiguous site name: -s $site_name or \@$1?"
+        if defined($site_name) && $site_name ne $1;
     $site_name = $1;
     shift @ARGV;
     usage if !@ARGV;
@@ -170,6 +177,8 @@ sub cmd_instance_source_get {
     usage if keys(%format) > 1;
     $format{'JSON'} = 1 if keys(%format) == 0;
     foreach my $id (@ARGV) {
+        my $source = $site->instance_source($id);
+        1;
         my $res = $site->GET("/source-storage/formattedRecords/$id", {
             identifier => 'INSTANCE',
         });
@@ -181,7 +190,19 @@ sub cmd_instance_source_get {
                 next;
             }
             my $marc = $content->{'rawRecord'}{'content'};
-            print $marc;
+            my $sid = $content->{'id'};
+            print_cooked_marc(
+                'marcref' => \$marc,
+                'instance_id' => $id,
+                'source_id' => $sid,
+                'strict' => 1,
+            );
+            #my %opt = (
+            #    'error' => sub { die @_ },
+            #);
+            #my ($leader, $fields, $marcref) = marcparse(\$marc, \%opt);
+            #1;
+            #print $marc;
         }
         elsif ($format{'TEXT'}) {
             if ($rectype ne 'MARC') {
@@ -359,15 +380,62 @@ sub cmd_source_get {
     orient();
     usage "source get SOURCE_RECORD_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
-        my $srec = eval { get_source_record($id) };
+        my $srec = eval { $json->decode($site->GET("/source-storage/records/$id")->content) };
         my ($err) = split /\n/, $@;
         if (defined $srec) {
-            1;
+            my $instance_id = $srec->{'externalIdsHolder'}{'instanceId'} || $srec->{'instanceId'};
+            print_cooked_marc(
+                'marcref' => \$srec->{'rawRecord'}{'content'}, 
+                'instance_id' => $instance_id,
+                'source_id' => $id,
+                'strict' => 1,
+            );
         }
         else {
             $err = ': ' if $err =~ /\S/;
             print STDERR "record $id not found$err\n";
         }
+    }
+}
+
+sub print_cooked_marc {
+    my %arg = @_;
+    my $marcref = $arg{'marcref'} || \$arg{'marc'};
+    my %sub = ('i' => $arg{'instance_id'}, 's' => $arg{'source_id'});
+    my @s999;
+    my %set;
+    foreach (sort keys %sub) {
+        $set{$_} = 1;
+        push @s999, $_ => $sub{$_};
+    }
+    my $dirty;
+    my ($leader, $fields);
+    if (keys %set) {
+        ($leader, $fields) = marcparse($marcref);
+        $dirty = 1;
+        my ($f999) = grep {
+            $_->[TAG] eq '999' &&
+            $_->[IND1] eq 'f'  &&
+            $_->[IND2] eq 'f'
+        } @$fields;
+        if ($f999) {
+            my $valref = $f999->[VALREF];
+            while ($$valref =~ /\x1f([is])([^\x1d-\x1f]+)/g) {
+                my $val = $sub{$_} or next;
+                delete $set{$1} if $2 eq $val;
+            }
+            $f999->[DELETE] = $dirty = keys %set;
+        }
+    }
+    elsif ($arg{'strict'}) {
+        die "no instance or source record IDs to insert into MARC record"
+    }
+    if ($dirty) {
+        push @$fields, marcfield('999', 'f', 'f', @s999);
+        print marcbuild($leader, $fields);
+    }
+    else {
+        print $$marcref;
     }
 }
 
@@ -869,7 +937,6 @@ sub get_instance {
 
 sub get_source_record {
     my ($id) = @_;
-    return $site->GET("/source-storage/records/$id");
 }
 
 sub get_holding {
@@ -932,7 +999,10 @@ sub orient {
             or fatal "readlink $root/site/$site_name: $!";
         $site_name =~ s{.*/}{};
     }
-    $site = $folio->site($site_name);
+    $site = $folio->site(
+        $site_name,
+        keys(%tracing) ? ('_tracing' => \%tracing) : (),
+    );
     $json = JSON->new->pretty->canonical->convert_blessed;
     if ($cmd ne 'login') {
         login_if_necessary();
@@ -945,6 +1015,20 @@ sub _optional {
     my ($k, $v) = @_;
     return if !defined $v;
     return ($k, $v);
+}
+
+sub _parse_tracing {
+    $tracing{'state'} = 'ON';
+    foreach (split /:/, shift) {
+        $tracing{'file'} = $1, next if m{^file=(.+)$};
+        $tracing{'file'} = '/dev/stderr', next if $_ eq 'stderr';
+        if (s/^show=//) {
+            foreach (split /,/) {
+                my $bool = s/^!// ? 0 : 1;
+                $tracing{'show_'.$_} = $bool;
+            }
+        }
+    }
 }
 
 sub fatal {
@@ -981,6 +1065,27 @@ sub usage {
     print STDERR "commands:\n" if @commands;
     print STDERR '  ', $_, "\n" for sort @commands;
     exit 1;
+}
+
+sub dd {
+    my @lines;
+    if (@_ >= 1 && eval { $_[0]->can('_uri') }) {
+        my $obj = shift;
+        my %obj = map {
+            /^_/ ? ()
+                 : ($_ => $obj->{$_})
+        } keys %$obj;
+        @lines = split /(?<=\n)/, Dump(bless \%obj, ref $obj);
+    }
+    else {
+        @lines = split /(?<=\n)/, Dump(@_);
+    }
+    if (@lines > 50 && open my $fh, '|-', 'less') {
+        print $fh @lines;
+    }
+    else {
+        print @lines;
+    }
 }
 
 # vim:set et ts=4 sw=4 cin si ai:

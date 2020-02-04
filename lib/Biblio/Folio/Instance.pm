@@ -1,8 +1,6 @@
 package Biblio::Folio::Instance;
 
-sub ttl { 1 }
-
-sub _obj_uri { '/instance-storage/instances/%s' }
+# sub _obj_uri { '/instance-storage/instances/%s' }
 
 sub holdings {
     my ($self, $id_or_query) = @_;

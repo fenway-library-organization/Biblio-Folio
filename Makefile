@@ -9,7 +9,16 @@ build: config.mk
 config.mk: config.mk.def
 	cp $< $@
 
-install:
+install: classes
 	./install $(PREFIX)
 
-.PHONY: build install
+classes: lib/Biblio/Folio/Classes.pm
+
+lib/Biblio/Folio/Classes.pm: conf/classes.conf make-classes
+	./make-classes < $< > $@
+
+diff:
+	diff -ur lib /usr/local/folio/lib || true
+	diff -ur bin /usr/local/folio/bin || true
+
+.PHONY: build install classes diff

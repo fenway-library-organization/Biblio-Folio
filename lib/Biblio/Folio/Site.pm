@@ -10,7 +10,19 @@ use Text::Balanced qw(extract_delimited);
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
+use Biblio::Folio::Util;
 use Biblio::Folio::Site::Stash;
+
+# Tracing: states
+use constant qw(ON       ON     );
+use constant qw(OFF      OFF    );
+# Tracing: actions
+use constant qw(START    START  );
+use constant qw(SHOW     SHOW   );
+use constant qw(HIDE     HIDE   );
+use constant qw(TOGGLE   TOGGLE );
+use constant qw(REQUEST  REQUEST);
+use constant qw(RESPONSE RESPONSE);
 
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
@@ -37,9 +49,15 @@ sub new {
 sub folio { @_ > 1 ? $_[0]{'folio'} = $_[1] : $_[0]{'folio'} }
 sub name { @_ > 1 ? $_[0]{'name'} = $_[1] : $_[0]{'name'} }
 sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
-sub config { @_ > 1 ? $_[0]{'config'} = $_[1] : $_[0]{'config'} }
 sub ua { @_ > 1 ? $_[0]{'ua'} = $_[1] : $_[0]{'ua'} }
 sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
+
+sub config {
+    my ($self, $key) = @_;
+    my $config = $self->{'config'};
+    return $config if @_ == 1;
+    return $config->{$key};
+}
 
 sub logged_in { @_ > 1 ? $_[0]{'state'}{'logged_in'} = $_[1] : $_[0]{'state'}{'logged_in'} }
 sub token { @_ > 1 ? $_[0]{'state'}{'token'} = $_[1] : $_[0]{'state'}{'token'} }
@@ -55,37 +73,20 @@ sub file {
     return $files[0];
 }
 
-sub _read_config {
-    my ($self, $file, $key) = @_;
-    $file = $self->file($file);
-    my $hash = my $config = $self->{'config'} ||= {};
-    $hash = $config = $hash->{$key} ||= {} if defined $key;
-    open my $fh, '<', $file or die "open $file: $!";
-    while (<$fh>) {
-        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
-        chomp;
-        if (/^\s*\[(.+)\]\s*$/) {
-            my $section = trim($1);
-            $section =~ s/\s+/-/g;
-            $hash = $section eq 'general' ? $config : ($config->{$section} ||= {});
-        }
-        else {
-            my ($k, $v) = split /=/, $_, 2;
-            die "config syntax: $_" if !defined $v;
-            ($k, $v) = (camel(trim($k)), trim($v));
-            $k =~ s/\s+/-/g;
-            $hash->{$k} = $v;
-        }
-    }
-}
-
 sub _read_config_files {
     my ($self) = @_;
-    my $config_file = $self->file('site.conf');
-    $self->_read_config('site.conf');
-    foreach my $file ($self->file('conf/*.conf')) {
+    my @files = (
+        $self->file('site.conf'),
+        $self->file('conf/*.conf'),
+    );
+    my %seen;
+    my $config = $self->{'config'} ||= {};
+    foreach my $file (@files) {
         $file =~ m{/([^/.]+)\.conf$};
-        $self->_read_config($file, $1);
+        my $name = $1;
+        next if $seen{$name}++;
+        undef $name if $name eq 'site';
+        Biblio::Folio::Util::read_config($file, $self->{'config'}, $name);
     }
 }
 
@@ -94,10 +95,11 @@ sub init {
     my $name = $self->name;
     my $folio = $self->folio;
     $self->{'root'} = $folio->root . "/site/$name";
-    $self->_initialize_classes_and_properties;
+    $self->_trace(START);
     $self->_read_config_files;
     $self->_read_map_files;
     $self->_read_cache;
+    # $self->_initialize_classes_and_properties;
     $self->_build_matching($_) for qw(users);
     my $ua = LWP::UserAgent->new;
     $ua->agent("folio/0.1");
@@ -231,10 +233,10 @@ sub login {
     my ($self, %arg) = @_;
     my %state = %{ $self->state };
     return $self if $state{'logged_in'} && $arg{'reuse_token'};
-    my $config = $self->config;
+    my $endpoint = $self->config('endpoint');
     my $res = $self->POST('/authn/login', {
-        'username' => $config->{'endpoint'}{'user'},
-        'password' => $config->{'endpoint'}{'password'},
+        'username' => $endpoint->{'user'},
+        'password' => $endpoint->{'password'},
     }) or die "login failed";
     my $token = $res->header('X-Okapi-Token')
         or die "login didn't yield a token";
@@ -275,17 +277,19 @@ sub cached {
 
 sub class {
     my ($self, $pkg) = @_;
+    return if $pkg eq '*';
+    $pkg = Biblio::Folio::Util::_2pkg($pkg);
     my $class = $self->{'_classes'}{$pkg};
     return $class if $class && $class->is_defined;
-    my $kind = _pkg2kind($pkg);
-    $class ||= Biblio::Folio::Class->new(
+    my $kind = Biblio::Folio::Util::_pkg2kind($pkg);
+    return $class ||= Biblio::Folio::Class->new(
         'site' => $self,
         'package' => $pkg,
         'kind' => $kind,
         'ttl' => 1,
         'uri' => {},  # XXX
     );
-    $class->define;
+    # $class->define;
 }
 
 sub property {
@@ -297,33 +301,42 @@ sub property {
 
 sub object {
     my ($self, $kind, @args) = @_;
-    my $pkg = _kind2pkg($kind);
+    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
     if (@args == 1) {
         my ($arg) = @args;
-        if (ref $arg) {
+        my $r = ref $arg;
+        if ($r eq 'ARRAY') {
+            return map {
+                $r = ref $_;
+                $r eq 'HASH' ? $self->fetch($pkg->new('_site' => $self, '_json' => $self->json, %$_))
+                             : die "I don't know how to fetch a(n) $r";
+            } @$arg;
+        }
+        elsif ($r eq 'HASH') {
             @args = %$arg;
         }
         else {
             @args = ('id' => $arg);
         }
     }
-    my $class = $self->class($pkg);
     return $self->fetch($pkg->new('_site' => $self, '_json' => $self->json, @args));
 }
 
 sub fetch {
     my ($self, $obj) = @_;
-    my $id = $obj->{'id'};
-    my $res;
-    if (defined $id) {
-        my $uri = $obj->_uri('fetch');
-        $res = eval { $self->GET(sprintf $uri, $id) };
+    my $uri = $obj->_uri;
+    if (defined $uri) {
+        my $id = $obj->{'id'};
+        my $res;
+        if (defined $id) {
+            $res = eval { $self->GET(sprintf $uri, $id) };
+        }
+        else {
+            die "not yet implemented";
+        }
+        return if !$res;
+        %$obj = (%$obj, %{ $self->json->decode($res->content) });
     }
-    else {
-        die "not yet implemented";
-    }
-    return if !$res;
-    %$obj = (%$obj, %{ $self->json->decode($res->content) });
     return $obj->init;
 }
 
@@ -522,7 +535,7 @@ sub _cql_or {
 
 sub _matchpoints {
     my ($self, $type, $obj) = @_;
-    my $matching = $self->config->{$type}{'match'} ||= {};
+    my $matching = $self->config($type)->{'match'} ||= {};
     my @mp;
     while (my ($k, $mp) = each %$matching) {
         my $v = _get_attribute_from_dotted($obj, $mp->{'from'} || $k);
@@ -589,15 +602,15 @@ sub DELETE {
 }
 
 sub req {
-    my ($self, $method, $url, $content) = @_;
-    my $config = $self->config;
+    my ($self, $method, $path, $content) = @_;
+    my $endpoint = $self->config('endpoint');
     my $state = $self->state;
-    my $uri = URI->new($config->{'endpoint'}{'uri'} . $url);
+    my $uri = URI->new($endpoint->{'uri'} . $path);
     if ($content && keys %$content && ($method eq 'GET' || $method eq 'DELETE')) {
         $uri->query_form(%$content);
     }
     my $req = HTTP::Request->new($method, $uri);
-    $req->header('X-Okapi-Tenant' => $config->{'endpoint'}{'tenant'});
+    $req->header('X-Okapi-Tenant' => $endpoint->{'tenant'});
     $req->header('Accept' => 'application/json');
     # $req->header('X-Forwarded-For' => '69.43.75.60');
     if ($state->{'logged_in'}) {
@@ -607,14 +620,93 @@ sub req {
         $req->content_type('application/json');
         $req->content($self->json->encode($content));
     }
+    _trace($self, REQUEST => $req);
     my $ua = $self->ua;
     my $res = $ua->request($req);
+    _trace($self, RESPONSE => $res);
     if ($res->is_success) {
         return $res;
     }
     else {
-        die "FAIL: $method $url -> ", $res->status_line, "\n";
+        die "FAIL: $method $path -> ", $res->status_line, "\n";
     }
+}
+
+sub _trace {
+    my $self = shift;
+    my $action = shift;
+    my $tracing = $self->{'_tracing'}
+        or return;
+    my $state = $tracing->{'state'} ||= START;
+    if ($action eq START) {
+        _trace_start($tracing) if $state eq START;
+    }
+    elsif ($action eq ON) {
+        _trace_off($tracing) if $state eq ON;
+        _trace_on($tracing, @_);
+    }
+    elsif ($action eq OFF) {
+        _trace_off($tracing);
+    }
+    elsif ($state eq OFF) {
+        return;
+    }
+    elsif ($action eq REQUEST || $action eq RESPONSE) {
+        _trace_message($tracing, $action, @_);
+    }
+    elsif ($action eq SHOW) {
+        my $what = 'show_' . shift;
+        $tracing->{$what} = 1;
+    }
+    elsif ($action eq HIDE) {
+        my $what = 'show_' . shift;
+        $tracing->{$what} = 0;
+    }
+    elsif ($action eq TOGGLE) {
+        my $what = 'show_' . shift;
+        $tracing->{$what} = !$tracing->{$what};
+    }
+}
+
+sub _trace_start {
+}
+
+sub _trace_on {
+}
+
+sub _trace_off {
+}
+
+sub _trace_write {
+    my ($tracing, $str) = @_;
+    print STDERR $str;
+}
+
+sub _trace_message {
+    my ($tracing, $action, $msg) = @_;
+    my $str = $action eq REQUEST ? sprintf("> %s %s %s\n", $action, $msg->method, $msg->uri)
+                                 : sprintf("< %s %s %s\n", $action, $msg->code, $msg->message);
+    _trace_write($tracing, $str);
+    if ($tracing->{'show_header'}) {
+        _trace_write($tracing, _lines_for_trace($msg->headers_as_string), "\n");
+        if ($tracing->{'show_content'}) {
+            my $content = eval { $msg->content };
+            _trace_write('', _lines_for_trace($content))
+                if defined $content && length $content;
+        }
+    }
+}
+
+sub _lines_for_trace {
+    my @lines = map { '| ' . $_ . "\n" } map { defined ? (split /\r?\n/) : () } @_;
+    if (@lines == 1) {
+        substr($lines[0], 0, 1) = '=';
+    }
+    else {
+        substr($lines[0], 0, 1) = '+' if @lines;
+        substr($lines[-1], 0, 1) = 'V' if @lines > 1;
+    }
+    return @lines;
 }
 
 sub trim {
@@ -629,13 +721,13 @@ sub norm {
     return $_;
 }
 
-sub camel {
+sub _camel {
     local $_ = shift;
-    s/[_\s]+(.)/\U$1/g;
+    s/[-_\s]+(.)/\U$1/g;
     return $_;
 }
 
-sub uncamel {
+sub _uncamel {
     local $_ = shift;
     s/(?<=[a-z])(?=[A-Z])/_/g;
     return lc $_;
@@ -645,7 +737,7 @@ sub _apply_update_to_user {
     my ($self, $existing, $incoming) = @_;
     # Apply changes from $incoming to $existing
     my @changes;
-    my $updating = $self->config->{'users'}{'update'};
+    my $updating = $self->config('users')->{'update'};
     1;  # TODO
     return @changes;
 }
@@ -772,6 +864,66 @@ sub source {
 
 sub _initialize_classes_and_properties {
     my ($self) = @_;
+    my (%class, %prop2pkg, %prop2class, %blessing);
+    my $classes = $self->config('classes')
+        or die "no classes configured";
+    while (my ($k, $c) = each %$classes) {
+        my $kind = $c->{'kind'} ||= _uncamel($k);
+        my $pkg = $c->{'package'} ||= Biblio::Folio::Util::_kind2pkg($kind);
+        die "class $pkg redefined" if exists $class{$pkg};
+        my @refs = split(/,\s*/, delete($c->{'references'}) || '');
+        my %uri;
+        foreach my $action (qw(fetch base search)) {
+            my $uri = $c->{$action}
+                or next;
+            ($uri{$action} = $uri) =~ s/{[^{}]+}/%s/;
+        }
+        $c->{'uri'} = \%uri;
+        $c->{'references'} = \@refs;
+        foreach my $ref (@refs) {
+            die "reference property $ref redefined" if exists $prop2class{$ref};
+            $prop2pkg{$ref} = $pkg;
+        }
+        my @blessed_refs;
+        foreach (split(/,\s*/, delete($c->{'blessedReferences'}) || '')) {
+            /^(\*|[a-z][A-Za-z]*)\.([a-z][A-Za-z]*)(\[\])?$/
+                or die "bad blessed reference in class $pkg: $_";
+            my ($from_kind, $from_property, $each) = ($1, $2, defined $3);
+            my $from_pkg = $from_kind eq '*' ? '*' : Biblio::Folio::Util::_kind2pkg($from_kind);
+            my $blessing = {
+                'kind' => $kind,
+                'package' => $pkg,
+                'property' => $from_property,
+                'each' => $each,
+            };
+            push @{ $blessing{$from_pkg} ||= [] }, $blessing;
+        }
+    }
+    while (my ($k, $c) = each %$classes) {
+        next if $k eq '*';
+        my $pkg = $c->{'package'};
+        my @blessings = @{ $blessing{$pkg} || [] };
+        my $class = $class{$pkg} = Biblio::Folio::Class->new(
+            'site' => $self,
+            'blessed_references' => \@blessings,
+            %$c,
+        );
+        my $ok;
+        eval { eval "use $pkg"; $ok = 1 };
+        if (!$ok) {
+            die $@;
+        }
+    }
+    while (my ($p, $pkg) = each %prop2pkg) {
+        $prop2class{$p} = $class{$pkg}
+            or die "no such class: $pkg";
+    }
+    $self->{'_classes'} = \%class;
+    $self->{'_properties'} = \%prop2class;
+}
+
+sub _old_initialize_classes_and_properties {
+    my ($self) = @_;
     my (%class, %prop2class, %unresolved);
     # Property name (without Id/Ids)    Definition
     # Key to property definitions:
@@ -780,7 +932,6 @@ sub _initialize_classes_and_properties {
     #   NUM     cached TTL
     #   auto    auto-instantiated
     #   :CLASS  class to use
-    my $file = $self->
     my $properties = q{
         ### UUIDs for short-lived objects:
             courseId                   UUID +1      fetch:/coursereserves/courses/{course_id}
@@ -867,10 +1018,11 @@ sub _initialize_classes_and_properties {
         foreach $name (@names) {
             local $_ = $propdef;
             $unresolved{$name} = $1, next if /^ = (\w+)/;
-            my %p;
+            my %uri;
+            my %p = ('uri' => \%uri);
             my $kind;
             if ($name =~ m{(.+)Ids?$}) {
-                $kind = $p{'kind'} = uncamel($1);
+                $kind = $p{'kind'} = _uncamel($1);
             }
             while (s/^ (?=\S)//) {
                 if (s/^[+]([0-9]*|(?= )|$)//) {
@@ -886,15 +1038,10 @@ sub _initialize_classes_and_properties {
                 elsif (s/^%(\S+)//) {
                     $kind = $p{'kind'} = $1;
                 }
-                elsif (s{^(?:fetch:)?(/\S+)}{}) {
-                    (my $uri = $1) =~ s/{[^{}]+}/%s/;
-                    $p{'uri'}{'fetch'} = $uri;
-                }
-                elsif (s{^uri:(/\S+)}{}) {
-                    $p{'uri'}{'base'} = $1;
-                }
-                elsif (s{^search:(/\S+)}{}) {
-                    $p{'uri'}{'search'} = $1;
+                elsif (s{^(?:(fetch|base|search):)?(/\S+)}{}) {
+                    my $action = $1 || 'fetch';
+                    (my $uri = $2) =~ s/{[^{}]+}/%s/;
+                    $uri{$action} = $uri;
                 }
                 elsif (s/^(UUID|LITERAL)//) {
                     $p{'type'} = $1;
@@ -903,10 +1050,15 @@ sub _initialize_classes_and_properties {
                     die $err;
                 }
             }
+            my $class;
             if (defined $kind && $p{'type'} ne LITERAL) {
-                my $pkg = 'Biblio::Folio::' . ucfirst camel($kind);
+                my $pkg = 'Biblio::Folio::' . ucfirst _camel($kind);
                 $p{'package'} = $pkg;
-                $class{$pkg} = \%p;
+                $class = $class{$pkg} = {
+                    'site' => $self,
+                    'name' => $name,
+                    %p,
+                };
             }
             $prop2class{$name} = Biblio::Folio::Class->new(
                 'site' => $self,
@@ -919,69 +1071,17 @@ sub _initialize_classes_and_properties {
     while (keys(%unresolved) && $n--) {
         foreach my $alias (keys %unresolved) {
             my $name = $unresolved{$alias};
-            if (exists $property{$name}) {
-                $property{$alias} = $property{$name};
+            if (exists $prop2class{$name}) {
+                $prop2class{$alias} = $prop2class{$name};
                 delete $unresolved{$alias};
             }
         }
     }
     my @unresolved = sort keys %unresolved;
     die "unresolved property aliases: @unresolved" if @unresolved;
-    $self->{'_properties'} = \%property;
-    my $blessings = q{
-        Metadata                *.metadata
-        Classification          Instance.classifications[]
-        Contributor             Instance.contributors[]
-        InstanceNote            Instance.notes[]
-        Identifier              Instance.identifiers[]
-    };
-    foreach my $blessing (split /\n/, $blessings) {
-        next if $blessing =~ /^\s*(?:#.*)?$/;  # Skip blank lines and comments
-        chomp $blessing;
-        $blessing =~ s/^\s+//;
-        $blessing =~ s/\s+/ /g;
-        my $err = "internal error: unrecognized blessing: $blessing";
-        $blessing =~ s/^([A-Z][A-Za-z]*) // or die $err;
-        my $pkg = 'Biblio::Folio::' . $1;
-        my @from = split /, /, $blessing;
-        foreach (@from) {
-            /^(\*|[A-Z][A-Za-z]*)\.([a-z][A-Za-z]*)(\[\])?$/ or die $err;
-            my ($from_cls, $from_property, $each) = ($1, $2, defined $3);
-            $from_cls = 'Biblio::Folio::' . $from_cls if $from_cls ne '*';
-            $class{$from_cls} ||= {
-                'site' => $site,
-                'kind' => uncamel($from_cls),
-                'blessings' => [],
-                'ttl' => 1,
-                'uri' => {},  # XXX
-            };
-            push @{ $class{$from_cls}{'blessings'} }, {
-                'property' => $from_property,
-                'package' => $pkg,
-                'each' => $each,
-            };
-        }
-    }
+    $self->{'_properties'} = \%prop2class;
     $self->{'_classes'} = \%class;
-    $self->_define_classes(values %class);
-}
-
-sub _quote {
-    my $str = shift;
-    return 'undef' if !defined $str;
-    die if ref $str;
-    return qq{"\Q$str\E"};
-}
-
-sub _kind2pkg {
-    my ($kind) = @_;
-    return 'Biblio::Folio::' . ucfirst camel($kind);
-}
-
-sub _pkg2kind {
-    my ($pkg) = @_;
-    $pkg =~ s/^Biblio::Folio:://;
-    return lcfirst uncamel($pkg);
+    # $self->_define_classes(values %class);
 }
 
 ### sub Biblio::Folio::Location::_uri       { '/locations/%s' }
@@ -997,13 +1097,15 @@ sub TO_JSON {
     return \%self;
 }
 
+sub DESTROY { }
+
 sub AUTOLOAD {
     # $site->user($user_id) --> $site->object('user', $user_id);
     # $site->campus('query' => 'name = "Riverside Campus"');
     my $self = shift;
     die if !@_;
     (my $kind = $AUTOLOAD) =~ s/.*:://;
-    my $pkg = ucfirst camel($kind);
+    my $pkg = ucfirst _camel($kind);
     my $class = eval { $self->class($pkg) };
     if ($class) {
         my $cache = $class->{'cache'};
