@@ -58,7 +58,7 @@ sub cmd_status {
 
 sub cmd_login {
     orient();
-    $site->login;
+    $site->login('force' => 1);
     my $state = $site->state;
     printf STDERR <<'EOS', $state->{'user_id'} // '<null>', $state->{'token'};
 Logged in:
@@ -74,12 +74,16 @@ sub cmd_get {
     if (@ARGV) {
         my %arg;
         foreach (@ARGV) {
-            usage if !/^([^=]+)=(.*)$/;
+            usage if !/^([^=]+)=(.*)/;
             $arg{$1} = $2;
         }
         push @args, \%arg;
     }
     my $res = $site->GET(@args);
+    if (!$res->is_success) {
+        print STDERR $res->status_line, "\n";
+        exit 2;
+    }
     print $json->encode($json->decode($res->content));
 }
 
@@ -221,93 +225,164 @@ sub cmd_instance_source_replace {
 }
 
 sub cmd_instance_harvest {
-    my %format;
     my %with;
+    my $mod;
+    my ($query, $max_count, $batch_size, $max_err);
     orient(
-        'J|as-json' => sub { $format{'JSON'} = 1 },
-        'M|as-marc' => sub { $format{'MARC'} = 1 },
-        'T|as-text' => sub { $format{'TEXT'} = 1 },
-        'H|with-holdings' => \$with{'holdings'},
-        'I|with-items'    => \$with{'items'},
+        'h|with-holdings' => \$with{'holdings'},
+        'i|with-items'    => \$with{'items'},
+        'p|progress=i' => \$mod,
+        'q|query=s' => \$query,
+        'n|limit=i' => \$max_count,
+        'k|batch-size=i' => \$batch_size,
+        'e|max-errors=i' => \$max_err,
     );
-    usage "instance harvest [-jmt] [-HI] [FILE]" if @ARGV > 1;
-    usage if keys(%format) > 1;
-    $format{'JSON'} = 1 if keys(%format) == 0;
+    usage "instance harvest [-jmt] [-hi] [FILE]" if @ARGV > 1;
     $with{'holdings'} = 1 if $with{'items'};
     my $t0 = time;
-    my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
-    my @json_preamble = <<'EOS';
-{
-"instances":[
-EOS
-    print @json_preamble if $format{'JSON'};
-    my $num = 0;
-    my ($id, $instance, $source, @holdings);
-    while (<$fh>) {
-        $num++;
-        chomp;
-        s/\s+.*//;
-        $id = $_;
-        $instance = $site->instance($id);
-        if (!$instance) {
-            $instance = {
-                'id' => $id,
-                'deleted' => JSON::true,
-            };
+    my $err = 0;
+    my $remaining = $max_count || (1<<31);
+    my $fetch;
+    if (defined $query) {
+        my $offset = 0;
+        if (!defined $batch_size) {
+            $batch_size = (!defined $max_count || $max_count > 100) ? 100 : $max_count;
         }
-        else {
-            $instance->{'source'} = $source = $site->source('instance' => $id);
-            if ($with{'holdings'}) {
-                @holdings = $instance->holdings;
-                foreach my $holding (@holdings) {
-                    my $eff_loc = $holding->effective_location;
-                    my $perm_loc = $holding->permanent_location;
-                    my $cnum_type = $holding->call_number_type;
-                    my $cnum = $holding->call_number;
-                    if ($with{'items'}) {
-                        my @items = $holding->items;
-                        foreach my $item (@items) {
-                            1;
+        $fetch = sub {
+            my $limit = $batch_size > $remaining ? $remaining : $batch_size;
+            my @instances = $site->instance(
+                'query' => $query,
+                'offset' => $offset,
+                'limit' => $limit,
+            );
+            my $n = scalar @instances;
+            $remaining = 0, return if !$n;
+            $remaining -= $n;
+            $offset += $n;
+            return @instances;
+        };
+    }
+    else {
+        my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+        $fetch = sub {
+            while (1) {
+                my $id = <$fh>;
+                $remaining = 0, return if !defined $id;
+                chomp $id;
+                $id =~ s/\s+.*//;
+                my (@instance, $ok);
+                eval { @instance = $site->instance($id); $ok = 1 };
+                if (!$ok) {
+                    my ($msg) = split /\n/, $@;
+                    $msg = 'unknown error' if $msg !~ /\S/;
+                    print STDERR "can't fetch instance $id: $msg\n";
+                    $err++;
+                }
+                elsif (@instance) {
+                    $remaining -= @instance;
+                    return @instance;
+                }
+            }
+        };
+    }
+    my %num = qw(instances 0 holdings 0 items 0);
+    my $n = 0;
+    while (1) {
+        my @instances = $fetch->();
+        last if !@instances;
+        foreach my $instance (@instances) {
+            $num{'instances'}++;
+            $n++;
+            my $id = $instance->id;
+            my $marc;
+            eval {
+                $marc = $instance->marc_record;
+                my ($leader, $fields) = eval { marcparse(\$marc) };
+                @$fields = (
+                    marcfield('001', $id),
+                    grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields
+                );
+                my $classifier;
+                my $f33x = _33x_field_subfields($fields);
+                $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
+                $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
+                if ($with{'holdings'}) {
+                    my @holdings = $instance->holdings;
+                    foreach my $holding (@holdings) {
+                        $num{'holdings'}++;
+                        $n++;
+                        my $loc = $holding->location->code;
+                        my $call_number = $holding->call_number;
+                        undef $call_number if defined $call_number && $call_number !~ /\S/;
+                        push @$fields, marcfield(
+                            '852', ' ', ' ',
+                            'b' => $loc,
+                            _optional('h' => $call_number),
+                            _optional('x' => $classifier),
+                            '0' => $holding->id,
+                        );
+                        if ($with{'items'}) {
+                            my @items = $holding->items;
+                            foreach my $item (@items) {
+                                $num{'items'}++;
+                                $n++;
+                                my $iloc = $item->location->code;
+                                my $vol = $item->volume;
+                                # my $year = $item->year_caption;
+                                # my $copies = @{ $item->copy_numbers || [] };
+                                my $item_call_number = join(' ', grep { defined && length } $call_number, $vol);
+                                undef $item_call_number if $item_call_number !~ /\S/;
+                                push @$fields, marcfield(
+                                    '859', ' ', ' ',
+                                    'b' => $iloc,
+                                    defined($item_call_number) ? ('h' => $item_call_number) : (),
+                                    '0' => $item->id,
+                                );
+                            }
                         }
                     }
                 }
+                $marc = marcbuild($leader, $fields);
+            };
+            if (!defined $marc) {
+                $marc = _marc_delete_stub($id);
+                print STDERR "not found: $id\n"
+                    if $verbose;
             }
+            print $marc;
+        }
+        if ($verbose && defined $query || $mod && ($n % $mod) == 0) {
+            printf STDERR "\r%8d instances : %8d holdings : %8d items",
+                @num{qw(instances holdings items)};
         }
     }
-    continue {
-        if ($format{'MARC'}) {
-            my $marc;
-            if (defined $source) {
-                $marc = eval { $source->as_marc };
-            }
-            else {
-                my $leader = '00000dam a2200000 a 4500';
-                my @fields = ( marcfield('999', 'f', 'f', 'i' => $id) );
-                foreach my $holding (@holdings) {
-                }
-                $marc = marcbuild($leader, \@fields);
-            }
-            print($marc), next if defined $marc;
-            print STDERR "not a MARC record: $id\n";
-        }
-        elsif ($format{'JSON'}) {
-            my %instance = %$instance;
-            delete $instance{'_site'};
-            my $str = $json->encode(\%instance);
-            print ",\n" if !@json_preamble;
-            $str =~ s/\n\z//;
-            print $str;
-            @json_preamble = ();
-        }
+    if ($verbose && defined $query || $mod) {
+        printf STDERR "\r%8d instances : %8d holdings : %8d items => %.1f seconds\n",
+            @num{qw(instances holdings items)},
+            time - $t0;
     }
-    my $dur = sprintf('%.1f', time - $t0);
-    my @json_postamble = <<EOS;
-],
-"totalRecords":$num
-"time":"$dur seconds"
 }
-EOS
-    print "\n", @json_postamble if $format{'JSON'};
+
+sub _33x_field_subfields {
+    my ($fields) = @_;
+    my %f33x = map { $_ => {} } qw(336 337 338);
+    foreach (@$fields) {
+        my $tag = $_->[TAG];
+        my $f = $f33x{$tag} or next;
+        my $valref = $_->[VALREF];
+        next if $$valref !~ /\x1f2rda/;
+        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
+            $f33x{$tag}{$1} = 1;
+        }
+    }
+    return \%f33x;
+}
+
+sub _marc_delete_stub {
+    my ($id) = @_;
+    my $leader = '00000dam a2200000 a 4500';
+    my @fields = ( marcfield('001', $id) );
+    return marcbuild($leader, \@fields);
 }
 
 sub cmd_holding {
@@ -992,6 +1067,7 @@ sub orient {
         @_,
         'r|root' => \$root,
         's|site=s' => \$site_name,
+        'v|verbose' => \$verbose,
     ) or usage;
     $folio = Biblio::Folio->new('root' => $root);
     if (-l "$root/site/$site_name") {
