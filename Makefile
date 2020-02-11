@@ -14,8 +14,10 @@ install: classes
 
 classes: lib/Biblio/Folio/Classes.pm
 
-lib/Biblio/Folio/Classes.pm: conf/classes.conf make-classes
+lib/Biblio/Folio/Classes.pm: classes.ini make-classes
+	chmod 644 $@
 	./make-classes < $< > $@
+	chmod 444 $@
 
 diff:
 	diff -ur lib /usr/local/folio/lib || true
