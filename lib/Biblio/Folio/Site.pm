@@ -231,8 +231,9 @@ sub stash {
 
 sub login {
     my ($self, %arg) = @_;
-    my %state = %{ $self->state };
-    return $self if $state{'logged_in'} && $arg{'reuse_token'};
+    my $state = $self->state;
+    delete $state->{'logged_in'} if $arg{'force'};
+    return $self if $state->{'logged_in'} && $arg{'reuse_token'};
     my $endpoint = $self->config('endpoint');
     my $res = $self->POST('/authn/login', {
         'username' => $endpoint->{'user'},
@@ -242,8 +243,8 @@ sub login {
         or die "login didn't yield a token";
     my $content = $self->json->decode($res->content);
     my $user_id = $content->{'userId'};
-    @state{qw(token logged_in user_id)} = ($token, 1, $user_id);
-    $self->state(\%state);
+    @$state{qw(token logged_in user_id)} = ($token, 1, $user_id);
+    $self->state($state);
     return $self;
 }
 
@@ -300,45 +301,160 @@ sub property {
 }
 
 sub object {
-    my ($self, $kind, @args) = @_;
+    # $site->object($kind, $id);
+    # $site->object($kind, \@ids);
+    # $site->object($kind, 'query' => $cql, 'limit' => $n, 'offset' => $p);
+    # $site->object($kind, 'id' => $id, 'uri' => $uri);
+    my ($self, $kind) = splice @_, 0, 2;
     my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
-    if (@args == 1) {
-        my ($arg) = @args;
-        my $r = ref $arg;
-        if ($r eq 'ARRAY') {
-            return map {
-                $r = ref $_;
-                $r eq 'HASH' ? $self->fetch($pkg->new('_site' => $self, '_json' => $self->json, %$_))
-                             : die "I don't know how to fetch a(n) $r";
-            } @$arg;
-        }
-        elsif ($r eq 'HASH') {
-            @args = %$arg;
-        }
-        else {
+    my (@args, @from, $id, $query);
+    if (@_ == 1) {
+        my ($arg) = @_;
+        my $argref = ref $arg;
+        if ($argref eq '') {
             @args = ('id' => $arg);
         }
+        elsif ($argref eq 'HASH') {
+            @args = ('objects' => [$arg]);
+        }
+        elsif ($argref eq 'ARRAY') {
+            @args = ('objects' => $arg);
+        }
     }
-    return $self->fetch($pkg->new('_site' => $self, '_json' => $self->json, @args));
+    elsif (@_ % 2) {
+        die "\$site->object(\$kind, \$id|\@ids\|%args)";
+    }
+    else {
+        my %arg = @args = @_;
+        @from = split(/\./, $arg{'from'} || '');
+    }
+    my @objs = $self->fetch($pkg, @args);
+    if (@from) {
+        foreach my $k (@from) {
+            if ($k eq '*') {
+                @objs = map { @$_ } @objs;
+            }
+            else {
+                @objs = map { $_->{$k} } @objs;
+            }
+        }
+    }
+    return @objs if wantarray;
+    return $objs[0] if @objs == 1;
+    return \@objs;
 }
 
 sub fetch {
-    my ($self, $obj) = @_;
-    my $uri = $obj->_uri;
-    if (defined $uri) {
-        my $id = $obj->{'id'};
-        my $res;
-        if (defined $id) {
-            $res = eval { $self->GET(sprintf $uri, $id) };
+    my ($self, $pkg, %arg) = @_;
+    my $uri = delete $arg{'uri'};
+    my $objs = delete $arg{'objects'};
+    my $id = delete $arg{'id'};
+    my $idref = ref $id;
+    my $query = $arg{'query'};
+    my @return;
+    if ($objs) {
+        # Just construct the object(s)
+        @return = @$objs;
+    }
+    elsif (defined $query) {
+        if (!defined $uri) {
+            #die "query without a package or URI: $query"
+            #    if !defined $pkg;
+            $uri = $pkg->_uri_search || $pkg->_uri;
+        }
+        #die "search URIs can't contain placeholder %s"
+        #    if $uri =~ /%s/;
+    }
+    else {
+        $uri ||= $pkg->_uri;
+    }
+    if (!$objs && defined $uri) {
+        # Really fetch the object
+        my %content;
+        if (!defined $query && $uri =~ /\?/) {
+            $uri = URI->new($uri);
+            %content = $uri->query_form;
+            $query = $arg{'query'} = $uri->query;
+            $uri = $arg{'uri'} = $uri->path;
         }
         else {
-            die "not yet implemented";
+            $content{'query'} = $query;
         }
-        return if !$res;
-        %$obj = (%$obj, %{ $self->json->decode($res->content) });
+        my ($res, $code);
+        if (defined $query) {
+            $uri = sprintf($uri, $id)
+                if $id && $idref eq '' && $uri =~ /%s/;
+            die "search URIs can't contain placeholder %s"
+                if $uri =~ /%s/;
+            foreach (qw(offset limit)) {
+                $content{$_} = $arg{$_} if defined $arg{$_};
+            }
+            $res = $self->GET($uri, \%content);
+            $code = $res->code;
+            if ($res->is_success) {
+                my $content = $self->json->decode($res->content);
+                my @munge = $arg{'munge'} ? @{ $arg{'munge'} } : ();
+                @return = $pkg->_search_results($content, @munge);
+            }
+        }
+        elsif (!defined $id) {
+            die "I can't fetch a $pkg without a query or an ID";
+        }
+        else {
+            $uri = sprintf($uri, $id);
+            $res = $self->GET($uri);
+            $code = $res->code;
+            if ($res->is_success) {
+                my $content = $self->json->decode($res->content);
+                @return = (ref($content) eq 'ARRAY' ? @$content : $content);
+            }
+        }
+        #die "unable to execute API call: $uri"
+        #    if !defined $code;
+        return if $code eq '404';  # Not Found
+        die $res->status_line, ' : ', $uri if !$res->is_success;
     }
-    return $obj->init;
+    else {
+        die "can't construct or fetch $pkg objects without data or an ID or query";
+    }
+    my $instantiate = !$arg{'scalar'} && !$arg{'array'};
+    return if !@return;
+    return map {
+        $pkg->new('_site' => $self, '_json' => $self->json, %$_)
+    } @return if $instantiate;
+    return @return if wantarray;
+    warn "multiple $pkg objects: $uri" if @return > 1;
+    return shift @return;
 }
+
+### sub _results {
+###     my ($self, $content, %arg) = @_;
+###     return if !@$content;
+###     if (@$content == 1) {
+###         $content = $content->[0];
+###         my $cref = ref $content;
+###         if ($cref eq 'ARRAY') {
+###             return map { $pkg->new('_site' => $self, '_json' => $self->json, %$_) } @$content if $instantiate;
+###             return @$content;
+###         }
+###         elsif (wantarray) {
+###             return ($content);
+###         }
+###     }
+###     elsif (!defined $arg{'query'} && ref $arg{'id'} eq '') {
+###         die "expected one return value, got multiple";
+###     }
+###     elsif ($instantiate) {
+###         @return = $instantiate
+###             ? ($pkg->new('_site' => $self, '_json' => $self->json, %$content))
+###             : ($content);
+###     }
+###     return @return if wantarray;
+###     return if @return == 0;
+###     return \@return if $idref eq 'ARRAY' || defined $query;
+###     return $return[0] if @return == 1;
+###     die "package $pkg can't return multiple values from $uri if you only asked for one";
+### }
 
 ### sub property {
 ###     my ($self, $obj, $name) = @_;
@@ -352,8 +468,8 @@ sub fetch {
 sub objects {
     my ($self, $uri, %arg) = @_;
     my $key = delete $arg{'key'};
-    my $res = eval { $self->GET($uri, \%arg) };
-    return if !$res;
+    my $res = $self->GET($uri, \%arg);
+    return if !$res->is_success;
     my $content = $self->json->decode($res->content);
     my $n = delete $content->{'totalRecords'};
     delete @$content{qw(resultInfo errorMessages)};
@@ -624,11 +740,14 @@ sub req {
     my $ua = $self->ua;
     my $res = $ua->request($req);
     _trace($self, RESPONSE => $res);
-    if ($res->is_success) {
-        return $res;
-    }
-    else {
-        die "FAIL: $method $path -> ", $res->status_line, "\n";
+    return $res;
+    if (0) {
+        if ($res->is_success) {
+            return $res;
+        }
+        else {
+            die "FAIL: $method $path -> ", $res->status_line, "\n";
+        }
     }
 }
 
@@ -830,36 +949,33 @@ sub properties {
 ### 
 sub source {
     my $self = shift;
-    my $res;
+    my $source;
     if (@_ == 1) {
         my $id = shift;
         return $self->object('source' => $id);
-        #$res = eval { $self->GET("/source-storage/records/$id", { @_ }) }
-        #    or return;
-        #$res = $self->json->decode($res->content);
     }
     else {
         my %arg = @_;
         if ($arg{'instance'}) {
             my $id = $arg{'instance'};
-            $res = eval { $self->GET('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'}) }
-                or return;
-            $res = $self->json->decode($res->content);
+            my $res = $self->GET('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'});
+            return if !$res->is_success;
+            $source = $self->json->decode($res->content);
         }
         elsif ($arg{'query'}) {
             my $query = $arg{'query'};
-            $res = eval { $self->GET('/source-storage/records', {'query' => $query, 'limit' => 2}) }
+            my $res = $self->GET('/source-storage/records', {'query' => $query, 'limit' => 2});
+            return if !$res->is_success;
+            $source = $res->content->{'records'}
                 or return;
-            $res = $res->{'records'}
-                or return;
-            return if ref($res) ne 'ARRAY' || @$res != 1;
-            $res = $res->[0];
+            return if ref($source) ne 'ARRAY' || @$source != 1;
+            $source = $source->[0];
         }
         else {
             die '$site->source($id|instance=>$id|query=>$cql)';
         }
     }
-    return Biblio::Folio::SourceRecord->new('_site' => $self, %$res);
+    return Biblio::Folio::SourceRecord->new('_site' => $self, %$source);
 }
 
 sub _initialize_classes_and_properties {

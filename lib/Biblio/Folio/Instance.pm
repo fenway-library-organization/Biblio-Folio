@@ -5,22 +5,22 @@ package Biblio::Folio::Instance;
 sub holdings {
     my ($self, $id_or_query) = @_;
     my $site = $self->site;
-    my $holdings;
+    my @holdings;
+    my $uri = $self->_uri_search;
     if (!defined $id_or_query) {
-        return @{ $self->{'holdings'} }
-            if $self->{'holdings'};
+        return @{ $self->{'holdings'} } if $self->{'holdings'};
         my $id = $self->{'id'};
-        $holdings = $site->objects('/holdings-storage/holdings', 'query' => "instanceId==$id");
+        @holdings = $site->object('holdings_record', 'query' => "instanceId==$id");
     }
     elsif (!ref $id_or_query) {
-        $holdings = $site->objects('/holdings-storage/holdings', 'query' => $id_or_query);
+        @holdings = $site->object('holdings_record', 'query' => $id_or_query);
     }
     else {
-        $holdings = $site->objects('/holdings-storage/holdings', %$id_or_query);
+        @holdings = $site->object('holdings_record', %$id_or_query);
     }
-    return if !$holdings;
-    $self->{'holdings'} = $holdings;
-    return map { Biblio::Folio::HoldingsRecord->new('_site' => $site, 'instance' => $self, %$_) } @$holdings;
+    $_->{'instance'} = $self for @holdings;
+    $self->{'holdings'} = \@holdings;
+    return @holdings;
 }
 
 1;

@@ -15,55 +15,110 @@ use constant qw(UUID    UUID   );
 
 our $AUTOLOAD;
 
-sub ttl { 3600 }
+# sub ttl { 3600 }
 
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
     return $self;
-    ### return $self->init;
+    $self->init;
 }
 
 sub DESTROY { }
 
-sub init {
-    my ($self) = @_;
-    my $site = $self->site;
-    my $cls = ref $self;
-    my $class = $site->class($cls);
-    my $wild  = $site->class('*');
-    my @blessings = (
-        @{ $wild->{'blessings'} ||= [] },
-        @{ $class->{'blessings'} ||= [] },
-    );
-    my %blessed;
-    foreach my $blessing (@blessings) {
-        my ($prop, $pkg, $each) = @$blessing{qw(property package each)};
-        next if $blessed{$prop}++;
-        my $propval = $self->{$prop};
-        next if !defined $propval;
-        my $propref = ref $propval;
-        my $bclass = $site->class($pkg);
-        if ($propref eq 'ARRAY' && $each) {
-            @$propval = map {
-                die "can't bless a non-hash member of an array"
-                    if ref($_) ne 'HASH';
-                bless $_, $pkg
-            } @$propval;
+sub init { }
+
+sub _search_results {
+    my ($pkg, $content, @dig) = @_;
+    return if !defined $content;
+    my $cref = ref $content;
+    if ($cref eq 'HASH') {
+        if (@dig) {
+            my @dug;
+            while (@dig) {
+                return if !defined $content;
+                my $k = shift @dig;
+                push @dug, $k;
+                if ($cref eq 'ARRAY') {
+                    $k =~ /^-?[0-9]+$/
+                        or die "non-numeric key into array: ", join('.', @dug, $k);
+                    $content = $content->[$k];
+                }
+                elsif ($cref eq 'HASH') {
+                    $content = $content->{$k};
+                }
+                elsif ($cref eq '') {
+                    $content = eval { $pkg->$k($content) };
+                }
+                $cref = ref $content;
+            }
         }
         else {
-            if ($propref eq '') {
-                print STDERR "DEBUG: $cls.$prop is scalar ($propval)\n";
-            }
-            else {
-                print STDERR "DEBUG: $cls.$prop isa $propref\n"
-                    if $each || $propref ne 'HASH';
-                $self->{$prop} = bless $propval, $pkg;
+            my ($info, $total) = delete @$content{qw(resultInfo totalRecords)};
+            if (defined $total) {
+                my @data;
+                foreach (keys %$content) {
+                    my $array = $content->{$_};
+                    if (ref($array) eq 'ARRAY') {
+                        push @data, $array;
+                    }
+                }
+                if (@data == 1) {
+                    ($content) = @data;
+                    $cref = ref $content;
+                }
+                elsif (@data > 1) {
+                    die "can't determine how to get $pkg search results: multiple keys = ", join(', ', @data);
+                }
             }
         }
     }
-    return $self;
+    if (wantarray && $cref eq 'ARRAY') {
+        return @$content;
+    }
+    else {
+        return $content;
+    }
 }
+
+### sub old_init {
+###     my ($self) = @_;
+###     my $site = $self->site;
+###     my $cls = ref $self;
+###     my $class = $site->class($cls);
+###     my $wild  = $site->class('*');
+###     my @blessings = (
+###         @{ $wild->{'blessings'} ||= [] },
+###         @{ $class->{'blessings'} ||= [] },
+###     );
+###     my %blessed;
+###     foreach my $blessing (@blessings) {
+###         my ($prop, $pkg, $each) = @$blessing{qw(property package each)};
+###         next if $blessed{$prop}++;
+###         my $propval = $self->{$prop};
+###         next if !defined $propval;
+###         my $propref = ref $propval;
+###         my $bclass = $site->class($pkg);
+###         if ($propref eq 'ARRAY' && $each) {
+###             @$propval = map {
+###                 die "can't bless a non-hash member of an array"
+###                     if ref($_) ne 'HASH';
+###                 bless $_, $pkg
+###             } @$propval;
+###         }
+###         else {
+###             if ($propref eq '') {
+###                 print STDERR "DEBUG: $cls.$prop is scalar ($propval)\n";
+###             }
+###             else {
+###                 print STDERR "DEBUG: $cls.$prop isa $propref\n"
+###                     if $each || $propref ne 'HASH';
+###                 $self->{$prop} = bless $propval, $pkg;
+###             }
+###         }
+###     }
+###     return $self;
+### }
 
 sub TO_JSON {
     my %self = %{ shift() };
