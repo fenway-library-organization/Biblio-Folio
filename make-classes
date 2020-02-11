@@ -4,22 +4,26 @@ use warnings;
 use strict;
 
 use constant OBJECT => 'Object';
-use constant qw(ONE ONE);
-use constant qw(MANY MANY);
+use constant OBJECTS => 'Objects';
 
 use String::Expando;
 
+sub block;
+sub blockf;
+
 my $expando = String::Expando->new;
-my $cls = OBJECT;
-my %object = (
+my $generic = {
+    'class' => OBJECT,
+    'plural' => OBJECTS,
     'package' => x2pkg(OBJECT),
     'kind' => undef,
     'ttl' => undef,
     'uri' => undef,
     'methods' => {},
-);
-my $class = \%object;
-my %class = ( OBJECT() => $class );
+};
+my $scalar = { 'scalar' => 1 };
+my $array = { 'array' => 1 };
+my %class = ( OBJECT() => $generic );
 my %method;
 
 parse();
@@ -28,134 +32,282 @@ build();
 # --- Functions
 
 sub parse {
+    my $class;
+    my $key;
     while (<STDIN>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         if (/^\[\*\]$/) {
-            $class = \%object;
+            # Begin generic block (i.e., stuff to put in Biblio::Folio::Object)
+            $class = $generic;
+            undef $key;
         }
         elsif (/^\[(.+)\]$/) {
-            # Class def
-            $cls = $1;
-            my $pl;
-            if ($cls =~ s{/(.+)/(.+)}{$1}) {
-                $pl = $1;
-            }
-            elsif ($cls =~ s{/(.+)}{}) {
-                $pl = $cls . $1;
-            }
-            else {
-                $pl = $cls . 's';
-            }
-            my $pkg = x2pkg($cls);
-            my $kind = x2kind($cls);
-            $class = $class{$cls} ||= {
-                'package' => $pkg,
-                'kind' => $kind,
-                'ttl' => undef,
-                'uri' => undef,
-            };
-            my $methods = $method{OBJECT()} ||= {};
-            foreach my $x ($cls, $pl) {
-                my $meth = x2meth($x);
-                $methods->{$meth} ||= {
-                    'bless' => $pkg,
-                    'kind' => $kind,
-                    'property' => $x eq $cls ? x2ref($cls) : x2refs($cls),
-                    'method' => $meth,
-                };
-            }
-            #push @{ $methods->{x2meth($cls)}{'properties'} }, x2ref($cls);
-            #push @{ $methods->{x2meth($pl)}{'properties'} }, x2refs($cls);
+            # Begin class block
+            my $cls = $1;
+            $class = class_stub($cls);
+            $cls = $class->{'class'};
+            # die "class $cls redefined" if $class{$cls};
+            $class{$cls} ||= $class;
+            undef $key;
+            define_methods(
+                'from' => $generic,
+                'to' => $class,
+                'property' => x2ref($cls),
+                'multi' => 1,
+            );
         }
-        elsif (/^$/) {
-            next;
-        }
-        elsif (/^(ttl|uri)\s*=\s*(.+)$/) {
-            $class->{$1} = $2;
-        }
-        elsif (/^(blessed\s*)?references\s*=\s*(.+)$/) {
-            my $bless = defined $1;
-            foreach my $p (split /,\s*/, $2) {
-                my $multi = $p =~ s/\[\]$//;
-                my $from_cls = OBJECT;
-                $from_cls = x2cls($1)
-                    if $p =~ s/^([^.]+)\.//;
-                my $prop = x2ref($p);
-                my $meth = x2meth($p);
-                my $methods = $method{$from_cls} ||= {};
-                # warn "redefined reference from $from_cls to $cls via $meth"
-                #     if exists $methods->{$meth};
-                $methods->{$meth} ||= {
-                    'bless' => x2pkg($cls),
-                    'property' => $p,
-                    'method' => $meth,
-                };
-                #push @{ $methods->{$meth}{'properties'} }, $p;
-            }
-        }
-        elsif (/^method\s*(\w+)\s*=\s*(.+)$/) {
-            my ($meth, $to_cls) = ($1, $2);
-            my ($multi, $uri, $prop);
-            if ($to_cls =~ s/\[\]//) {
-                $multi = 1;
-            }
-            if ($to_cls =~ s/\s+(\S+)$//) {
-                ($uri = $1) =~ s/{[^{}]+}/%s/;
-            }
-            if ($to_cls =~ s/\((\w+)\)$//) {
-                $prop = $1;
-            }
-            else {
-                $prop = $multi ? x2refs($to_cls) : x2ref($to_cls);
-            }
-            my $methods = $method{$cls} ||= {};
-            $methods->{$meth} = {
-                'bless' => x2pkg($to_cls),
-                'kind' => x2kind($to_cls),
-                'multi' => $multi,
-                'property' => $prop,
-                defined($uri) ? ('uri' => $uri) : (),
-            };
-        }
-### elsif (/^blessed\s+references\s*=\s*(.+)$/) {
-###     foreach my $p (split /,\s*/, $1) {
-###         my $prop = $p;
-###         my $from_cls = OBJECT;
-###         $from_cls = ucfirst camel($1)
-###             if $prop =~ s/^([^.]+)\.//;
-###         my $methods = $method{$from_cls} ||= {};
-###         my $meth = x2meth($prop);
-###         #warn "redefined reference from $from_cls to $cls via $meth"
-###         #    if exists $methods->{$meth};
-###         $methods->{$meth} = {
-###             'class' => $class,
-###             'method' => $prop,
-###             'properties' => [],
-###             'multi' => $multi,
-###             'bless' => 1,
-###         };
-###         push @{ $methods->{$meth}{'properties'} }, $p;
-###     }
-### }
-        elsif (/^(\w+)\s*=\s*(.+)$/) {
+        elsif (/^(uri(?:\.\w+)?)\s*=\s*(.+)$/) {
+            # URI for the class
             my ($k, $v) = ($1, $2);
-            $class->{$k} = $2;
+            undef $key;
+            $k =~ s/\.get$//i;
+            $k =~ tr/./_/;
+            $class->{$k} = $v;
+        }
+        elsif (/^ttl\s*=\s*(.+)$/) {
+            # TTL for the class (how long it's cached)
+            undef $key;
+            $class->{'ttl'} = $1;
+        }
+        elsif (/^(references)\s*=\s*(.+)$/) {
+            # Inbound foreign keys -- i.e., properties (typically found in
+            # objects of other classes) that store a UUID for an object in
+            # *this* class
+            $key = $1;
+            my @references;
+            foreach my $prop (split /,\s*/, $2) {
+                my $multi = 1 if $prop =~ s/\[\]//;
+                my $from = $generic;
+                if ($prop =~ s/^([^.]+)\.//) {
+                    $from = $class{$1} ||= class_stub($1);
+                }
+                (my $name = $prop) =~ s/Id(s?)$//;
+                my $name = x2meth($name);
+                define_methods(
+                    'name' => $name,
+                    'from' => $generic,
+                    'to' => $class,
+                    'property' => $prop,
+                    'foreign' => 1,
+                    'multi' => $multi,
+                );
+            }
+        }
+        elsif (/^(method\s*(\w+))\s*=\s*(.+)$/) {
+            # Method definition
+            my ($name, $spec) = ($2, trim($3));
+            ($key = $1) =~ s/\s+/ /g;
+            my %returns;
+            my %meth = ('name' => $name, 'from' => $class, 'spec' => $spec, 'returns' => \%returns);
+            my $cls = $class->{'class'};
+            my $err = "$cls.$name = $spec";
+            if ($spec =~ /^{(.+)}$/) {
+                $meth{'body'} = trim($1);
+            }
+            else {
+                $spec =~ s/\s+/ /g;
+                my ($left, $right) = split / -> /, $spec;
+                ($left, my $middle) = split / :: /, $left;
+                foreach (split / /, $left) {
+                    if (/^([A-Z]\w+)(\[\])?$/) {
+                        $meth{'multi'} = $2;
+                        $meth{'to'} = $class{$1} ||= class_stub($1);
+                    }
+                    elsif (/^[@]([@\w]+)$/) {
+                        $meth{'property'} = $1 eq '@' ? $name : $1;
+                        $meth{'custom'} = 1;
+                    }
+                    elsif (m{^(?:([a-z]+):)?(/\S+)$}) {
+                        my $urikey = (defined($1) && $1 ne 'uri') ? 'uri_'.$1 : 'uri';
+                        (my $urival = $2) =~ s/{[^{}]+}/%s/;
+                        $meth{$urikey} = $urival;
+                    }
+                    else {
+                        die "bad method spec: $err";
+                    }
+                }
+                if ($middle) {
+                    $meth{'munge'} = [split /\./, $middle];
+                    if ($right) {
+                        if ($right eq 'scalar') {
+                            $meth{'to'} = $scalar;
+                        }
+                        elsif ($right eq 'array') {
+                            $meth{'to'} = $array;
+                        }
+                        else {
+                            die "unrecognized return value type: $err";
+                        }
+                    }
+                }
+                elsif ($right) {
+                    die "return value type $right without munging: $err"
+                }
+                if (!defined $meth{'to'}) {
+                    die "method return value must be an object, scalar, or array: $err";
+                }
+                if (!$meth{'to'} && !$meth{'property'}) {
+                    die "method ${cls}::${name} return value must derive from a property: $_";
+                }
+            }
+            define_methods(%meth);
+        }
+        elsif (/^(\w+)\s*=\s*(.+)$/) {
+            # Misc. other class properties; for example:
+            #   method with_a_body = { my ($self) = @_; return sqrt($self->{'foo'}) }
+            #   method literal_scalar = 999
+            #   method literal_hash_ref = +{ 'qux' => rand() }
+            # Whatever is specified as the value (the bit after "=") is inserted verbatim into the generated code
+            my ($k, $v) = ($1, trim($2));
+            $key = '_' . $k;
+            my $cls = $class->{'class'};
+            my $methods = $method{$cls} ||= {};
+            if ($v =~ /^{(.*)}$/) {
+                $methods->{'_'.$k} = {
+                    'body' => trim($1),
+                };
+            }
+            else {
+                $methods->{'_'.$k} = {
+                    'body' => $v,
+                };
+            }
         }
     }
 }
 
+sub define_methods {
+    my %arg = @_;
+    my ($from, $name, $body) = @arg{qw(from name body)};
+    my $methods = $method{$from->{'class'}} ||= {};
+    if ($body) {
+        $methods->{$name} = \%arg;
+        return;
+    }
+    my %define;
+    my $to = $arg{'to'} ||= {};
+    my $prop = $arg{'property'};
+    my $multi = $arg{'multi'};
+    my $custom = $arg{'custom'};
+    my $foreign = $arg{'foreign'};
+    my ($to_cls, $to_pl, $to_pkg, $to_kind) = @$to{qw(class plural package kind)};
+    if ($custom) {
+        $define{$name} = \%arg;
+    }
+    else {
+        my $xref_sg = x2ref($prop || $to_cls);
+        my $xref_pl = x2refs($prop || $to_cls);
+        if ($to->{'class'}) {
+            # my $instance = $holding->instance;
+            my $meth_sg = $foreign ? x2meth($name) : x2meth($to_cls);
+            $define{$meth_sg} = {
+                'property' => $xref_sg,         # holdingsRecordId
+                'returns' => $to,
+            };
+            if ($multi) {
+                warn "foreign and multi!? $from->{class}.$name"
+                    if $foreign;
+                my $meth_pl = x2meth($to_pl);
+                $define{$meth_pl} = {
+                    'property' => $xref_pl,     # institutionIds
+                    'returns' => $to,
+                };
+            }
+        }
+        if (defined $prop) {
+            my $meth = x2meth($prop);
+            # my $id = $holding->instance_id;   -- e.g., if we don't want to fetch the referenced object
+            $define{$meth} = {
+                'property' => $xref_sg,     # instanceId
+                'returns' => $scalar,
+            };
+            if ($multi) {
+                # my @ids = $instance->contributor_ids();
+                $meth .= 's';
+                $define{$meth} = {
+                    'property' => $xref_pl, # contributorIds
+                    'returns' => $array,
+                };
+            }
+        }
+        elsif (0) {
+            # my $metadata = $instance->metadata;
+            warn "can this even happen???";
+            my $meth_sg = x2meth($to_cls);
+            $define{$meth_sg} = {
+                'property' => $xref_sg,
+                'returns' => $to,
+            };
+            if ($multi) {
+                # my @holdings = $instance->holdings;
+                my $meth_pl = x2meth($to_pl);
+                $define{$meth_pl} = {
+                    'property' => $xref_pl,
+                    'returns' => $to,
+                };
+            }
+        }
+    }
+    while (my ($m, $method) = each %define) {
+        my $from_cls = $from->{'class'};
+        my $existing_method = $methods->{$m};
+        if ($existing_method) {
+            my $props = $existing_method->{'properties'} ||= [ delete $existing_method->{'property'} ];
+            my $new_prop = $method->{'property'};
+            if (!defined $new_prop) {
+                warn "oddball duplicate method $from_cls.$m";
+            }
+            elsif (grep { $_ eq $new_prop } @$props) {
+                warn "duplicate property $new_prop for $from_cls.$m";
+            }
+            else {
+                push @$props, $new_prop;
+            }
+        }
+        else {
+            $methods->{$m} = {
+                'name' => $m,
+                %$method,
+            };
+        }
+    }
+}
+
+sub class_stub {
+    my ($cls) = @_;
+    my $pl;
+    if ($cls =~ s{/(.+)/(.+)}{$1}) {
+        $pl = $1;
+    }
+    elsif ($cls =~ s{/(.+)}{}) {
+        $pl = $cls . $1;
+    }
+    elsif ($cls =~ s{/$}{}) {
+        $pl = $cls;
+    }
+    else {
+        $pl = $cls . 's';
+    }
+    return {
+        'class' => $cls,
+        'plural' => $pl,
+        'package' => x2pkg($cls),
+        'kind' => x2kind($cls),
+    };
+}
+
 sub build {
-    print <<'EOS';
+    block <<'EOS';
 use strict;
 use warnings;
-
+EOS
+    block <<'EOS';
 use Biblio::Folio::Object;
-
 EOS
     my $object = delete $class{OBJECT()};
     foreach my $class ($object, sort { $a->{'package'} cmp $b->{'package'} } values %class) {
-        print <<'EOS';
+        block <<'EOS';
 # ------------------------------------------------------------------------------
-
 EOS
         my $pkg = $class->{'package'};
         my $cls = x2cls($pkg);
@@ -165,35 +317,100 @@ EOS
         printf qq{\n\@%s::ISA = qw(Biblio::Folio::%s);\n}, $pkg, OBJECT
             if $cls ne OBJECT;
         printf qq{\nsub _ttl { %s }}, quote($ttl) if defined $ttl;
-        printf qq{\nsub _uri { %s }}, qq{'$uri'} if defined $uri;
-        print  qq{\n\n};
+        if (defined $uri) {
+            printf qq{\nsub _uri { %s }}, quote($uri);
+            my $uri_search = $class->{'uri_search'};
+            if (!defined $uri_search && $uri =~ m{(.+)/%s$}) {
+                $class->{'uri_search'} = $1;
+            }
+        }
+        foreach (grep { /^uri_/ } keys %$class) {
+            my $uri2 = $class->{$_};
+            printf qq{\nsub _%s { %s }}, $_, quote($uri2);
+        }
+        print qq{\n\n};
         my $methods = $class->{'methods'} = $method{$cls} || {};
         foreach my $m (sort keys %$methods) {
             my $method = $methods->{$m};
-            my ($kind, $prop) = @$method{qw(kind property)};
-            if (defined $kind) {
-                my $to_cls = x2cls($kind);
-                my $accessor = $class{$to_cls}{'ttl'} ? 'cached' : 'object';
-                printf <<'EOS', $m, $accessor, $kind, $prop;
+            my ($prop, $props, $muri, $body, $returns, $munge) = @$method{qw(property properties uri body returns munge)};
+            my $propeval = prop_evaluator($prop || $props);
+            my ($rkind, $rcls) = @$returns{qw(kind class)};
+            my $sfx = '';
+            if ($munge) {
+                $sfx = sprintf q{, 'munge' => [%s]}, join(', ', map { quote($_) } @$munge);
+            }
+            if (defined $body) {
+                # Arbitrary code
+                $body = join("\n", map { '    ' . $_ } split /\n/, $body);
+                blockf <<'EOS', $m, $body;
+sub %s {
+%s
+}
+EOS
+            }
+            elsif (defined $rcls) {
+                # Return an object
+                my $rttl = $class{$rcls}{'ttl'};
+                my $accessor = $rttl ? 'cached' : 'object';
+                if (defined $muri) {
+                    blockf <<'EOS', $m, $accessor, $rkind, $propeval, quote($muri), $sfx;
 sub %s {
     my ($self) = @_;
-    return $self->site->%s('%s', $self->{'%s'});
+    return $self->site->%s('%s', 'id' => %s, 'uri' => %s%s);
 }
-
+EOS
+                }
+                else {
+                    blockf <<'EOS', $m, $accessor, $rkind, $propeval, $sfx;
+sub %s {
+    my ($self) = @_;
+    return $self->site->%s('%s', %s%s);
+}
+EOS
+                }
+            }
+            elsif (defined $muri) {
+                # Return something that isn't an object
+                blockf <<'EOS', $m, $pkg, $propeval, quote($muri), $sfx;
+sub %s {
+    my ($self) = @_;
+    return $self->site->fetch('%s', 'id' => %s, 'uri' => %s, 'scalar' => 1%s);
+}
 EOS
             }
             else {
-                printf <<'EOS', $m, $prop;
+                die "can't munge a bare property accessor: $cls->$m"
+                    if defined $munge;
+                blockf <<'EOS', $m, $propeval;
 sub %s {
     my ($self) = @_;
-    return $self->{'%s'};
+    return %s;
 }
-
 EOS
             }
         }
+        # Pick up any hand-written code
+        printf qq{eval q{use %s};\n\n}, $pkg;
     }
     print "1;\n\n";
+}
+
+sub prop_evaluator {
+    my ($props) = @_;
+    if (ref $props) {
+        return '(' . join(' // ', map { sprintf q{$self->{'%s'}}, $_ } @$props) . ')';
+    }
+    else {
+        return sprintf q{$self->{'%s'}}, $props;
+    }
+}
+
+sub block {
+    print @_, "\n";
+}
+
+sub blockf {
+    printf(@_), "\n";
 }
 
 sub trim {
@@ -218,9 +435,10 @@ sub quote {
     my $str = shift;
     return 'undef' if !defined $str;
     die if ref $str;
-    return $str if $str =~ /^[0-9]+$/;
-    $str = qq{"\Q$str\E"};
-    $str =~ s{(\\\\)|\\/}{$1 ? $1 : '/' }eg;
+    return $str if $str =~ /^-?[0-9]+$/;      # Integers
+    return qq{'$str'} if $str !~ /[\\']/;     # Good for URLs and most other strings
+    $str = qq{"\Q$str\E"};                    # Let Perl do the escaping
+    $str =~ s{(\\\\)|\\/}{$1 ? $1 : '/' }eg;  # Remove pointless escaping of forward slashes
     return $str;
 }
 
@@ -272,3 +490,62 @@ sub pkg2kind {
 }
 
 1;
+
+__END__
+### elsif (/^blessed\s+references\s*=\s*(.+)$/) {
+###     foreach my $p (split /,\s*/, $1) {
+###         my $prop = $p;
+###         my $from_cls = OBJECT;
+###         $from_cls = ucfirst camel($1)
+###             if $prop =~ s/^([^.]+)\.//;
+###         my $methods = $method{$from_cls} ||= {};
+###         my $meth = x2meth($prop);
+###         #warn "redefined reference from $from_cls to $cls via $meth"
+###         #    if exists $methods->{$meth};
+###         $methods->{$meth} = {
+###             'class' => $class,
+###             'method' => $prop,
+###             'properties' => [],
+###             'multi' => $multi,
+###             'bless' => 1,
+###         };
+###         push @{ $methods->{$meth}{'properties'} }, $p;
+###     }
+### }
+
+            foreach my $p (split /,\s*/, $2) {
+                my $multi = $p =~ s/\[\]$//;
+                my $from_cls = OBJECT;
+                $from_cls = x2cls($1)
+                    if $p =~ s/^([^.]+)\.//;
+                my $prop = x2ref($p);
+                my $meth = x2meth($p);
+                my $methods = $method{$from_cls} ||= {};
+                # warn "redefined reference from $from_cls to $cls via $meth"
+                #     if exists $methods->{$meth};
+                $methods->{$meth} ||= {
+                    'name' => $meth,
+                    'property' => $p,
+                    'returns' => $class,
+                    'multi' => $multi,
+                };
+            }
+
+                while ($spec =~ /\S/) {
+                    $spec =~ s/^\s+//;
+                    if ($spec =~ s/^\[\]//) {
+                        $meth{'multi'} = 1;
+                    }
+                    elsif ($spec =~ s/^\.([\w.]+)//) {
+                        $meth{'munge'} = [split /\./, $1];
+                    }
+                    elsif ($spec =~ s{^(/\S+)}{}) {
+                        ($meth{'uri'} = $1) =~ s/{[^{}]+}/%s/;
+                    }
+                    elsif ($spec =~ s/^\((\w+)\)//) {
+                        $meth{'property'} = $1;
+                    }
+                    else {
+                        die "unparseable: $err";
+                    }
+                }
