@@ -57,14 +57,38 @@ sub cmd_status {
 }
 
 sub cmd_login {
-    orient();
-    $site->login('force' => 1);
-    my $state = $site->state;
-    printf STDERR <<'EOS', $state->{'user_id'} // '<null>', $state->{'token'};
+    my ($check);
+    orient(
+        'k|check' => \$check,
+    );
+    if ($check) {
+        usage "login [-k USER PASSWORD]"
+            if @ARGV != 2;
+        login_if_necessary();
+        my $result = $site->authenticate(
+            'username' => $ARGV[0],
+            'password' => $ARGV[1],
+        );
+        if ($result) {
+            print STDERR "authentication succeeded\n";
+            print STDERR "  token:  $result->{'token'}\n";
+            print STDERR "  userId: $result->{'userId'}\n"
+                if defined $result->{'userId'};
+        }
+        else {
+            print STDERR "authentication failed\n";
+            exit 2;
+        }
+    }
+    else {
+        $site->login('force' => 1);
+        my $state = $site->state;
+        printf STDERR <<'EOS', $state->{'user_id'} // '<null>', $state->{'token'};
 Logged in:
   userId = %s
   token  = %s
 EOS
+    }
 }
 
 sub cmd_get {
@@ -225,24 +249,31 @@ sub cmd_instance_source_replace {
 }
 
 sub cmd_instance_harvest {
-    my %with;
-    my $mod;
+    my (%with, %as, $mod, $id_file);
     my ($query, $max_count, $batch_size, $max_err);
     orient(
+        'j|as-json' => \$as{'json'},
+        'm|as-marc' => \$as{'marc'},
         'h|with-holdings' => \$with{'holdings'},
         'i|with-items'    => \$with{'items'},
-        'p|progress=i' => \$mod,
-        'q|query=s' => \$query,
         'n|limit=i' => \$max_count,
         'k|batch-size=i' => \$batch_size,
         'e|max-errors=i' => \$max_err,
+        'p|progress=i' => \$mod,
+        'f|id-file=s' => \$id_file,
+        'q|query=s' => \$query,
     );
-    usage "instance harvest [-jmt] [-hi] [FILE]" if @ARGV > 1;
+    usage "instance harvest [-jmhi] [-n MAXNUM] [-k BATCHSIZE] [-e MAXERRS] [-f FILE|-q CQL|ID...]"
+        if ($id_file && $query)
+        || ($id_file && @ARGV)
+        || ($query   && @ARGV)
+        ;
     $with{'holdings'} = 1 if $with{'items'};
     my $t0 = time;
     my $err = 0;
     my $remaining = $max_count || (1<<31);
     my $fetch;
+    my @prefix;
     if (defined $query) {
         my $offset = 0;
         if (!defined $batch_size) {
@@ -263,13 +294,25 @@ sub cmd_instance_harvest {
         };
     }
     else {
-        my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+        my $next;
+        if (@ARGV) {
+            $next = sub {
+                return shift @ARGV if @ARGV;
+            };
+        }
+        else {
+            my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+            $next = sub {
+                my $id = <$fh>;
+                return if !defined $id;
+                $id =~ s/\s+.*//;
+                return $id;
+            };
+        }
         $fetch = sub {
             while (1) {
-                my $id = <$fh>;
+                my $id = $next->();
                 $remaining = 0, return if !defined $id;
-                chomp $id;
-                $id =~ s/\s+.*//;
                 my (@instance, $ok);
                 eval { @instance = $site->instance($id); $ok = 1 };
                 if (!$ok) {
@@ -294,62 +337,62 @@ sub cmd_instance_harvest {
             $num{'instances'}++;
             $n++;
             my $id = $instance->id;
-            my $marc;
-            eval {
-                $marc = $instance->marc_record;
-                my ($leader, $fields) = eval { marcparse(\$marc) };
-                @$fields = (
-                    marcfield('001', $id),
-                    grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields
-                );
-                my $classifier;
-                my $f33x = _33x_field_subfields($fields);
-                $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
-                $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
-                if ($with{'holdings'}) {
-                    my @holdings = $instance->holdings;
-                    foreach my $holding (@holdings) {
-                        $num{'holdings'}++;
-                        $n++;
-                        my $loc = $holding->location->code;
-                        my $call_number = $holding->call_number;
-                        undef $call_number if defined $call_number && $call_number !~ /\S/;
-                        push @$fields, marcfield(
-                            '852', ' ', ' ',
-                            'b' => $loc,
-                            _optional('h' => $call_number),
-                            _optional('x' => $classifier),
-                            '0' => $holding->id,
-                        );
-                        if ($with{'items'}) {
-                            my @items = $holding->items;
-                            foreach my $item (@items) {
-                                $num{'items'}++;
-                                $n++;
-                                my $iloc = $item->location->code;
-                                my $vol = $item->volume;
-                                # my $year = $item->year_caption;
-                                # my $copies = @{ $item->copy_numbers || [] };
-                                my $item_call_number = join(' ', grep { defined && length } $call_number, $vol);
-                                undef $item_call_number if $item_call_number !~ /\S/;
-                                push @$fields, marcfield(
-                                    '859', ' ', ' ',
-                                    'b' => $iloc,
-                                    defined($item_call_number) ? ('h' => $item_call_number) : (),
-                                    '0' => $item->id,
-                                );
-                            }
+            if ($as{'marc'}) {
+                my $marc;
+                eval {
+                    $marc = $instance->marc_record;
+                    my ($leader, $fields) = eval { marcparse(\$marc) };
+                    @$fields = (
+                        marcfield('001', $id),
+                        grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields
+                    );
+                    my $classifier;
+                    my $f33x = _33x_field_subfields($fields);
+                    $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
+                    $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
+                    if ($with{'holdings'}) {
+                        my @holdings = $instance->holdings;
+                        my $num_holdings = @holdings;
+                        if ($num_holdings) {
+                            my $num_items = add_holdings_to_marc_fields(
+                                'fields' => $fields,
+                                'holdings' => \@holdings,
+                                'add_items' => $with{'items'},
+                                'classifier' => $classifier,
+                            );
+                            $num{'holdings'} += $num_holdings;
+                            $num{'items'} += $num_items;
+                            $n += $num_holdings + $num_items;
                         }
                     }
+                    $marc = marcbuild($leader, $fields);
+                };
+                if (!defined $marc) {
+                    $marc = _marc_delete_stub($id);
+                    print STDERR "not found: $id\n"
+                        if $verbose;
                 }
-                $marc = marcbuild($leader, $fields);
-            };
-            if (!defined $marc) {
-                $marc = _marc_delete_stub($id);
-                print STDERR "not found: $id\n"
-                    if $verbose;
+                print $marc;
             }
-            print $marc;
+            elsif ($as{'json'}) {
+                if ($with{'holdings'}) {
+                    my @holdings = $instance->holdings;
+                    $instance->{'holdings'} = \@holdings;
+                    my $num_holdings = @holdings;
+                    if ($with{'items'}) {
+                        foreach my $holding (@holdings) {
+                            my @items = $holding->items;
+                            $holding->{'items'} = \@items;
+                            $num{'items'} += @items;
+                            $n += @items;
+                        }
+                    }
+                    $num{'holdings'} += @holdings;
+                    $n += @holdings;
+                }
+                print @prefix, $json->encode($instance);
+                @prefix = ',';
+            }
         }
         if ($verbose && defined $query || $mod && ($n % $mod) == 0) {
             printf STDERR "\r%8d instances : %8d holdings : %8d items",
@@ -361,28 +404,6 @@ sub cmd_instance_harvest {
             @num{qw(instances holdings items)},
             time - $t0;
     }
-}
-
-sub _33x_field_subfields {
-    my ($fields) = @_;
-    my %f33x = map { $_ => {} } qw(336 337 338);
-    foreach (@$fields) {
-        my $tag = $_->[TAG];
-        my $f = $f33x{$tag} or next;
-        my $valref = $_->[VALREF];
-        next if $$valref !~ /\x1f2rda/;
-        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
-            $f33x{$tag}{$1} = 1;
-        }
-    }
-    return \%f33x;
-}
-
-sub _marc_delete_stub {
-    my ($id) = @_;
-    my $leader = '00000dam a2200000 a 4500';
-    my @fields = ( marcfield('001', $id) );
-    return marcbuild($leader, \@fields);
 }
 
 sub cmd_holding {
@@ -470,47 +491,6 @@ sub cmd_source_get {
             $err = ': ' if $err =~ /\S/;
             print STDERR "record $id not found$err\n";
         }
-    }
-}
-
-sub print_cooked_marc {
-    my %arg = @_;
-    my $marcref = $arg{'marcref'} || \$arg{'marc'};
-    my %sub = ('i' => $arg{'instance_id'}, 's' => $arg{'source_id'});
-    my @s999;
-    my %set;
-    foreach (sort keys %sub) {
-        $set{$_} = 1;
-        push @s999, $_ => $sub{$_};
-    }
-    my $dirty;
-    my ($leader, $fields);
-    if (keys %set) {
-        ($leader, $fields) = marcparse($marcref);
-        $dirty = 1;
-        my ($f999) = grep {
-            $_->[TAG] eq '999' &&
-            $_->[IND1] eq 'f'  &&
-            $_->[IND2] eq 'f'
-        } @$fields;
-        if ($f999) {
-            my $valref = $f999->[VALREF];
-            while ($$valref =~ /\x1f([is])([^\x1d-\x1f]+)/g) {
-                my $val = $sub{$_} or next;
-                delete $set{$1} if $2 eq $val;
-            }
-            $f999->[DELETE] = $dirty = keys %set;
-        }
-    }
-    elsif ($arg{'strict'}) {
-        die "no instance or source record IDs to insert into MARC record"
-    }
-    if ($dirty) {
-        push @$fields, marcfield('999', 'f', 'f', @s999);
-        print marcbuild($leader, $fields);
-    }
-    else {
-        print $$marcref;
     }
 }
 
@@ -1030,6 +1010,118 @@ sub login_if_necessary {
     return 0 if defined $token && $token eq $site->token;
     hook('login');
     return 1;
+}
+
+sub add_holdings_to_marc_fields {
+    my %arg = @_;
+    my ($fields, $holdings, $add_items, $classifier) = @arg{qw(fields holdings add_items classifier)};
+    my $num_items = 0;
+    foreach my $holding (@$holdings) {
+        my $loc = $holding->location->code;
+        my $call_number = $holding->call_number;
+        undef $call_number if defined $call_number && $call_number !~ /\S/;
+        push @$fields, marcfield(
+            '852', ' ', ' ',
+            'b' => $loc,
+            _optional('h' => $call_number),
+            _optional('x' => $classifier),
+            '0' => $holding->id,
+        );
+        if ($add_items) {
+            my @items = $holding->items;
+            if (@items) {
+                $num_items += @items;
+                add_items_to_marc_fields(
+                    'fields' => $fields,
+                    'items' => \@items,
+                    'call_number' => $call_number,
+                );
+            }
+        }
+    }
+    return $num_items;
+}
+
+sub add_items_to_marc_fields {
+    my %arg = @_;
+    my ($fields, $items, $call_number) = @arg{qw(fields items call_number)};
+    foreach my $item (@$items) {
+        my $iloc = $item->location->code;
+        my $vol = $item->volume;
+        # my $year = $item->year_caption;
+        # my $copies = @{ $item->copy_numbers || [] };
+        my $item_call_number = join(' ', grep { defined && length } $call_number, $vol);
+        undef $item_call_number if $item_call_number !~ /\S/;
+        push @$fields, marcfield(
+            '859', ' ', ' ',
+            'b' => $iloc,
+            defined($item_call_number) ? ('h' => $item_call_number) : (),
+            '0' => $item->id,
+        );
+    }
+}
+
+sub _33x_field_subfields {
+    my ($fields) = @_;
+    my %f33x = map { $_ => {} } qw(336 337 338);
+    foreach (@$fields) {
+        my $tag = $_->[TAG];
+        my $f = $f33x{$tag} or next;
+        my $valref = $_->[VALREF];
+        next if $$valref !~ /\x1f2rda/;
+        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
+            $f33x{$tag}{$1} = 1;
+        }
+    }
+    return \%f33x;
+}
+
+sub _marc_delete_stub {
+    my ($id) = @_;
+    my $leader = '00000dam a2200000 a 4500';
+    my @fields = ( marcfield('001', $id) );
+    return marcbuild($leader, \@fields);
+}
+
+sub print_cooked_marc {
+    my %arg = @_;
+    my $marcref = $arg{'marcref'} || \$arg{'marc'};
+    my %sub = ('i' => $arg{'instance_id'}, 's' => $arg{'source_id'});
+    my @s999;
+    my %set;
+    foreach (sort keys %sub) {
+        $set{$_} = 1;
+        push @s999, $_ => $sub{$_};
+    }
+    my $dirty;
+    my ($leader, $fields);
+    if (keys %set) {
+        ($leader, $fields) = marcparse($marcref);
+        $dirty = 1;
+        my ($f999) = grep {
+            $_->[TAG] eq '999' &&
+            $_->[IND1] eq 'f'  &&
+            $_->[IND2] eq 'f'
+        } @$fields;
+        if ($f999) {
+            my $valref = $f999->[VALREF];
+            while ($$valref =~ /\x1f([is])([^\x1d-\x1f]+)/g) {
+                my $val = $sub{$_} or next;
+                delete $set{$1} if $2 eq $val;
+            }
+            $f999->[DELETE] = $dirty = keys %set;
+        }
+    }
+    elsif ($arg{'strict'}) {
+        die "no instance or source record IDs to insert into MARC record"
+    }
+    if ($dirty) {
+        push @$fields, marcfield('999', 'f', 'f', @s999);
+        print marcbuild($leader, $fields);
+    }
+    else {
+        print $$marcref;
+    }
 }
 
 sub hook {
