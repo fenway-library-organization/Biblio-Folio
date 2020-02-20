@@ -248,6 +248,25 @@ sub login {
     return $self;
 }
 
+sub authenticate {
+    my ($self, %arg) = @_;
+    my ($user, $password) = @arg{qw(username password)};
+    my $endpoint = $self->config('endpoint');
+    my $res = $self->POST('/authn/login', {
+        'username' => $user,
+        'password' => $password,
+    });
+    return if !$res->is_success;
+    my $token = $res->header('X-Okapi-Token')
+        or die "login succeeded but no token was returned";
+    my $content = eval { $self->json->decode($res->content) }
+        or die "login succeeded but no user data was returned";
+    return {
+        'token' => $token,
+        %$content,
+    };
+}
+
 sub instance {
     my $self = shift;
     return $self->object('instance', @_);
