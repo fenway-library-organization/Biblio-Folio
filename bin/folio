@@ -273,7 +273,7 @@ sub cmd_instance_harvest {
     my $err = 0;
     my $remaining = $max_count || (1<<31);
     my $fetch;
-    my @prefix;
+    my @prefix = qq{\{"instances":[\n};
     if (defined $query) {
         my $offset = 0;
         if (!defined $batch_size) {
@@ -297,7 +297,8 @@ sub cmd_instance_harvest {
         my $next;
         if (@ARGV) {
             $next = sub {
-                return shift @ARGV if @ARGV;
+                return if !@ARGV;
+                return shift @ARGV;
             };
         }
         else {
@@ -390,7 +391,9 @@ sub cmd_instance_harvest {
                     $num{'holdings'} += @holdings;
                     $n += @holdings;
                 }
-                print @prefix, $json->encode($instance);
+                my $out = $json->encode($instance);
+                $out =~ s/\n+\z//;
+                print @prefix, $out;
                 @prefix = ',';
             }
         }
@@ -399,6 +402,7 @@ sub cmd_instance_harvest {
                 @num{qw(instances holdings items)};
         }
     }
+    print "\n]\n}\n" if $as{'json'};
     if ($verbose && defined $query || $mod) {
         printf STDERR "\r%8d instances : %8d holdings : %8d items => %.1f seconds\n",
             @num{qw(instances holdings items)},
