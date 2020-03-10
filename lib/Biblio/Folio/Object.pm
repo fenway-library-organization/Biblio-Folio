@@ -122,7 +122,7 @@ sub _search_results {
 
 sub TO_JSON {
     my %self = %{ shift() };
-    delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)$/ } keys %self};
+    delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)?$/ } keys %self};
     return \%self;
 }
 

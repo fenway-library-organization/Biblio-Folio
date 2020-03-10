@@ -82,7 +82,7 @@ sub parse {
                     $from = $class{$1} ||= class_stub($1);
                 }
                 (my $name = $prop) =~ s/Id(s?)$//;
-                my $name = x2meth($name);
+                $name = x2meth($name.($1||''));
                 define_methods(
                     'name' => $name,
                     'from' => $generic,
@@ -101,7 +101,17 @@ sub parse {
             my %meth = ('name' => $name, 'from' => $class, 'spec' => $spec, 'returns' => \%returns);
             my $cls = $class->{'class'};
             my $err = "$cls.$name = $spec";
-            if ($spec =~ /^{(.+)}$/) {
+            if ($spec =~ /^\{$/) {
+                my $body = '';
+                while (<STDIN>) {
+                    die "unterminated method spec: $err"
+                        if !defined $_;
+                    last if /^\}$/;
+                    $body .= $_;
+                }
+                $meth{'body'} = $body;
+            }
+            elsif ($spec =~ /^{(.+)}$/) {
                 $meth{'body'} = trim($1);
             }
             else {
@@ -109,7 +119,10 @@ sub parse {
                 my ($left, $right) = split / -> /, $spec;
                 ($left, my $middle) = split / :: /, $left;
                 foreach (split / /, $left) {
-                    if (/^([A-Z]\w+)(\[\])?$/) {
+                    if (/^(GET|POST|PUT|DELETE)$/) {
+                        $meth{'method'} = $_;
+                    }
+                    elsif (/^((?:Biblio::Folio::)?[A-Z]\w+)(\[\])?$/) {
                         $meth{'multi'} = $2;
                         $meth{'to'} = $class{$1} ||= class_stub($1);
                     }
@@ -290,7 +303,7 @@ sub class_stub {
     }
     return {
         'class' => $cls,
-        'plural' => $pl,
+        'plural' => x2kind($pl),
         'package' => x2pkg($cls),
         'kind' => x2kind($cls),
     };
@@ -332,7 +345,7 @@ EOS
         my $methods = $class->{'methods'} = $method{$cls} || {};
         foreach my $m (sort keys %$methods) {
             my $method = $methods->{$m};
-            my ($prop, $props, $muri, $body, $returns, $munge) = @$method{qw(property properties uri body returns munge)};
+            my ($prop, $props, $mmeth, $muri, $body, $returns, $munge) = @$method{qw(property properties method uri body returns munge)};
             my $propeval = prop_evaluator($prop || $props);
             my ($rkind, $rcls) = @$returns{qw(kind class)};
             my $sfx = '';
@@ -451,6 +464,7 @@ sub x2pkg {
 
 sub x2kind {
     my ($x) = @_;
+    $x =~ s/.+:://;
     return pkg2kind(kind2pkg($x));
 }
 

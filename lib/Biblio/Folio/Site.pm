@@ -235,15 +235,16 @@ sub login {
     delete $state->{'logged_in'} if $arg{'force'};
     return $self if $state->{'logged_in'} && $arg{'reuse_token'};
     my $endpoint = $self->config('endpoint');
+    my $username = $endpoint->{'user'};
     my $res = $self->POST('/authn/login', {
-        'username' => $endpoint->{'user'},
+        'username' => $username,
         'password' => $endpoint->{'password'},
     }) or die "login failed";
     my $token = $res->header('X-Okapi-Token')
         or die "login didn't yield a token";
-    my $content = $self->json->decode($res->content);
-    my $user_id = $content->{'userId'};
-    @$state{qw(token logged_in user_id)} = ($token, 1, $user_id);
+    @$state{qw(token logged_in)} = ($token, 1);
+    my $user = $self->object('user', 'query' => qq{username == "$username"});
+    $state->{'user_id'} = $user->id;
     $self->state($state);
     return $self;
 }
@@ -444,6 +445,24 @@ sub fetch {
     return @return if wantarray;
     warn "multiple $pkg objects: $uri" if @return > 1;
     return shift @return;
+}
+
+sub create {
+    my ($self, $kind, %arg) = @_;
+    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
+    my $uri = delete $arg{'uri'} || $pkg->_uri_create || $pkg->_uri
+        or die "no URI to create a $pkg";
+    my $res = $self->POST($uri, \%arg);
+    return if !$res->is_success;
+    my $json = $self->json;
+    my $content = eval {
+        $json->decode($res->content);
+    };
+    if (!$content) {
+        return if $res->code ne '201';
+        $content = \%arg;
+    }
+    return $pkg->new('_site' => $self, '_json' => $json, %$content);
 }
 
 ### sub _results {
@@ -1055,6 +1074,77 @@ sub _initialize_classes_and_properties {
     }
     $self->{'_classes'} = \%class;
     $self->{'_properties'} = \%prop2class;
+}
+
+sub marc2instance {
+    my ($self, $marcref, $mapping) = @_;
+    my $conv = $self->{'_marc2instance'} ||= $self->_make_marc2instance($mapping);
+    return $conv->($marcref);
+}
+
+sub _make_marc2instance {
+    use MARC::Loop qw(marcparse TAG VALREF SUBS);
+    my ($self, $mapping) = @_;
+    my $status_id = $self->object('instance_status', 'query' => 'code=="batch"')->id;
+    my $folio = $self->folio;
+    my $json = $self->json;
+    my %rule;
+    foreach my $tag (keys %$mapping) {
+        my $fld_conf = $mapping->{$tag};
+        my $ent = $fld_conf->[0]{'entity'};
+        my @data_elements = $ent ? @$ent : ($fld_conf);
+        foreach my $elem (@data_elements) {
+            1;
+        }
+    }
+    return sub {
+        my ($marc) = @_;
+        my ($leader, $fields) = ($marc->leader, $marc->fields);
+        my %instance = (
+            id => undef,
+            alternativeTitles => [],
+            editions => [],
+            series => [],
+            identifiers => [],
+            contributors => [],
+            subjects => [],
+            classifications => [],
+            publication => [],
+            publicationFrequency => [],
+            publicationRange => [],
+            electronicAccess => [],
+            instanceFormatIds => [],
+            physicalDescriptions => [],
+            languages => [],
+            notes => [],
+            staffSuppress => JSON::false,
+            discoverySuppress => JSON::false,
+            statisticalCodeIds => [],
+            tags => {},
+            holdingsRecords2 => [],
+            natureOfContentTermIds => [],
+            statusId => $status_id,
+        );
+        my $f999 = $marc->field(sub {
+            $_->tag eq '999' && $_->indicators eq 'ff'
+        });
+        if ($f999) {
+            my $i = $f999->subfield('i');
+            $instance{'id'} = $i if defined $i;
+        }
+        my $f001 = $marc->field('001');
+        if ($f001) {
+            my $h = $f001->contents;
+            $instance{'hrid'} = $1 if defined $h;
+        }
+        foreach my $field (@$fields) {
+            my $tag = $field->tag;
+            my $rule = $rule{$tag} or next;
+            1;
+        }
+        $instance{'id'} ||= $folio->uuid;
+        return $json->encode(\%instance);
+    };
 }
 
 sub _old_initialize_classes_and_properties {

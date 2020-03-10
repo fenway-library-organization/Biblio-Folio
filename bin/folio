@@ -21,6 +21,7 @@ use YAML::XS;
 use File::Spec;
 use Time::HiRes qw(time);
 use MARC::Loop qw(marcparse marcfield marcbuild TAG VALREF DELETE IND1 IND2 SUBS);
+use File::Basename qw(dirname basename);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -201,24 +202,19 @@ sub cmd_instance_source_get {
         'M|as-marc' => sub { $format{'MARC'} = 1 },
         'T|as-text' => sub { $format{'TEXT'} = 1 },
     );
-    usage "instance source get [-jmt] INSTANCE_ID..." if !@ARGV;
+    usage "instance source get [-JMT] INSTANCE_ID..." if !@ARGV;
     usage if keys(%format) > 1;
     $format{'JSON'} = 1 if keys(%format) == 0;
     foreach my $id (@ARGV) {
-        my $source = $site->instance_source($id);
-        1;
-        my $res = $site->GET("/source-storage/formattedRecords/$id", {
-            identifier => 'INSTANCE',
-        });
-        my $content = $json->decode($res->content);
-        my $rectype = $content->{'recordType'};
+        my $source = $site->source('instance' => $id);
+        my $rectype = $source->record_type;
         if ($format{'MARC'}) {
             if ($rectype ne 'MARC') {
                 print STDERR "record not in MARC format; $id\n";
                 next;
             }
-            my $marc = $content->{'rawRecord'}{'content'};
-            my $sid = $content->{'id'};
+            my $marc = $source->{'rawRecord'}{'content'};
+            my $sid = $source->id;
             print_cooked_marc(
                 'marcref' => \$marc,
                 'instance_id' => $id,
@@ -237,10 +233,10 @@ sub cmd_instance_source_get {
                 print STDERR "record not in MARC format; $id\n";
                 next;
             }
-            print $content->{'parsedRecord'}{'formattedContent'};
+            print $source->{'parsedRecord'}{'formattedContent'};
         }
         else {
-            print $json->encode($content->{'parsedRecord'}{'content'});
+            print $json->encode($source->{'parsedRecord'}{'content'});
         }
     }
 }
@@ -273,7 +269,7 @@ sub cmd_instance_harvest {
     my $err = 0;
     my $remaining = $max_count || (1<<31);
     my $fetch;
-    my @prefix = qq{\{"instances":[\n};
+    my $prefix = qq{\{"instances":[\n};
     if (defined $query) {
         my $offset = 0;
         if (!defined $batch_size) {
@@ -369,7 +365,7 @@ sub cmd_instance_harvest {
                     $marc = marcbuild($leader, $fields);
                 };
                 if (!defined $marc) {
-                    $marc = _marc_delete_stub($id);
+                    $marc = Biblio::Folio::MARC->stub('instance' => $instance, 'status' => 'd');
                     print STDERR "not found: $id\n"
                         if $verbose;
                 }
@@ -393,8 +389,8 @@ sub cmd_instance_harvest {
                 }
                 my $out = $json->encode($instance);
                 $out =~ s/\n+\z//;
-                print @prefix, $out;
-                @prefix = ',';
+                print $prefix, $out;
+                $prefix = ',';
             }
         }
         if ($verbose && defined $query || $mod && ($n % $mod) == 0) {
@@ -507,7 +503,7 @@ sub cmd_source_search {
         'o|order-by=s' => \$arg{'order_by'},
         'd|deleted' => sub { $arg{'deleted'} = JSON::true },
         'J|as-json' => sub { %format = ('JSON' => 1) },
-        'M|as-json' => sub { %format = ('MARC' => 1) },
+        'M|as-marc' => sub { %format = ('MARC' => 1) },
     );
     usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
@@ -533,21 +529,28 @@ sub cmd_source_search {
 
 sub cmd_source_replace {
     orient();
-    usage "source replace [MARCFILE]" if @ARGV != 1;
+    usage "source replace [MARCFILE]" if @ARGV > 1;
+    my $j = $folio->uuid;
+    my $res = $site->POST("/source-storage/snapshots", {
+        'jobExecutionId' => $j,
+        'status' => 'NEW',
+    });
+    fatal "bad job?" if !$res->is_success;
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
     while (my ($marcref) = read_marc_records($fh, 1)) {
         my $id = marc_source_record_id($marcref);
-        my $res = $site->PUT("/source-storage/records/$id", 
+        my $res = $site->PUT("/source-storage/records/$id", {
             'recordType' => 'MARC',
             'rawRecord' => {
                 'id' => $folio->uuid,
                 'content' => $$marcref,
             },
-            'snapshotId' => '',
+            'snapshotId' => $j,
             'matchedId' => $id,
-        );
+        });
         1;
     }
+    1;  # Then what?
 }
 
 sub cmd_job {
@@ -563,91 +566,167 @@ sub cmd_job_begin {
         'sourceType' => 'ONLINE',
         'jobProfileInfo' => {
             'id' => $folio->uuid,
-            'name' => 'Random job profile',
+            'name' => 'Default job profile',
             'dataType' => 'MARC'
         },
         'userId' => $user_id || $folio->uuid,
     );
-    my $jobexecs = content($site->POST('/change-manager/jobExecutions', \%job));
+    my $res = $site->POST('/change-manager/jobExecutions', \%job);
+    my $jobexecs = content($res);
     if ($jobexecs) {
-        my @jobexecs = @{ $jobexecs->{'jobExecutions'} };
-        foreach my $jobexec (@jobexecs) {
-            my $j = $jobexec->{'id'};
-            print "OK $j\n";
-        }
-        if (@jobexecs > 1) {
-            fatal "multiple jobs";
-        }
+        my ($jobexec, @etc) = @{ $jobexecs->{'jobExecutions'} };
+        fatal "multiple jobs" if @etc;
+        my $j = $jobexec->{'id'};
+        print "OK $j\n";
     }
     else {
-        fatal "no jobexecs returned";
+        fatal "no jobexecs returned:", $res->status_line;
     }
-    # my $snapshot = content($site->POST('/source-storage/snapshots', {
-    #     'jobExecutionId' => $j,
-    #     'status' => 'NEW',
-    # }));
-    #     print <<"EOS";
-    # OK
-    #     job: $j
-    #     snapshot: $snapshot->{'id'}
-    # 
-    # EOS
 }
 
 sub cmd_job_add {
-    # Add a batch of records to a job
-    my ($skip, $batch_size) = (0, 1000);
+    # Add a file of MARC records to a job
+    my $batch_size = 100;
     orient(
-        'p|skip=i' => \$skip,
         'n|batch-size=i' => \$batch_size,
     );
     usage "job add JOB [FILE]" if @ARGV > 2 || @ARGV < 1;
     my $j = shift @ARGV;
     my $uri = "/change-manager/jobExecutions/$j/records";
     my $fh = oread(@ARGV == 0 ? \*STDIN : shift @ARGV);
-    my $n = 0;
-    my $num_skipped;
-    if ($skip) {
-        $num_skipped = skip_marc_records($fh, $skip);
-    }
-    my %metadata = (
+    my $jfile = $site->file("var/jobs/$j.json");
+    my %job = (
         'contentType' => 'MARC_RAW',
-        'counter' => $skip,
+        'counter' => 0,
     );
-    my @records;
-    # Read the desired number of records (or until EOF)
-    if ($skip == 0 || $num_skipped == $skip) {
-        my $marcrefs = read_marc_records($fh, $batch_size);
-        foreach (@$marcrefs) {
+    if (-e $jfile) {
+        %job = %{ read_json(oread($jfile)) };
+    }
+    while (1) {
+        my @marcrefs = read_marc_records($fh, $batch_size);
+        last if !@marcrefs;
+        my @records;
+        foreach (@marcrefs) {
             push @records, { 'record' => $$_ };
         }
-        $n += @$marcrefs;
+        my $n = @marcrefs;
+        my %dto = (
+            'recordsMetadata' => \%job,
+            'initialRecords' => \@records,
+        );
+        if ($n) {
+            $job{'last'} = JSON::false;
+            $job{'counter'} += $n;
+        }
+        else {
+            fatal "no records to add to the job\n";
+        }
+        my $res = $site->POST($uri, \%dto);
+        if ($res->code eq '204') {
+            # Success
+            print "OK $j added $n records\n";
+        }
+        elsif ($res->code eq '404') {
+            fatal "no such job: $j";
+        }
+        elsif ($res->code eq '422') {
+            # Validation records
+            die;
+        }
     }
+    write_json(owrite($jfile), \%job);
+}
+
+sub cmd_job_end {
+    orient();
+    usage "job end JOB" if @ARGV != 1;
+    my $j = shift @ARGV;
+    my $uri = "/change-manager/jobExecutions/$j/records";
+    my $jfile = $site->file("var/jobs/$j.json");
+    my %job = %{ read_json(oread($jfile)) };
+    $job{'last'} = JSON::true;
+    $job{'total'} = $job{'counter'};
     my %dto = (
-        'recordsMetadata' => \%metadata,
-        'initialRecords' => \@records,
+        'recordsMetadata' => \%job,
+        'initialRecords' => [],
     );
-    if ($n) {
-        $metadata{'last'} = JSON::false;
-        $metadata{'counter'} += $n;
-    }
-    elsif ($skip) {
-        $metadata{'last'} = JSON::true;
-    }
-    else {
-        fatal "no records to add to the job\n";
-    }
     my $res = $site->POST($uri, \%dto);
     if ($res->code eq '204') {
         # Success
-        print "OK $j : $n records posted\n";
+        print "OK $j ended\n";
+        write_json(owrite($jfile), \%job);
     }
     elsif ($res->code eq '404') {
         fatal "no such job: $j";
     }
-    elsif ($res->code eq '422') {
-        # Validation records
-        die;
+    else {
+        fatal "job $j not ended properly:", $res->status_line;
+    }
+}
+
+sub cmd_job_status {
+    orient();
+    usage "job status JOB" if @ARGV != 1;
+    my ($j) = @ARGV;
+    my $job = $site->jobexec($j);
+    1;
+}
+
+sub cmd_job_results {
+    orient();
+    usage "job results JOB" if @ARGV != 1;
+    my ($j) = @ARGV;
+    my $results = content($site->GET("/metadata-provider/logs/$j"));
+    my @sources = $site->objects('source', {'query' => 'snapshotId=="$j"'});
+    1;
+}
+
+sub cmd_file {
+    subcmd();
+}
+
+sub cmd_file_batch {
+    subcmd();
+}
+
+sub cmd_file_batch_new {
+    orient();
+    my %base2path;
+    foreach my $path (@ARGV) {
+        my $base = basename($path);
+        fatal "multiple files with the same base name: $base"
+            if exists $base2path{$base};
+        $base2path{$base} = $path;
+    }
+    my @fdefs = (
+        map { { 'name' => $_ } } sort keys %base2path
+    );
+    my $batch = $site->create('upload_definition', {
+        'fileDefinitions' => \@fdefs,
+    });
+    my $bid = $batch->id;
+    print "OK $bid\n";
+    my @files = @{ $batch->file_definitions };
+    foreach my $f (@files) {
+        my $fid = $f->id;
+        my $base = $f->name;
+        my $path = $base2path{$base}
+            or fatal "wtf?!";
+        print "FILE $fid $path\n";
+    }
+}
+
+sub cmd_file_batch_upload {
+    orient();
+    usage if @ARGV != 2;
+    my $bid = shift @ARGV;
+    my $batch = $site->upload_definition($bid);
+    my @files = @{ $batch->file_definitions };
+    foreach my $path (@ARGV) {
+        my $base = basename($path);
+        fatal "no such file in batch $bid: $base"
+            if !grep { $_->name eq $base } @files;
+        1;
     }
 }
 
@@ -788,12 +867,103 @@ sub cmd_address_types {
     print $json->encode($res);
 }
 
+sub cmd_marc { subcmd() }
+sub cmd_marc_to { subcmd() }
+
+sub cmd_marc_to_instance {
+    # MARC records (as raw MARC21) ==> instances (as JSON)
+    my ($mapping_file);
+    orient(
+        'm|mapping=f' => \$mapping_file,
+    );
+    usage if @ARGV > 1;
+    my $fh = @ARGV ? oread(@ARGV) : \*STDIN;
+    my $mapping;
+    if (defined $mapping_file) {
+        $mapping = read_json(oread($mapping_file));
+    }
+    else {
+        $mapping = content($site->get('/mapping-rules'));
+    }
+    json_output_loop({}, 'instances', sub {
+        my ($marcref) = read_marc_records($fh, 1);
+        return if !defined $marcref;
+        return $site->marc2instance($marcref, $mapping);
+    });
+}
+
+sub cmd_ref {
+    subcmd();
+}
+
+sub cmd_ref_get {
+    orient();
+    my @kinds = @ARGV ? @ARGV : ref_kinds();
+    foreach my $kind (@kinds) {
+        my @objects = $site->object($kind);
+        1;
+    }
+}
+
 # --- Supporting functions
+
+sub ref_kinds {
+    return qw(
+        alternative_title_type
+        call_number_type
+        classification_type
+        contributor_name_type
+        contributor_type
+        electronic_access_relationship
+        holdings_note_type
+        holdings_type
+        identifier_type
+        ill_policy
+        instance_format
+        instance_note_type
+        instance_relationship_type
+        instance_status
+        instance_type
+        item_damaged_status
+        item_note_type
+        loan_type
+        location_unit
+        location
+        material_type
+        modes_of_issuance
+        nature_of_content_term
+        service_point
+        shelf_location
+        statistical_code_type
+        statistical_code
+    );
+}
+
+sub json_output_loop {
+    my ($hash, $key, $code) = @_;
+    my $prefix = $json->encode($hash);
+    my $newhash = $json->encode({$key => []});
+    $prefix =~ s/,?\n}\n?\z/,\n<<$newhash>>/;
+    $prefix =~ s/\,\n<<\{("[^":]+":\[)\]\s*\}>>/,\n$1/;
+    while (1) {
+        my @next = $code->();
+        last if !@next;
+        foreach (@next) {
+            print $prefix, $json->encode($_);
+            $prefix = ',';
+        }
+    }
+    print "\n]\n}\n";
+}
 
 sub marc_source_record_id {
     my ($marcref) = @_;
-    my ($leader, $fields) = marcparse($marcref, 'only' => ['999']);
-    return map { $$_ =~ /\x1fs([^\s\x1d-\x1f]+)/ ? ($1) : () } @$fields;
+    my ($leader, $fields) = marcparse($marcref, 'only' => {'999' => 1});
+    foreach my $field (@$fields) {
+        my $valref = $field->[VALREF];
+        return $1 if $$valref =~ /\x1fs([^\s\x1d-\x1f]+)/;
+    }
+    return;
 }
 
 sub cql_search_results {
@@ -943,7 +1113,7 @@ sub read_marc_records {
         last if !defined $marc;
         push @records, \$marc;
     }
-    return \@records;
+    return wantarray ? @records : \@records;
 }
 
 sub read_json {
@@ -952,6 +1122,11 @@ sub read_json {
     my $str = <$fh>;
     return if !defined $str;
     return $json->decode($str);
+}
+
+sub write_json {
+    my ($fh, $data) = @_;
+    print $fh $json->encode($data);
 }
 
 sub oread {
@@ -967,6 +1142,23 @@ sub oread {
     else {
         open $fh, '<', $f
             or fatal "open $f: $!";
+    }
+    return $fh;
+}
+
+sub owrite {
+    my ($f) = @_;
+    my $fh;
+    if ($f eq '-' || $f eq '/dev/stdout') {
+        return \*STDOUT;
+    }
+    elsif ($f =~ /\.gz/) {
+        open $fh, "|gzip > $f"
+            or fatal "exec gzip > $f: $!";
+    }
+    else {
+        open $fh, '>', $f
+            or fatal "open $f for writing: $!";
     }
     return $fh;
 }
@@ -1227,7 +1419,7 @@ sub usage {
         while (<$fh>) {
             $incmd = $1, next if /^sub cmd_(\S+)/;
             undef($incmd), next if /^\}/;
-            next if !/^(?:    |\t)usage "(.+)"/ || !$incmd;
+            next if !/^(?:    |\t)(?:my \$)?usage (?:= )? "(.+)"/ || !$incmd;
             push @commands, $1;
             $usage = '@SITE ' . $1 if $incmd eq $cmd;
         }
