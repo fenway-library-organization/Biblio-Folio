@@ -338,15 +338,17 @@ sub cmd_instance_harvest {
                 my $marc;
                 eval {
                     $marc = $instance->marc_record;
-                    my ($leader, $fields) = eval { marcparse(\$marc) };
+                    my ($leader, $fields) = ($marc->leader, $marc->fields);
                     @$fields = (
                         marcfield('001', $id),
                         grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields
                     );
+# XXX This whole hack with $classifier is crazy -- it should be done in a separate, post-processing script (or plugin)
                     my $classifier;
                     my $f33x = _33x_field_subfields($fields);
                     $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
                     $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
+# END crazy hack
                     if ($with{'holdings'}) {
                         my @holdings = $instance->holdings;
                         my $num_holdings = @holdings;
@@ -900,7 +902,7 @@ sub cmd_ref_get {
     orient();
     my @kinds = @ARGV ? @ARGV : ref_kinds();
     foreach my $kind (@kinds) {
-        my @objects = $site->object($kind);
+        my @objects = $site->objects($kind);
         1;
     }
 }
@@ -1220,6 +1222,7 @@ sub add_holdings_to_marc_fields {
             '852', ' ', ' ',
             'b' => $loc,
             _optional('h' => $call_number),
+# XXX See "crazy hack" above!
             _optional('x' => $classifier),
             '0' => $holding->id,
         );

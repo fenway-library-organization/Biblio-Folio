@@ -8,7 +8,7 @@ use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 
 sub new {
     my $cls = shift;
     my $self = bless {
-        'fields' => [],
+        #'fields' => [],
         'dirty' => 0,
         @_,
     }, $cls;
@@ -16,11 +16,11 @@ sub new {
     return $self;
 }
 
-sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]{'leader'} || _default_leader() }
-sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]{'fields'} }
+sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
+sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
 sub marcref { @_ > 1 ? $_[0]{'marcref'} = $_[1] : $_[0]{'marcref'} }
 sub dirty { @_ > 1 ? $_[0]{'dirty'} = $_[1] : $_[0]{'dirty'} }
-sub status { @_ > 1 ? substr($_[0]{'leader'},5,1) = $_[1] : substr($_[0]{'leader'},5,1) }
+sub status { @_ > 1 ? substr($_[0]{'leader'},5,1) = $_[1] : substr($_[0]->parse->{'leader'},5,1) }
 
 sub instance { @_ > 1 ? $_[0]{'instance'} = $_[1] : $_[0]{'instance'} }
 sub source_record { @_ > 1 ? $_[0]{'source_record'} = $_[1] : $_[0]{'source_record'} }
@@ -147,19 +147,19 @@ sub add_identifiers {
 
 sub stub {
     my ($self, %arg) = @_;
-    if (!ref $self) {
-        my $leader = defined $arg{'leader'} ? $arg{'leader'} : _default_leader();
-        $self = $self->new(
-            'leader' => $leader,
-        );
+    my ($leader, $status, $instance) = @arg{qw(leader status instance)};
+    if (ref $self) {
+        $leader ||= $self->leader;
+        $instance ||= $self->instance;
     }
-    my @fields = ref($self) ? $self->fields : (marcfield('001', $self->id));
-    my $leader = $arg{'leader'} || (ref $self ? $self->leader : '00000cam a2200000 a 4500');
-    my $status = $arg{'status'} || (ref $self ? $self->status : 'c');
+    else {
+        $leader ||= _default_leader();
+    }
     if (defined $status) {
         die "invalid status: $status" if $status !~ /^[a-z]$/;
         substr($leader, 5, 1) = $status;
     }
+    my @fields = $instance ? (marcfield('001', $instance->id)) : ();
     return marcbuild($leader, \@fields);
 }
 

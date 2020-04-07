@@ -33,13 +33,13 @@ build();
 
 sub parse {
     my $class;
-    my $key;
+#my $key;
     while (<STDIN>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         if (/^\[\*\]$/) {
             # Begin generic block (i.e., stuff to put in Biblio::Folio::Object)
             $class = $generic;
-            undef $key;
+#undef $key;
         }
         elsif (/^\[(.+)\]$/) {
             # Begin class block
@@ -48,7 +48,7 @@ sub parse {
             $cls = $class->{'class'};
             # die "class $cls redefined" if $class{$cls};
             $class{$cls} ||= $class;
-            undef $key;
+#undef $key;
             define_methods(
                 'from' => $generic,
                 'to' => $class,
@@ -56,24 +56,27 @@ sub parse {
                 'multi' => 1,
             );
         }
+        elsif (/^super(?:class)?\s*=\s*(.+)$/) {
+            $class->{'super'} = trim($1);
+        }
         elsif (/^(uri(?:\.\w+)?)\s*=\s*(.+)$/) {
             # URI for the class
             my ($k, $v) = ($1, $2);
-            undef $key;
+#undef $key;
             $k =~ s/\.get$//i;
             $k =~ tr/./_/;
             $class->{$k} = $v;
         }
         elsif (/^ttl\s*=\s*(.+)$/) {
             # TTL for the class (how long it's cached)
-            undef $key;
+#undef $key;
             $class->{'ttl'} = $1;
         }
         elsif (/^(references)\s*=\s*(.+)$/) {
             # Inbound foreign keys -- i.e., properties (typically found in
             # objects of other classes) that store a UUID for an object in
             # *this* class
-            $key = $1;
+#$key = $1;
             my @references;
             foreach my $prop (split /,\s*/, $2) {
                 my $multi = 1 if $prop =~ s/\[\]//;
@@ -96,7 +99,7 @@ sub parse {
         elsif (/^(method\s*(\w+))\s*=\s*(.+)$/) {
             # Method definition
             my ($name, $spec) = ($2, trim($3));
-            ($key = $1) =~ s/\s+/ /g;
+#($key = $1) =~ s/\s+/ /g;
             my %returns;
             my %meth = ('name' => $name, 'from' => $class, 'spec' => $spec, 'returns' => \%returns);
             my $cls = $class->{'class'};
@@ -165,26 +168,48 @@ sub parse {
             }
             define_methods(%meth);
         }
+        elsif (/^data\s*=\s*(.+)/) {
+            my $name = $1 . '.json';
+            my $kind = $class->{'kind'};
+            define_methods(
+                'name' => '_data_file_name',
+                'from' => $class,
+                'body' => sprintf(q{return %s;}, quote($name)),
+            );
+            define_methods(
+                'name' => '_all',
+                'from' => $class,
+                'body' => sprintf(q{return $self->site->objects(%s, 'limit' => 1<<31);}, quote($kind)),
+            );
+        }
         elsif (/^(\w+)\s*=\s*(.+)$/) {
             # Misc. other class properties; for example:
-            #   method with_a_body = { my ($self) = @_; return sqrt($self->{'foo'}) }
-            #   method literal_scalar = 999
-            #   method literal_hash_ref = +{ 'qux' => rand() }
+            #   foo = { my ($self) = @_; return sqrt($self->{'foo'}) }
+            #   bar = 999
+            #   baz = +{ 'qux' => rand() }
             # Whatever is specified as the value (the bit after "=") is inserted verbatim into the generated code
             my ($k, $v) = ($1, trim($2));
-            $key = '_' . $k;
+            my $key = '_' . $k;
             my $cls = $class->{'class'};
             my $methods = $method{$cls} ||= {};
+            my $body;
             if ($v =~ /^{(.*)}$/) {
-                $methods->{'_'.$k} = {
-                    'body' => trim($1),
-                };
+                $body = trim($1);
+                #$methods->{$key} = {
+                #    'body' => trim($1),
+                #};
             }
             else {
-                $methods->{'_'.$k} = {
-                    'body' => $v,
-                };
+                $body = sprintf("return %s;", $v);  # Note quote($v)
+                #$methods->{$key} = {
+                #    'body' => sprintf("return %s;", quote($v)),
+                #};
             }
+            define_methods(
+                'name' => $key,
+                'from' => $class,
+                'body' => $body,
+            );
         }
     }
 }
@@ -327,8 +352,10 @@ EOS
         my ($ttl, $uri) = @$class{qw(ttl uri)};
         $uri =~ s/{[^{}]+}/%s/ if defined $uri;
         printf qq{package %s;\n}, $pkg;
-        printf qq{\n\@%s::ISA = qw(Biblio::Folio::%s);\n}, $pkg, OBJECT
-            if $cls ne OBJECT;
+        if ($cls ne OBJECT) {
+            my $super = x2pkg($class->{'super'} || OBJECT);
+            printf qq{\n\@%s::ISA = qw(%s);\n}, $pkg, $super;
+        }
         printf qq{\nsub _ttl { %s }}, quote($ttl) if defined $ttl;
         if (defined $uri) {
             printf qq{\nsub _uri { %s }}, quote($uri);
@@ -412,6 +439,9 @@ sub prop_evaluator {
     my ($props) = @_;
     if (ref $props) {
         return '(' . join(' // ', map { sprintf q{$self->{'%s'}}, $_ } @$props) . ')';
+    }
+    elsif (!defined $props) {
+        return 'undef';
     }
     else {
         return sprintf q{$self->{'%s'}}, $props;

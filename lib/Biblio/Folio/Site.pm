@@ -278,6 +278,10 @@ sub location {
     return $self->object('location', @_);
 }
 
+sub all {
+    my ($self, $kind) = @_;
+}
+
 sub cached {
     my ($self, $kind, $id) = @_;
     return if !defined $id;
@@ -285,7 +289,7 @@ sub cached {
     my $cached = $self->{'_cached_object'}{$key};
     my $t = time;
     return $cached->{'object'} if $cached && $cached->{'expiry'} >= $t;
-    my $obj = eval { $self->object($kind, $id) };
+    my $obj = ref($id) =~ /^Biblio::Folio::/ ? $id : eval { $self->object($kind, $id) };
     my $ttl = $obj->_ttl || 3600;  # One hour
     if ($ttl != -1) {
         $self->{'_cached_object'}{$key} = {
@@ -359,6 +363,7 @@ sub object {
             }
         }
     }
+    @objs = map { $self->cached($kind, $_) } @objs;
     return @objs if wantarray;
     return $objs[0] if @objs == 1;
     return \@objs;
@@ -417,11 +422,13 @@ sub fetch {
                 @return = $pkg->_search_results($content, @munge);
             }
         }
-        elsif (!defined $id) {
-            die "I can't fetch a $pkg without a query or an ID";
-        }
         else {
-            $uri = sprintf($uri, $id);
+            if (defined $id) {
+                $uri = sprintf($uri, $id);
+            }
+            elsif ($uri !~ s{/%s$}{}) {
+                die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
+            }
             $res = $self->GET($uri);
             $code = $res->code;
             if ($res->is_success) {
@@ -504,7 +511,9 @@ sub create {
 ### }
 
 sub objects {
-    my ($self, $uri, %arg) = @_;
+    my ($self, $kind, %arg) = @_;
+    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
+    my $uri = $pkg->_uri_search || $pkg->_uri;
     my $key = delete $arg{'key'};
     my $res = $self->GET($uri, \%arg);
     return if !$res->is_success;
@@ -518,7 +527,9 @@ sub objects {
     }
     my $objects = $content->{$key};
     die "not an array: $key" if !$objects || ref($objects) ne 'ARRAY';
-    return $objects;
+    return map {
+        $pkg->new('_site' => $self, '_json' => $self->json, %$_)
+    } @$objects;
 }
 
 sub _build_matching {

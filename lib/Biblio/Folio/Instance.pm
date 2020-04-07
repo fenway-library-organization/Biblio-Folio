@@ -23,7 +23,4 @@ sub holdings {
     return @holdings;
 }
 
-sub marc_record {
-}
-
 1;

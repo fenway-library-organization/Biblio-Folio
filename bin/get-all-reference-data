@@ -1,0 +1,69 @@
+#!/bin/zsh -e
+
+typeset root=${FOLIO_ROOT:-/usr/local/folio}
+
+main() {
+    [[ $1 == @* ]] || usage
+    typeset site=${1[2,-1]}; shift
+    typeset dir
+    if [[ $1 == /* ]]; then
+        dir=$1; shift
+    else
+        dir=$root/site/$site/ref
+    fi
+    if (( # == 0 )); then
+        set $(all-ref-data-keys)
+    else
+        check-ref-data-keys $@
+    fi
+    typeset key
+    for key in $@; do
+        folio @$site get /$key > $dir/$key.json
+    done
+}
+
+check-ref-data-keys() {
+    typeset key
+    typeset -A known
+    for key in $(all-ref-data-keys); do
+        known[$key]=1
+    done
+    for key in $@; do
+        [[ -n ${known[$key]} ]] || fatal "unknown reference data key: $key"
+    done
+}
+
+all-ref-data-keys() {
+    typeset -a keys=(
+        alternative-title-types
+        call-number-types
+        classification-types
+        contributor-name-types
+        contributor-types
+        electronic-access-relationships
+        holdings-note-types
+        holdings-types
+        identifier-types
+        ill-policies
+        instance-formats
+        instance-note-types
+        instance-relationship-types
+        instance-statuses
+        instance-types
+        item-damaged-statuses
+        item-note-types
+        loan-types
+        location-units
+        locations
+        material-types
+        modes-of-issuance
+        nature-of-content-terms
+        service-points
+        shelf-locations
+        statistical-code-types
+        statistical-codes
+    )
+    print $keys
+}
+
+main "$@"
