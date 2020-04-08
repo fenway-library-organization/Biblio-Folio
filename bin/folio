@@ -52,20 +52,20 @@ $cmd =~ tr/-/_/;
 # --- Command handlers
 
 sub cmd_status {
-    orient();
+    my $site = orient();
     my $state = $site->state;
 	print $json->encode($state);
 }
 
 sub cmd_login {
     my ($check);
-    orient(
+    my $site = orient(
         'k|check' => \$check,
     );
     if ($check) {
         usage "login [-k USER PASSWORD]"
             if @ARGV != 2;
-        login_if_necessary();
+        login_if_necessary($site);
         my $result = $site->authenticate(
             'username' => $ARGV[0],
             'password' => $ARGV[1],
@@ -93,7 +93,7 @@ EOS
 }
 
 sub cmd_get {
-    orient();
+    my $site = orient();
     usage "get URI [KEY=VAL]..." if !@ARGV;
     my @args = (shift @ARGV);
     if (@ARGV) {
@@ -112,8 +112,21 @@ sub cmd_get {
     print $json->encode($json->decode($res->content));
 }
 
+sub cmd_search {
+    my %arg;
+    my $site = orient(
+        'm|offset=i' => \$arg{'offset'},
+        'n|limit=i' => \$arg{'limit'},
+        'o|order-by=s' => \$arg{'order_by'},
+    );
+    usage "search [-m OFFSET] [-n LIMIT] [-o ORDERBY] URI CQL" if @ARGV != 2;
+    my ($uri, $query) = @ARGV;
+    my $results = $site->search($uri, $query, %arg);
+    print $json->encode($results);
+}
+
 sub cmd_post {
-    orient();
+    my $site = orient();
     usage "post URI JSONFILE|[KEY=VAL]..." if !@ARGV;
     my $uri = shift @ARGV;
     my @args;
@@ -133,7 +146,7 @@ sub cmd_post {
 }
 
 sub cmd_put {
-    orient();
+    my $site = orient();
     usage "put URI JSONFILE|[KEY=VAL]..." if !@ARGV;
     my $uri = shift @ARGV;
     my @args;
@@ -158,7 +171,7 @@ sub cmd_instance {
 
 sub cmd_instance_get {
     my ($with_holdings, $with_items, @properties);
-    orient(
+    my $site = orient(
         'h|with-holdings' => \$with_holdings,
         'i|with-items' => \$with_items,
         'p|properties=s' => sub { push @properties, split /\,/, $_[1] },
@@ -182,7 +195,7 @@ sub cmd_instance_get {
 }
 
 sub cmd_instance_search {
-    orient();
+    my $site = orient();
     usage "instance search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->GET("/inventory/instances", {
@@ -197,7 +210,7 @@ sub cmd_instance_source {
 
 sub cmd_instance_source_get {
     my %format;
-    orient(
+    my $site = orient(
         'J|as-json' => sub { $format{'JSON'} = 1 },
         'M|as-marc' => sub { $format{'MARC'} = 1 },
         'T|as-text' => sub { $format{'TEXT'} = 1 },
@@ -247,7 +260,7 @@ sub cmd_instance_source_replace {
 sub cmd_instance_harvest {
     my (%with, %as, $mod, $id_file);
     my ($query, $max_count, $batch_size, $max_err);
-    orient(
+    my $site = orient(
         'j|as-json' => \$as{'json'},
         'm|as-marc' => \$as{'marc'},
         'h|with-holdings' => \$with{'holdings'},
@@ -413,7 +426,7 @@ sub cmd_holding {
 }
 
 sub cmd_holding_get {
-    orient();
+    my $site = orient();
     usage "holding get HOLDING_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $irec = eval { get_holding($id) };
@@ -430,7 +443,7 @@ sub cmd_holding_get {
 }
 
 sub cmd_holding_search {
-    orient();
+    my $site = orient();
     usage "holding search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->GET("/holdings-storage/holdings", {
@@ -444,7 +457,7 @@ sub cmd_item {
 }
 
 sub cmd_item_get {
-    orient();
+    my $site = orient();
     usage "item get ITEM_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $irec = eval { get_item($id) };
@@ -461,7 +474,7 @@ sub cmd_item_get {
 }
 
 sub cmd_item_search {
-    orient();
+    my $site = orient();
     usage "item search CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
     my $srec = $site->GET("/item-storage/items", {
@@ -475,7 +488,7 @@ sub cmd_source {
 }
 
 sub cmd_source_get {
-    orient();
+    my $site = orient();
     usage "source get SOURCE_RECORD_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
         my $srec = eval { $json->decode($site->GET("/source-storage/records/$id")->content) };
@@ -499,7 +512,7 @@ sub cmd_source_get {
 sub cmd_source_search {
     my %arg;
     my %format = ('JSON' => 1);
-    orient(
+    my $site = orient(
         'm|offset=i' => \$arg{'offset'},
         'n|limit=i' => \$arg{'limit'},
         'o|order-by=s' => \$arg{'order_by'},
@@ -509,7 +522,7 @@ sub cmd_source_search {
     );
     usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @ARGV != 1;
     my ($cql) = @ARGV;
-    my $content = cql_search_results('/source-storage/records', $cql, %arg);
+    my $content = $site->search('/source-storage/records', $cql, %arg);
     my ($total, $sources) = @$content{qw(totalRecords records)};
     my $n = 0;
     foreach my $srec (@$sources) {
@@ -530,7 +543,7 @@ sub cmd_source_search {
 }
 
 sub cmd_source_replace {
-    orient();
+    my $site = orient();
     usage "source replace [MARCFILE]" if @ARGV > 1;
     my $j = $folio->uuid;
     my $res = $site->POST("/source-storage/snapshots", {
@@ -560,7 +573,7 @@ sub cmd_job {
 }
 
 sub cmd_job_begin {
-    orient();
+    my $site = orient();
     usage "job begin" if @ARGV;
     my $user_id = $site->state->{'user_id'};
     my %job = (
@@ -589,7 +602,7 @@ sub cmd_job_begin {
 sub cmd_job_add {
     # Add a file of MARC records to a job
     my $batch_size = 100;
-    orient(
+    my $site = orient(
         'n|batch-size=i' => \$batch_size,
     );
     usage "job add JOB [FILE]" if @ARGV > 2 || @ARGV < 1;
@@ -640,7 +653,7 @@ sub cmd_job_add {
 }
 
 sub cmd_job_end {
-    orient();
+    my $site = orient();
     usage "job end JOB" if @ARGV != 1;
     my $j = shift @ARGV;
     my $uri = "/change-manager/jobExecutions/$j/records";
@@ -667,7 +680,7 @@ sub cmd_job_end {
 }
 
 sub cmd_job_status {
-    orient();
+    my $site = orient();
     usage "job status JOB" if @ARGV != 1;
     my ($j) = @ARGV;
     my $job = $site->jobexec($j);
@@ -675,7 +688,7 @@ sub cmd_job_status {
 }
 
 sub cmd_job_results {
-    orient();
+    my $site = orient();
     usage "job results JOB" if @ARGV != 1;
     my ($j) = @ARGV;
     my $results = content($site->GET("/metadata-provider/logs/$j"));
@@ -692,7 +705,7 @@ sub cmd_file_batch {
 }
 
 sub cmd_file_batch_new {
-    orient();
+    my $site = orient();
     my %base2path;
     foreach my $path (@ARGV) {
         my $base = basename($path);
@@ -719,7 +732,7 @@ sub cmd_file_batch_new {
 }
 
 sub cmd_file_batch_upload {
-    orient();
+    my $site = orient();
     usage if @ARGV != 2;
     my $bid = shift @ARGV;
     my $batch = $site->upload_definition($bid);
@@ -738,7 +751,7 @@ sub cmd_source_batch {
 
 sub cmd_source_batch_create {
     my $batch_size = 500;
-    orient(
+    my $site = orient(
         'n|batch-size=i' => \$batch_size,
     );
     usage "source batch create [FILE]" if @ARGV > 1;
@@ -761,7 +774,7 @@ sub cmd_group {
 
 sub cmd_group_search {
     my ($map);
-    orient(
+    my $site = orient(
         'm' => \$map,
     );
     usage "group search CQL" if @ARGV != 1;
@@ -786,7 +799,7 @@ sub cmd_group_search {
 }
 
 sub cmd_group_get {
-    orient();
+    my $site = orient();
     usage "group get ID..." if !@ARGV;
     my @groups;
     foreach my $id (@ARGV) {
@@ -802,26 +815,21 @@ sub cmd_group_get {
 }
 
 sub cmd_user_search {
-    my ($offset, $limit, $order_by);
-    orient(
-        'm|offset=i' => \$offset,
-        'n|limit=i' => \$limit,
-        'o|order-by=s' => \$order_by,
+    my %arg;
+    my $site = orient(
+        'm|offset=i' => \$arg{'offset'},
+        'n|limit=i' => \$arg{'limit'},
+        'o|order-by=s' => \$arg{'order_by'},
     );
     usage "user search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
-    my $users = content($site->GET("/users", {
-        'query' => $query,
-        _optional('offset' => $offset),
-        _optional('limit' => $limit),
-        _optional('order_by' => $order_by),
-        # 'orderBy' => 'username'
-    }));
+    my $users = $site->search("/users", $query, %arg);
+    1;
     print $json->encode($users);
 }
 
 sub cmd_user_get {
-    orient();
+    my $site = orient();
     usage "user get ID..." if !@ARGV;
     my @users;
     foreach my $id (@ARGV) {
@@ -838,7 +846,7 @@ sub cmd_user_get {
 
 sub cmd_user_match {
     my %arg;
-    orient(
+    my $site = orient(
         's|batch-size=i' => \$arg{'batch_size'},
         'p|parser=s' => \$arg{'parser_cls'},
         'j|as_json' => \$arg{'as_json'},
@@ -849,7 +857,7 @@ sub cmd_user_match {
 
 sub cmd_user_load {
     my %arg;
-    orient(
+    my $site = orient(
         'n|dry-run' => \$dryrun,
         's|batch-size=i' => \$arg{'batch_size'},
         'p|parser=s' => \$arg{'parser_cls'},
@@ -863,7 +871,7 @@ sub cmd_address {
 }
 
 sub cmd_address_types {
-    orient();
+    my $site = orient();
     usage "address types" if @ARGV;
     my $res = content($site->GET('/addresstypes'));
     print $json->encode($res);
@@ -875,7 +883,7 @@ sub cmd_marc_to { subcmd() }
 sub cmd_marc_to_instance {
     # MARC records (as raw MARC21) ==> instances (as JSON)
     my ($mapping_file);
-    orient(
+    my $site = orient(
         'm|mapping=f' => \$mapping_file,
     );
     usage if @ARGV > 1;
@@ -899,47 +907,29 @@ sub cmd_ref {
 }
 
 sub cmd_ref_get {
-    orient();
-    my @kinds = @ARGV ? @ARGV : ref_kinds();
-    foreach my $kind (@kinds) {
-        my @objects = $site->objects($kind);
-        1;
+    my $dir;
+    my $site = orient(
+        'd|output-directory=s' => \$dir,
+    );
+    $dir ||= $site->dir('ref');
+    if (@ARGV) {
+        usage "ref get [NAME...]" if grep { m{/} } @ARGV;
+        s/\.json$// for @ARGV;
+    }
+    -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
+    my %datafile = Biblio::Folio::Classes->datafiles;
+    my %want = map { $_ => 1 } @ARGV;
+    foreach my $cls (sort keys %datafile) {
+        my $name = $datafile{$cls};
+        next if %want && !$want{$name};
+        my $file = sprintf("%s/%s.json", $dir, $name);
+        my @objects = $cls->_all;
+        my $fh = owrite($file);
+        print $fh $json->encode(\@objects);
     }
 }
 
 # --- Supporting functions
-
-sub ref_kinds {
-    return qw(
-        alternative_title_type
-        call_number_type
-        classification_type
-        contributor_name_type
-        contributor_type
-        electronic_access_relationship
-        holdings_note_type
-        holdings_type
-        identifier_type
-        ill_policy
-        instance_format
-        instance_note_type
-        instance_relationship_type
-        instance_status
-        instance_type
-        item_damaged_status
-        item_note_type
-        loan_type
-        location_unit
-        location
-        material_type
-        modes_of_issuance
-        nature_of_content_term
-        service_point
-        shelf_location
-        statistical_code_type
-        statistical_code
-    );
-}
 
 sub json_output_loop {
     my ($hash, $key, $code) = @_;
@@ -966,19 +956,6 @@ sub marc_source_record_id {
         return $1 if $$valref =~ /\x1fs([^\s\x1d-\x1f]+)/;
     }
     return;
-}
-
-sub cql_search_results {
-    my ($uri, $cql, %arg) = @_;
-    my $srec = eval {
-        $site->GET($uri, {
-            'query' => $cql,
-            _optional('offset' => $arg{'offset'}),
-            _optional('limit' => $arg{'limit'}),
-            _optional('order_by' => $arg{'order_by'}),
-        })
-    } or fatal "search failed: $cql";
-    return $json->decode($srec->content);
 }
 
 sub match_or_load_users {
@@ -1203,6 +1180,7 @@ sub get_item {
 }
 
 sub login_if_necessary {
+    my ($site) = @_;
     my $token = $site->token;
     $site->login('reuse_token' => 1);
     return 0 if defined $token && $token eq $site->token;
@@ -1221,9 +1199,9 @@ sub add_holdings_to_marc_fields {
         push @$fields, marcfield(
             '852', ' ', ' ',
             'b' => $loc,
-            _optional('h' => $call_number),
+            Biblio::Folio::Util::_optional('h' => $call_number),
 # XXX See "crazy hack" above!
-            _optional('x' => $classifier),
+            Biblio::Folio::Util::_optional('x' => $classifier),
             '0' => $holding->id,
         );
         if ($add_items) {
@@ -1366,7 +1344,7 @@ sub orient {
             or fatal "readlink $root/site/$site_name: $!";
         $site_name =~ s{.*/}{};
     }
-    $site = $folio->site(
+    my $site = $folio->site(
         $site_name,
         keys(%tracing) ? ('_tracing' => \%tracing) : (),
     );
@@ -1376,12 +1354,7 @@ sub orient {
         # print STDERR "Reusing login for $site_name\n"
         #     if !login_if_necessary();
     }
-}
-
-sub _optional {
-    my ($k, $v) = @_;
-    return if !defined $v;
-    return ($k, $v);
+    return $site;
 }
 
 sub _parse_tracing {
