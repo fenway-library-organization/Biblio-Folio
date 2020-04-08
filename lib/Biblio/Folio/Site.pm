@@ -1027,6 +1027,20 @@ sub source {
     return Biblio::Folio::SourceRecord->new('_site' => $self, %$source);
 }
 
+sub search {
+    my ($self, $uri, $cql, %arg) = @_;
+    my $results = eval {
+        my $res = $self->GET($uri, {
+            'query' => $cql,
+            Biblio::Folio::Util::_optional('offset' => $arg{'offset'}),
+            Biblio::Folio::Util::_optional('limit' => $arg{'limit'}),
+            Biblio::Folio::Util::_optional('order_by' => $arg{'order_by'}),
+        });
+        $self->json->decode($res->content);
+    } or die "search failed: $cql";
+    return $results;
+}
+
 sub _initialize_classes_and_properties {
     my ($self) = @_;
     my (%class, %prop2pkg, %prop2class, %blessing);

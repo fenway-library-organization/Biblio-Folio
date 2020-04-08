@@ -60,4 +60,10 @@ sub _pkg2kind {
     return lcfirst _uncamel($pkg);
 }
 
+sub _optional {
+    my ($k, $v) = @_;
+    return if !defined $v;
+    return ($k, $v);
+}
+
 1;
