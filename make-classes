@@ -7,9 +7,24 @@ use constant OBJECT => 'Object';
 use constant OBJECTS => 'Objects';
 
 use String::Expando;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
+sub class;
+sub blather;
+sub trace;
+sub usage;
+sub warning;
+sub fatal;
 sub block;
 sub blockf;
+
+(my $prog = $0) =~ s{.*/}{};
+
+my $verbose;
+GetOptions(
+    'v|verbose' => \$verbose,
+) or usage;
 
 my $expando = String::Expando->new;
 my $generic = {
@@ -32,22 +47,40 @@ build();
 # --- Functions
 
 sub parse {
+    print STDERR "Parsing...\n";
     my $class;
 #my $key;
     while (<STDIN>) {
         next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
         if (/^\[\*\]$/) {
             # Begin generic block (i.e., stuff to put in Biblio::Folio::Object)
+            class "Object";
             $class = $generic;
 #undef $key;
         }
         elsif (/^\[(.+)\]$/) {
             # Begin class block
-            my $cls = $1;
-            $class = class_stub($cls);
-            $cls = $class->{'class'};
-            # die "class $cls redefined" if $class{$cls};
-            $class{$cls} ||= $class;
+            my ($cls, $pl) = class_sg_pl($1);
+            class $cls;
+            if (exists $class{$cls}) {
+                warning "adding to class: $cls";
+                $class = $class{$cls};
+                $class->{'plural'} ||= x2kind($pl);
+            }
+            else {
+                $class = $class{$cls} = class_stub($cls);
+            }
+            if ($cls ne $class->{'class'}) {
+                warning "class name mismatch: $cls (defining) != $class->{'class'} (existing)";
+                $cls = $class->{'class'};
+            }
+            if ($verbose) {
+                foreach (qw(kind plural package)) {
+                    blather "$_: $class->{$_}";
+                }
+            }
+            # fatal "class $cls redefined" if $class{$cls};
+            # $class{$cls} ||= $class;
 #undef $key;
             define_methods(
                 'from' => $generic,
@@ -57,7 +90,9 @@ sub parse {
             );
         }
         elsif (/^super(?:class)?\s*=\s*(.+)$/) {
-            $class->{'super'} = trim($1);
+            my $super = trim($1);
+            blather "superclass: $super";
+            $class->{'super'} = $super;
         }
         elsif (/^(uri(?:\.\w+)?)\s*=\s*(.+)$/) {
             # URI for the class
@@ -65,12 +100,15 @@ sub parse {
 #undef $key;
             $k =~ s/\.get$//i;
             $k =~ tr/./_/;
+            blather "$k: $v";
             $class->{$k} = $v;
         }
-        elsif (/^ttl\s*=\s*(.+)$/) {
+        elsif (/^ttl\s*=\s*([0-9]+)$/) {
             # TTL for the class (how long it's cached)
 #undef $key;
-            $class->{'ttl'} = $1;
+            my $ttl = $1;
+            blather "ttl: $ttl";
+            $class->{'ttl'} = $ttl;
         }
         elsif (/^(references)\s*=\s*(.+)$/) {
             # Inbound foreign keys -- i.e., properties (typically found in
@@ -100,6 +138,7 @@ sub parse {
             # Method definition
             my ($name, $spec) = ($2, trim($3));
 #($key = $1) =~ s/\s+/ /g;
+            blather "method $name";
             my %returns;
             my %meth = ('name' => $name, 'from' => $class, 'spec' => $spec, 'returns' => \%returns);
             my $cls = $class->{'class'};
@@ -107,7 +146,7 @@ sub parse {
             if ($spec =~ /^\{$/) {
                 my $body = '';
                 while (<STDIN>) {
-                    die "unterminated method spec: $err"
+                    fatal "unterminated method spec: $err"
                         if !defined $_;
                     last if /^\}$/;
                     $body .= $_;
@@ -139,7 +178,7 @@ sub parse {
                         $meth{$urikey} = $urival;
                     }
                     else {
-                        die "bad method spec: $err";
+                        fatal "bad method spec: $err";
                     }
                 }
                 if ($middle) {
@@ -152,44 +191,47 @@ sub parse {
                             $meth{'to'} = $array;
                         }
                         else {
-                            die "unrecognized return value type: $err";
+                            fatal "unrecognized return value type: $err";
                         }
                     }
                 }
                 elsif ($right) {
-                    die "return value type $right without munging: $err"
+                    fatal "return value type $right without munging: $err"
                 }
                 if (!defined $meth{'to'}) {
-                    die "method return value must be an object, scalar, or array: $err";
+                    fatal "method return value must be an object, scalar, or array: $err";
                 }
                 if (!$meth{'to'} && !$meth{'property'}) {
-                    die "method ${cls}::${name} return value must derive from a property: $_";
+                    fatal "method ${cls}::${name} return value must derive from a property: $_";
                 }
             }
             define_methods(%meth);
         }
         elsif (/^data\s*=\s*(.+)/) {
-            my $name = $1 . '.json';
+            my $name = trim($1);
+            blather "data file base: $name";
             my $kind = $class->{'kind'};
+            $class->{'datafile_base'} = $name;
             define_methods(
-                'name' => '_data_file_name',
+                'name' => '_datafile_base',
                 'from' => $class,
                 'body' => sprintf(q{return %s;}, quote($name)),
             );
             define_methods(
                 'name' => '_all',
                 'from' => $class,
-                'body' => sprintf(q{return $self->site->objects(%s, 'limit' => 1<<31);}, quote($kind)),
+                'body' => sprintf(q{return shift()->site->objects(%s, 'limit' => 1<<31);}, quote($kind)),
             );
         }
         elsif (/^(\w+)\s*=\s*(.+)$/) {
-            # Misc. other class properties; for example:
+            # Class method; for example:
             #   foo = { my ($self) = @_; return sqrt($self->{'foo'}) }
             #   bar = 999
             #   baz = +{ 'qux' => rand() }
             # Whatever is specified as the value (the bit after "=") is inserted verbatim into the generated code
             my ($k, $v) = ($1, trim($2));
             my $key = '_' . $k;
+            blather "class method: $k";
             my $cls = $class->{'class'};
             my $methods = $method{$cls} ||= {};
             my $body;
@@ -212,6 +254,7 @@ sub parse {
             );
         }
     }
+    print STDERR "Parsing complete\n\n";
 }
 
 sub define_methods {
@@ -243,7 +286,7 @@ sub define_methods {
                 'returns' => $to,
             };
             if ($multi) {
-                warn "foreign and multi!? $from->{class}.$name"
+                warning "foreign and multi!? $from->{class}.$name"
                     if $foreign;
                 my $meth_pl = x2meth($to_pl);
                 $define{$meth_pl} = {
@@ -270,7 +313,7 @@ sub define_methods {
         }
         elsif (0) {
             # my $metadata = $instance->metadata;
-            warn "can this even happen???";
+            warning "can this even happen???";
             my $meth_sg = x2meth($to_cls);
             $define{$meth_sg} = {
                 'property' => $xref_sg,
@@ -293,10 +336,10 @@ sub define_methods {
             my $props = $existing_method->{'properties'} ||= [ delete $existing_method->{'property'} ];
             my $new_prop = $method->{'property'};
             if (!defined $new_prop) {
-                warn "oddball duplicate method $from_cls.$m";
+                warning "oddball duplicate method $from_cls.$m";
             }
             elsif (grep { $_ eq $new_prop } @$props) {
-                warn "duplicate property $new_prop for $from_cls.$m";
+                warning "duplicate property $new_prop for $from_cls.$m";
             }
             else {
                 push @$props, $new_prop;
@@ -311,7 +354,7 @@ sub define_methods {
     }
 }
 
-sub class_stub {
+sub class_sg_pl {
     my ($cls) = @_;
     my $pl;
     if ($cls =~ s{/(.+)/(.+)}{$1}) {
@@ -326,6 +369,11 @@ sub class_stub {
     else {
         $pl = $cls . 's';
     }
+    return ($cls, $pl);
+}
+
+sub class_stub {
+    my ($cls, $pl) = class_sg_pl(@_);
     return {
         'class' => $cls,
         'plural' => x2kind($pl),
@@ -335,6 +383,7 @@ sub class_stub {
 }
 
 sub build {
+    print STDERR "Building code...\n";
     block <<'EOS';
 use strict;
 use warnings;
@@ -349,15 +398,18 @@ EOS
 EOS
         my $pkg = $class->{'package'};
         my $cls = x2cls($pkg);
+        class $cls;
         my ($ttl, $uri) = @$class{qw(ttl uri)};
         $uri =~ s/{[^{}]+}/%s/ if defined $uri;
         printf qq{package %s;\n}, $pkg;
         if ($cls ne OBJECT) {
             my $super = x2pkg($class->{'super'} || OBJECT);
+            blather "superclass: $super";
             printf qq{\n\@%s::ISA = qw(%s);\n}, $pkg, $super;
         }
         printf qq{\nsub _ttl { %s }}, quote($ttl) if defined $ttl;
         if (defined $uri) {
+            blather "uri: $uri";
             printf qq{\nsub _uri { %s }}, quote($uri);
             my $uri_search = $class->{'uri_search'};
             if (!defined $uri_search && $uri =~ m{(.+)/%s$}) {
@@ -366,11 +418,13 @@ EOS
         }
         foreach (grep { /^uri_/ } keys %$class) {
             my $uri2 = $class->{$_};
+            blather "$_: $uri2";
             printf qq{\nsub _%s { %s }}, $_, quote($uri2);
         }
         print qq{\n\n};
         my $methods = $class->{'methods'} = $method{$cls} || {};
         foreach my $m (sort keys %$methods) {
+            blather "method $m";
             my $method = $methods->{$m};
             my ($prop, $props, $mmeth, $muri, $body, $returns, $munge) = @$method{qw(property properties method uri body returns munge)};
             my $propeval = prop_evaluator($prop || $props);
@@ -378,10 +432,15 @@ EOS
             my $sfx = '';
             if ($munge) {
                 $sfx = sprintf q{, 'munge' => [%s]}, join(', ', map { quote($_) } @$munge);
+                blather "  munge:", join('.', @$munge);
             }
             if (defined $body) {
                 # Arbitrary code
-                $body = join("\n", map { '    ' . $_ } split /\n/, $body);
+                my @body = split /\n/, $body;
+                $body = join("\n", map { '    ' . $_ } @body);
+                my $bodytrunc = $body[0];
+                $bodytrunc .= ' ...' if @body > 1;
+                blather "  body: $bodytrunc";
                 blockf <<'EOS', $m, $body;
 sub %s {
 %s
@@ -390,9 +449,11 @@ EOS
             }
             elsif (defined $rcls) {
                 # Return an object
+                blather "  returns object: $class{$rcls}{'class'}";
                 my $rttl = $class{$rcls}{'ttl'};
                 my $accessor = $rttl ? 'cached' : 'object';
                 if (defined $muri) {
+                    blather "    from uri: $muri";
                     blockf <<'EOS', $m, $accessor, $rkind, $propeval, quote($muri), $sfx;
 sub %s {
     my ($self) = @_;
@@ -410,6 +471,7 @@ EOS
                 }
             }
             elsif (defined $muri) {
+                blather "  returns non-object from uri: $muri";
                 # Return something that isn't an object
                 blockf <<'EOS', $m, $pkg, $propeval, quote($muri), $sfx;
 sub %s {
@@ -419,8 +481,9 @@ sub %s {
 EOS
             }
             else {
-                die "can't munge a bare property accessor: $cls->$m"
+                fatal "can't munge a bare property accessor: $cls->$m"
                     if defined $munge;
+                blather "  return literal: $propeval";
                 blockf <<'EOS', $m, $propeval;
 sub %s {
     my ($self) = @_;
@@ -432,7 +495,41 @@ EOS
         # Pick up any hand-written code
         printf qq{eval q{use %s};\n\n}, $pkg;
     }
-    print "1;\n\n";
+    # Build Biblio::Folio::Classes methods
+    class('Classes');
+    my (@all, %datafile);
+    foreach (sort keys %class) {
+        my $class = $class{$_};
+        my $pkg = $class{$_}{'package'};
+        my $cls = $class{$_}{'package'};
+        fatal "no package for class $_" if !defined $pkg;
+        push @all, $pkg;
+        my $datafile_base = $class->{'datafile_base'}
+            or next;
+        blather "data file: $cls -> $datafile_base";
+        $datafile{$pkg} = $class->{'datafile_base'};
+    }
+    block <<'EOS';
+# ------------------------------------------------------------------------------
+EOS
+    print "package Biblio::Folio::Classes;\n\n";
+    printf <<'EOS', join("\n", map { '        ' . $_ } @all);
+sub all {
+    return qw(
+%s
+    );
+}
+EOS
+    print "\n";
+    printf <<'EOS', join("\n", map { sprintf('        %-44s %s', $_, $datafile{$_}) } sort keys %datafile);
+sub datafiles {
+    return qw(
+%s
+    );
+}
+EOS
+    print "\n1;\n";
+    print STDERR "Code complete\n\n";
 }
 
 sub prop_evaluator {
@@ -453,7 +550,10 @@ sub block {
 }
 
 sub blockf {
-    printf(@_), "\n";
+    my $fmt = shift;
+    printf $fmt, @_;
+    print "\n";
+    #printf(@_), "\n";
 }
 
 sub trim {
@@ -477,7 +577,7 @@ sub uncamel {
 sub quote {
     my $str = shift;
     return 'undef' if !defined $str;
-    die if ref $str;
+    fatal sprintf 'quote(%s)', ref($str) if ref($str);
     return $str if $str =~ /^-?[0-9]+$/;      # Integers
     return qq{'$str'} if $str !~ /[\\']/;     # Good for URLs and most other strings
     $str = qq{"\Q$str\E"};                    # Let Perl do the escaping
@@ -533,6 +633,27 @@ sub pkg2kind {
     return lcfirst uncamel($pkg);
 }
 
+sub class {
+    print STDERR @_, "\n";
+}
+
+sub blather {
+    print STDERR "  . @_\n" if $verbose;
+}
+
+sub usage {
+    print STDERR "usage: $prog [-v] < classes.ini";
+}
+
+sub warning {
+    print STDERR "  ! @_\n";
+}
+
+sub fatal {
+    print STDERR "$prog: @_\n";
+    exit 2;
+}
+
 1;
 
 __END__
@@ -544,7 +665,7 @@ __END__
 ###             if $prop =~ s/^([^.]+)\.//;
 ###         my $methods = $method{$from_cls} ||= {};
 ###         my $meth = x2meth($prop);
-###         #warn "redefined reference from $from_cls to $cls via $meth"
+###         #warning "redefined reference from $from_cls to $cls via $meth"
 ###         #    if exists $methods->{$meth};
 ###         $methods->{$meth} = {
 ###             'class' => $class,
@@ -565,7 +686,7 @@ __END__
                 my $prop = x2ref($p);
                 my $meth = x2meth($p);
                 my $methods = $method{$from_cls} ||= {};
-                # warn "redefined reference from $from_cls to $cls via $meth"
+                # warning "redefined reference from $from_cls to $cls via $meth"
                 #     if exists $methods->{$meth};
                 $methods->{$meth} ||= {
                     'name' => $meth,
