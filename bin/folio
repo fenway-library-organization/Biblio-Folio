@@ -28,7 +28,7 @@ use Getopt::Long
 (my $prog = $0) =~ s{.*/}{};
 my $progfile = File::Spec->rel2abs($0);
 
-my ($root, $folio, $site_name, $site, $json);
+my ($root, $folio, $site_name, $json);
 # Common options
 my ($dryrun, $verbose, %tracing);
 
@@ -113,13 +113,8 @@ sub cmd_get {
 }
 
 sub cmd_search {
-    my %arg;
-    my $site = orient(
-        'm|offset=i' => \$arg{'offset'},
-        'n|limit=i' => \$arg{'limit'},
-        'o|order-by=s' => \$arg{'order_by'},
-    );
-    usage "search [-m OFFSET] [-n LIMIT] [-o ORDERBY] URI CQL" if @ARGV != 2;
+    my ($site, %arg) = orient(':fetch');
+    usage "search [-m OFFSET] [-z LIMIT] [-o ORDERBY] URI CQL" if @ARGV != 2;
     my ($uri, $query) = @ARGV;
     my $results = $site->search($uri, $query, %arg);
     print $json->encode($results);
@@ -209,13 +204,9 @@ sub cmd_instance_source {
 }
 
 sub cmd_instance_source_get {
-    my %format;
-    my $site = orient(
-        'J|as-json' => sub { $format{'JSON'} = 1 },
-        'M|as-marc' => sub { $format{'MARC'} = 1 },
-        'T|as-text' => sub { $format{'TEXT'} = 1 },
-    );
+    my ($site, %arg) = orient(qw(:formats));
     usage "instance source get [-JMT] INSTANCE_ID..." if !@ARGV;
+    my %format = %{ $arg{'format'} };
     usage if keys(%format) > 1;
     $format{'JSON'} = 1 if keys(%format) == 0;
     foreach my $id (@ARGV) {
@@ -259,19 +250,18 @@ sub cmd_instance_source_replace {
 
 sub cmd_instance_harvest {
     my (%with, %as, $mod, $id_file);
-    my ($query, $max_count, $batch_size, $max_err);
-    my $site = orient(
-        'j|as-json' => \$as{'json'},
-        'm|as-marc' => \$as{'marc'},
+    my ($query, $batch_size, $max_err);
+    my %opts = options(qw(:fetch !offset !order-by :formats !as-text));
+    my ($site, %arg) = orient(
         'h|with-holdings' => \$with{'holdings'},
         'i|with-items'    => \$with{'items'},
-        'n|limit=i' => \$max_count,
         'k|batch-size=i' => \$batch_size,
         'e|max-errors=i' => \$max_err,
         'p|progress=i' => \$mod,
         'f|id-file=s' => \$id_file,
         'q|query=s' => \$query,
     );
+    my $max_count = $arg{'limit'};
     usage "instance harvest [-jmhi] [-n MAXNUM] [-k BATCHSIZE] [-e MAXERRS] [-f FILE|-q CQL|ID...]"
         if ($id_file && $query)
         || ($id_file && @ARGV)
@@ -429,7 +419,7 @@ sub cmd_holding_get {
     my $site = orient();
     usage "holding get HOLDING_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
-        my $irec = eval { get_holding($id) };
+        my $irec = eval { get_holding($site, $id) };
         my ($err) = split /\n/, $@;
         if ($irec) {
             my $holding = $json->decode($irec->content);
@@ -460,7 +450,7 @@ sub cmd_item_get {
     my $site = orient();
     usage "item get ITEM_ID..." if !@ARGV;
     foreach my $id (@ARGV) {
-        my $irec = eval { get_item($id) };
+        my $irec = eval { get_item($site, $id) };
         my ($err) = split /\n/, $@;
         if ($irec) {
             my $item = $json->decode($irec->content);
@@ -510,17 +500,15 @@ sub cmd_source_get {
 }
 
 sub cmd_source_search {
-    my %arg;
-    my %format = ('JSON' => 1);
-    my $site = orient(
-        'm|offset=i' => \$arg{'offset'},
-        'n|limit=i' => \$arg{'limit'},
-        'o|order-by=s' => \$arg{'order_by'},
-        'd|deleted' => sub { $arg{'deleted'} = JSON::true },
-        'J|as-json' => sub { %format = ('JSON' => 1) },
-        'M|as-marc' => sub { %format = ('MARC' => 1) },
+    my $deleted;
+    my ($site, %arg) = orient(
+        qw(:fetch),
+        qw(:formats !as-text),
+        'd|deleted' => \$deleted,
     );
+    $arg{'deleted'} = JSON::true if $deleted;
     usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @ARGV != 1;
+    my %format = %{ $arg{'format'} || { 'JSON' => 1 } };
     my ($cql) = @ARGV;
     my $content = $site->search('/source-storage/records', $cql, %arg);
     my ($total, $sources) = @$content{qw(totalRecords records)};
@@ -815,12 +803,7 @@ sub cmd_group_get {
 }
 
 sub cmd_user_search {
-    my %arg;
-    my $site = orient(
-        'm|offset=i' => \$arg{'offset'},
-        'n|limit=i' => \$arg{'limit'},
-        'o|order-by=s' => \$arg{'order_by'},
-    );
+    my ($site, %arg) = orient(':fetch');
     usage "user search CQL" if @ARGV != 1;
     my ($query) = @ARGV;
     my $users = $site->search("/users", $query, %arg);
@@ -844,26 +827,37 @@ sub cmd_user_get {
     print $json->encode(\@users) if @users;
 }
 
-sub cmd_user_match {
-    my %arg;
-    my $site = orient(
-        's|batch-size=i' => \$arg{'batch_size'},
-        'p|parser=s' => \$arg{'parser_cls'},
-        'j|as_json' => \$arg{'as_json'},
+sub cmd_user_parse {
+    my ($site, %arg) = orient(
+        'p|parser=s' => 'parser_cls',
+        'L|load-profile=s' => 'profile',
+        qw(:formats !as-marc !as-json),
     );
-    usage "user match [-j] [-s NUM] [-p CLASS] FILE" if @ARGV != 1;
-    match_or_load_users('match', %arg);
+    usage "user match [-p CLASS] [-L PROFILE] FILE" if @ARGV != 1;
+    @arg{qw(site file)} = ($site, @ARGV);
+    proc_userfile(%arg, 'each' => \&print_user);
+}
+
+sub cmd_user_match {
+    my ($site, %arg) = orient(
+        's|batch-size=i' => 'batch_size',
+        'p|parser=s' => 'parser_cls',
+        'L|load-profile=s' => 'profile',
+    );
+    usage "user match [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @ARGV != 1;
+    @arg{qw(site file)} = ($site, @ARGV);
+    proc_userfile(%arg, 'each' => \&show_matching_users);
 }
 
 sub cmd_user_load {
-    my %arg;
-    my $site = orient(
-        'n|dry-run' => \$dryrun,
-        's|batch-size=i' => \$arg{'batch_size'},
-        'p|parser=s' => \$arg{'parser_cls'},
+    my ($site, %arg) = orient(
+        's|batch-size=i' => 'batch_size',
+        'p|parser=s' => 'parser_cls',
+        'L|load-profile=s' => 'profile',
     );
-    usage "user load [-n] [-s NUM] [-p CLASS] FILE" if @ARGV != 1;
-    match_or_load_users('load', %arg);
+    usage "user load [-n] [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @ARGV != 1;
+    @arg{qw(site file)} = ($site, @ARGV);
+    proc_userfile(%arg, 'each' => \&update_or_create_user);
 }
 
 sub cmd_address {
@@ -958,38 +952,105 @@ sub marc_source_record_id {
     return;
 }
 
-sub match_or_load_users {
-    my ($verb, %arg) = @_;
-    my ($batch_size, $parser_cls) = @arg{qw(batch_size parser_cls)};
-    my $config = $site->config;
-# $batch_size ||= 5;
-    $parser_cls ||= $config->{'users'}{'import'}{'parserClass'} || 'Biblio::FolioX::Util::JSONParser';
+sub userfile_parser {
+    my %arg = @_;
+    my $site = $arg{'site'};
+    my $profile = $site->load_profile('users', $arg{'profile'});
+    my %parser = %{ $profile->{'parser'} };
+    my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+    delete $parser{'class'};
     my ($file) = @ARGV;
     use_class($parser_cls);
-    my $parser = $parser_cls->new('site' => $site, 'file' => $file);
-    my $sub = $verb eq 'match' ? \&show_matching_users : \&update_or_create_user;
-    my %count;
-    my $n = 0;
-    $parser->iterate(
-        'batch_size' => $batch_size,
-        'each' => sub {
-            foreach my $result ($site->match_users(@_)) {
-                my ($user, $matches) = @$result{qw(user matches)};
-                my $res = $sub->($file, ++$n, \%arg, $user, @$matches);
-                $count{$res}++;
-            }
-        },
-    );
-    print "result counts {\n";
-    foreach my $k (sort keys %count) {
-        printf "  %6d %s\n", $count{$k}, $k;
+    return $parser_cls->new('site' => $site, %parser);
+}
+
+sub proc_userfile {
+    my (%arg) = @_;
+    if (defined $arg{'format'}) {
+        my $formatter = output_formatter($arg{'format'});
+        %arg = apply_before_each_after(
+            %arg,
+            'before' => sub { $formatter->begin },
+            'after' => sub { $formatter->after },
+        );
     }
-    print "}\n";
+    my $parser = userfile_parser(%arg);
+    $parser->iterate(%arg);
+}
+
+sub apply_before_each_after {
+    my %arg;
+    while (@_ > 1) {
+        my ($k, $v) = splice @_, 0, 2;
+        my $oldv = $arg{$k};
+        my $oldvref = ref $oldv;
+        if ($oldvref eq '' || $k !~ /^(before|each|after)$/) {
+            $arg{$k} = $v;
+        }
+        elsif ($oldvref eq 'ARRAY') {
+            if ($k eq 'before') {
+                unshift @$oldv, $v;
+            }
+            else {
+                push @$oldv, $v;
+            }
+        }
+        elsif ($oldvref eq 'CODE') {
+            if ($k eq 'before') {
+                $arg{$k} = sub { $v->(@_); $oldv->(@_); };
+            }
+            else {
+                $arg{$k} = sub { $oldv->(@_); $v->(@_); };
+            }
+        }
+        else {
+            die "can't apply $k action to a $oldvref";
+        }
+    }
+    return %arg;
+}
+
+### sub match_or_load_users {
+###     my ($verb, %arg) = @_;
+###     my $site = $arg{'site'};
+###     my $parser = userfile_parser(%arg);
+###     my ($batch_size, $parser_cls) = @arg{qw(batch_size parser_cls)};
+###     my $profile = $site->load_profile('users', $arg{'profile'});
+### # $batch_size ||= 5;
+###     my %parser = %{ $profile->{'parser'} };
+###     $parser_cls ||= $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
+###     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+###     delete $parser{'class'};
+###     my ($file) = @ARGV;
+###     use_class($parser_cls);
+###     my $parser = $parser_cls->new('site' => $site, %parser);
+###     my $sub = $verb eq 'match' ? \&show_matching_users : \&update_or_create_user;
+###     my %count;
+###     my $n = 0;
+###     $parser->iterate(
+###         'file' => $file,
+###         'batch_size' => $batch_size,
+###         'each' => sub {
+###             foreach my $result ($site->match_users($profile, @_)) {
+###                 my ($user, $matches) = @$result{qw(user matches)};
+###                 my $res = $sub->($site, $file, ++$n, \%arg, $user, @$matches);
+###                 $count{$res}++;
+###             }
+###         },
+###     );
+###     print "result counts {\n";
+###     foreach my $k (sort keys %count) {
+###         printf "  %6d %s\n", $count{$k}, $k;
+###     }
+###     print "}\n";
+### }
+
+sub print_user {
 }
 
 sub show_matching_users {
-    my ($file, $n, $arg, $user, @matches) = @_;
+    my ($site, $file, $n, $arg, $user, @matches) = @_;
     my $m = @matches;
     my $res = $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
     if ($arg->{'as_json'}) {
@@ -1036,7 +1097,7 @@ sub show_matching_users {
 }
 
 sub update_or_create_user {
-    my ($file, $n, $arg, $user, @matches) = @_;
+    my ($site, $file, $n, $arg, $user, @matches) = @_;
     my $res;
     if (@matches == 0) {
         $res = $site->POST('/users', $user);
@@ -1160,22 +1221,13 @@ sub subcmd {
     goto &{ __PACKAGE__->can($1.'_'.$subcmd) || usage };
 }
 
-sub get_instance {
-    my ($id) = @_;
-    return $site->GET("/inventory/instances/$id");
-}
-
-sub get_source_record {
-    my ($id) = @_;
-}
-
 sub get_holding {
-    my ($id) = @_;
+    my ($site, $id) = @_;
     return $site->GET("/holdings-storage/holdings/$id");
 }
 
 sub get_item {
-    my ($id) = @_;
+    my ($site, $id) = @_;
     return $site->GET("/item-storage/items/$id");
 }
 
@@ -1329,15 +1381,61 @@ sub orient {
     usage if !defined $site_name;
     # $site_name = $1, shift @ARGV
     #     if $ARGV[0] =~ /^[@](.+)/;
+    my @args = (':standard', @_);
+    my %arg;
+    my %optgroup = (
+        'standard' => {
+            'r|root' => \$root,
+            'v|verbose' => \$verbose,
+            'n|dry-run' => \$dryrun,
+        },
+        'fetch' => {
+            'm|offset=s' => \$arg{'offset'},
+            'z|limit=i' => \$arg{'limit'},
+            'o|order-by=s' => \$arg{'order_by'},
+        },
+        'formats' => {
+            'J|as-json' => sub { $arg{'format'}{'JSON'} = 1 },
+            'M|as-marc' => sub { $arg{'format'}{'MARC'} = 1 },
+            'T|as-text' => sub { $arg{'format'}{'TEXT'} = 1 },
+        },
+    );
+    my %opt;
+    my %not;
+    while (@args) {
+        my $arg = shift @args;
+        my %o = parse_opt_spec($arg);
+        my $name = $o{'name'};
+        if ($o{'is_group'}) {
+            my $opts = $optgroup{$name} || fatal "unrecognized option group: $name";
+            push @args, %$opts;
+        }
+        elsif ($o{'is_negator'}) {
+            $not{$name} = 1;
+        }
+        elsif (@args) {
+            my $dest = shift @args;
+            if (!ref $dest) {
+                my $key = $dest;
+                $dest = \$arg{$key};
+            }
+            $opt{$o{'spec'}} = $dest;
+        }
+        else {
+            usage;
+        }
+    }
+    foreach my $not (keys %not) {
+        $not =~ s/[:=].+$//;
+        my @keys = split /\|/, $not;
+        foreach my $key ($not, @keys) {
+            last if defined delete $opt{$key};
+        }
+    }
     local $SIG{__WARN__} = sub {
         print @_ if $_[0] !~ /^Unknown option/;
     };
-    GetOptions(
-        @_,
-        'r|root' => \$root,
-        's|site=s' => \$site_name,
-        'v|verbose' => \$verbose,
-    ) or usage;
+    GetOptions(%opt) or usage;
     $folio = Biblio::Folio->new('root' => $root);
     if (-l "$root/site/$site_name") {
         $site_name = readlink "$root/site/$site_name"
@@ -1350,11 +1448,31 @@ sub orient {
     );
     $json = JSON->new->pretty->canonical->convert_blessed;
     if ($cmd ne 'login') {
-        login_if_necessary();
+        login_if_necessary($site);
         # print STDERR "Reusing login for $site_name\n"
-        #     if !login_if_necessary();
+        #     if !login_if_necessary($site);
     }
+    return ($site, %arg) if wantarray;
+    usage if map { defined $arg{$_} } keys %arg;
     return $site;
+}
+
+sub parse_opt_spec {
+    local $_ = shift;
+    return (
+        'is_group' => 1,
+        'name' => $1,
+    ) if /^:(\S+)/;
+    return (
+        'is_negator' => 1,
+        'name' => $1,
+    ) if /^!(.+)$/;
+    return (
+        'is_auto' => 1,
+        'spec' => $1,
+        'name' => $2,
+    ) if /^(\S+)\s+(\S+)$/;
+    return ('spec' => $_);
 }
 
 sub _parse_tracing {

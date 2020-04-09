@@ -20,8 +20,8 @@ our $AUTOLOAD;
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
-    return $self;
     $self->init;
+    return $self;
 }
 
 sub DESTROY { }

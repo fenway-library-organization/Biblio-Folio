@@ -5,16 +5,7 @@ use warnings;
 
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 
-sub new {
-    my $cls = shift;
-    my $self = bless {
-        #'fields' => [],
-        'dirty' => 0,
-        @_,
-    }, $cls;
-    $self->init;
-    return $self;
-}
+@Biblio::Folio::MARC::ISA = qw(Biblio::Folio::Object);
 
 sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
 sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }

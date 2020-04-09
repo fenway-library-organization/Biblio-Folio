@@ -63,6 +63,43 @@ sub logged_in { @_ > 1 ? $_[0]{'state'}{'logged_in'} = $_[1] : $_[0]{'state'}{'l
 sub token { @_ > 1 ? $_[0]{'state'}{'token'} = $_[1] : $_[0]{'state'}{'token'} }
 sub user_id { @_ > 1 ? $_[0]{'state'}{'user_id'} = $_[1] : $_[0]{'state'}{'user_id'} }
 
+# Record load profiles
+
+# my $profiles = $site->load_profiles;
+sub load_profiles {
+    my ($self, $type) = @_;
+    my $profiles = $self->{'load_profile'}{$type};
+    if (!$profiles) {
+        $profiles = {};
+        my @files = $self->file("profile/$type/*.profile");
+        foreach my $file (@files) {
+            (my $name = $file) =~ s{^.+/|\.profile$}{}g;
+            my $profile = Biblio::Folio::Util::read_config($file);
+            $profiles->{$name} = Biblio::Folio::LoadProfile->new(
+                'name' => $name,
+                'type' => $type,
+                %$profile,
+            );
+        }
+        $self->{'load_profile'}{$type} = $profiles;
+    }
+    return $profiles;
+}
+
+# my $profile = $site->load_profile('users');
+# my $profile = $site->load_profile('users', 'default');
+sub load_profile {
+    my ($self, $type, $name) = @_;
+    $name = 'default' if !defined $name;
+    return $self->load_profiles($type)->{$name}
+        || die "no such profile for $type: $name";
+}
+
+sub compile_profile {
+    my ($self, $profile) = @_;
+    1;  # TODO
+}
+
 sub file {
     my ($self, $path) = @_;
     $path = $self->{'root'} . '/' . $path if $path !~ m{^/};
@@ -100,7 +137,6 @@ sub init {
     $self->_read_map_files;
     $self->_read_cache;
     # $self->_initialize_classes_and_properties;
-    $self->_build_matching($_) for qw(users);
     my $ua = LWP::UserAgent->new;
     $ua->agent("folio/0.1");
     $self->{'ua'} = $ua;
@@ -532,77 +568,16 @@ sub objects {
     } @$objects;
 }
 
-sub _build_matching {
-    my ($self, $type) = @_;
-    my $matching = $self->{'config'}{$type}{'match'} ||= {};
-    foreach my $k (keys %$matching) {
-        my %fm = (
-            'field' => $k,
-            'qualifier' => 'any',
-            'required' => 0,
-            'order' => 1<<15,
-            'exact' => 0,
-        );
-        local $_ = $matching->{$k};
-        my $n = 0;
-        while (/\S/) {
-            if ($n++) {
-                s/^\s*,\s+// or die "invalid matching parameters: $k = $matching->{$k}";
-            }
-            if (s/^copy from (\w+)//) {
-                $fm{'copy_from'} = $1;
-            }
-            elsif (s/^default://) {
-                my $dv = extract_value();
-                die "invalid default: $_" if !defined $dv;
-                $fm{'default'} = $dv;
-            }
-            elsif (s/^([^:,\s]+)//) {
-                my ($pk, $pv) = ($1, 1);
-                if (s/^:\s*//) {
-                    $pv = extract_value();
-                    die "invalid value for $pk: $_" if !defined $pv;
-                }
-                # if ($pk =~ /^(lowest|highest)$/) {
-                #     ($pk, $pv) = ('qualifier', _matchpoint_qualifier($pk));
-                # }
-                $fm{$pk} = $pv;
-            }
-        }
-        die "contradictory mode for matching $type: field $k both required and optional"
-            if $fm{'required'} && $fm{'optional'};
-        $matching->{$k} = \%fm;
-    }
-}
-
-sub extract_value {
-    # This function operates (destructively) on $_
-    my $v = extract_delimited(undef, q{"'}, '\s*');
-    if (defined $v) {
-        $v =~ /^(["'])(.*)$1$/ or die "wtf?";
-        $v = $2;
-    }
-    elsif (s/^(true|false|null)//) {
-        $v = $tok2const{$1};
-    }
-    elsif (s/^([0-9]+(?:\.[0-9]+)?)//) {
-        $v = $1;
-    }
-    elsif (s/^(\w+)//) {
-        $v = $1;
-    }
-    return $v;
-}
-
 sub match_users {
-    my $self = shift;
+    my ($self, $p, @users) = @_;
+    my $profile = $self->profile('users', $p);
     my @clauses;
-    my %has_term;
-    my %match;
+    my @has_term;
+    my @match;
     my @results;
-    foreach my $u (0..$#_) {
-        my $user = $_[$u];
-        $match{$u} = {};
+    foreach my $u (0..$#users) {
+        my $user = $users[$u];
+        $match[$u] = [];
         my @mp = $self->_matchpoints('users', $user);
         push @results, {
             'user' => $user,
@@ -613,7 +588,7 @@ sub match_users {
         foreach (@mp) {
             my ($k, $v, $mp) = @$_;
             my $term = _cql_term($k, $v, $mp);
-            $has_term{$u}{$term} = 1;
+            $has_term[$u]{$term} = 1;
             if ($mp->{'required'}) {
                 push @must_terms, $term;
             }
@@ -649,14 +624,15 @@ sub match_users {
             my ($k, $v, $mp) = @$_;
             my $term = _cql_term($k, $v, $mp);
             my $required = $mp->{'required'};
-            foreach my $u (0..$#_) {
-                if (!$has_term{$u}{$term}) {
+            foreach my $u (0..$#users) {
+                my $user = $users[$u];
+                if (!$has_term[$u]{$term}) {
                     # Not a match by $term -- not a match at all, if $term is required
-                    delete $match{$u}{$m} if $required;
+                    undef $match[$u][$m] if $required;
                 }
                 elsif (!$required) {
                     # A match by an optional matchpoint -- this is where we "connect the dots"
-                    $match{$u}{$m} = 1;
+                    $match[$u][$m] = 1;
                     push @{ $results[$u]{'matches'}[$m]{'by'} ||= [] }, $mp->{'field'};
                 }
                 else {
@@ -665,8 +641,8 @@ sub match_users {
                 }
             }
         }
-        foreach my $u (0..$#_) {
-            if ($match{$u}{$m}) {
+        foreach my $u (0..$#users) {
+            if ($match[$u][$m]) {
                 $results[$u]{'matches'}[$m]{'user'} = $match;
             }
 ###         else {

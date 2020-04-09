@@ -2,6 +2,7 @@ package Biblio::Folio::Util;
 
 sub read_config {
     my ($file, $config, $key) = @_;
+    $config ||= {};
     $config = $config->{$key} ||= {} if defined $key;
     my $hash = $config;
     open my $fh, '<', $file or die "open $file: $!";
@@ -22,6 +23,7 @@ sub read_config {
             $hash->{$k} = $v;
         }
     }
+    return $config;
 }
 
 sub _trim {
