@@ -12,6 +12,7 @@ use Biblio::Folio::Class;
 use Biblio::Folio::Object;
 use Biblio::Folio::Util;
 use Biblio::Folio::Site::Stash;
+use Biblio::Folio::Site::LoadProfile;
 
 # Tracing: states
 use constant qw(ON       ON     );
@@ -75,7 +76,7 @@ sub load_profiles {
         foreach my $file (@files) {
             (my $name = $file) =~ s{^.+/|\.profile$}{}g;
             my $profile = Biblio::Folio::Util::read_config($file);
-            $profiles->{$name} = Biblio::Folio::LoadProfile->new(
+            $profiles->{$name} = Biblio::Folio::Site::LoadProfile->new(
                 'name' => $name,
                 'type' => $type,
                 %$profile,

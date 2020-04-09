@@ -1,4 +1,4 @@
-package Biblio::Folio::Site::BatchFile;
+package Biblio::Folio::Site::Site::BatchFile;
 
 use strict;
 use warnings;
@@ -6,7 +6,7 @@ use warnings;
 use POSIX qw(strftime);
 use Data::UUID;
 
-@Biblio::Folio::Site::BatchFile::ISA = qw(Biblio::Folio::Object);
+@Biblio::Folio::Site::Site::BatchFile::ISA = qw(Biblio::Folio::Object);
 
 sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
 sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }

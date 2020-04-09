@@ -1,4 +1,4 @@
-package Biblio::Folio::LoadProfile;
+package Biblio::Folio::Site::LoadProfile;
 
 sub init {
     my ($self) = @_;
