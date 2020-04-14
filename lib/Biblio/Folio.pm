@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Data::UUID;
-use Biblio::Folio::Util;
+use Biblio::Folio::Util qw(_read_config);
 use Biblio::Folio::Site;
 use Biblio::Folio::Classes;
 
@@ -57,7 +57,7 @@ sub init {
         $file =~ m{/([^/.]+)\.conf$};
         my $name = $1;
         undef $name if $name eq 'folio';
-        Biblio::Folio::Util::read_config($file, $config, $name);
+        _read_config($file, $config, $name);
     }
     # $self->init_classes_and_properties;
 }

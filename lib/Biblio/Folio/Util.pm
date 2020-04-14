@@ -1,6 +1,45 @@
 package Biblio::Folio::Util;
 
-sub read_config {
+use strict;
+use warnings;
+
+require Exporter;
+our @ISA = qw(Exporter);
+our @EXPORT_OK = qw(
+	_tok2const
+	_trim
+	_camel
+	_uncamel
+	_2pkg
+	_kind2pkg
+	_pkg2kind
+	_optional
+	_cql_value
+	_cql_term
+	_cql_and
+	_cql_or
+	_read_config
+	_make_hooks
+	_run_hooks
+    _get_attribute_from_dotted
+);
+
+use JSON;
+
+my %tok2const = (
+    'null' => JSON::null,
+    'true' => JSON::true,
+    'false' => JSON::false,
+);
+
+sub _tok2const {
+    my ($tok) = @_;
+    die "unrecognized const token: $tok"
+        if !exists $tok2const{$tok};
+    return $tok2const{$tok};
+}
+
+sub _read_config {
     my ($file, $config, $key) = @_;
     $config ||= {};
     $config = $config->{$key} ||= {} if defined $key;
@@ -24,6 +63,55 @@ sub read_config {
         }
     }
     return $config;
+}
+
+sub _make_hooks {
+    my %arg;
+    my %salient = map { $_ => 1 } qw(begin before each after end);
+    while (@_ > 1) {
+        my ($k, $v) = splice @_, 0, 2;
+        my $oldv = $arg{$k};
+        my $oldvref = ref $oldv;
+        if ($oldvref eq '' || !$salient{$k}) {
+            $arg{$k} = $v;
+        }
+        elsif ($oldvref eq 'ARRAY') {
+            if ($k eq 'before') {
+                unshift @$oldv, $v;
+            }
+            else {
+                push @$oldv, $v;
+            }
+        }
+        elsif ($oldvref eq 'CODE') {
+            if ($k eq 'before') {
+                $arg{$k} = sub { $v->(@_); $oldv->(@_); };
+            }
+            else {
+                $arg{$k} = sub { $oldv->(@_); $v->(@_); };
+            }
+        }
+        else {
+            die "can't apply $k action to a $oldvref";
+        }
+    }
+    return %arg;
+}
+
+sub _run_hooks {
+    my $phase = shift;
+    my $hooks = shift
+        or return;
+    my $r = ref $hooks;
+    if ($r eq 'CODE') {
+        $hooks->('phase' => $phase, @_);
+    }
+    elsif ($r eq 'ARRAY') {
+        $_->('phase' => $phase, @_) for @$hooks;
+    }
+    else {
+        die "unrunnable hook: $r";
+    }
 }
 
 sub _trim {
@@ -66,6 +154,64 @@ sub _optional {
     my ($k, $v) = @_;
     return if !defined $v;
     return ($k, $v);
+}
+
+sub _cql_value {
+    my ($v, $is_cql) = @_;
+    my $r = ref $v;
+    if ($r eq 'JSON::PP::Boolean') {
+        # XXX Hard-coded
+        return 'true' if !!$v;
+        return 'false';
+    }
+    elsif ($r eq 'ARRAY') {
+        return _cql_or(map { _cql_value($_, $is_cql) } @$v);
+    }
+    elsif ($r ne '') {
+        die "unrecognized value type in term: $r";
+    }
+    else {
+        return $v if $v !~ s{(?=["\\?*^])}{\\}g  # Escape " \ ? * ^ (we don't grok wildcards)
+                  && $v !~ m{[ =<>/()]};         # Special characters
+        return qq{"$v"};
+### $v =~ s/(["()\\\*\?])/\\$1/g;
+    }
+}
+
+sub _cql_term {
+    my ($k, $v, $mp, $is_cql) = @_;
+    my $term = _cql_value($v, $is_cql);
+    return $term if !defined $k;
+    my $op = $mp->{'exact'} ? '==' : '=';
+    return $k . $op . $term;
+}
+
+sub _cql_and {
+    return shift if @_ == 1;
+    return '(' . join(' and ', @_) . ')';
+}
+
+sub _cql_or {
+    return shift if @_ == 1;
+    return '(' . join(' or ', @_) . ')';
+}
+
+sub _get_attribute_from_dotted {
+    my ($obj, $k) = @_;
+    while ($k =~ s/^([^.]+)\.(?=[^.])//) {
+        return if !$obj;
+        my $r = ref $obj;
+        if ($r eq 'HASH') {
+            $obj = $obj->{$1};
+        }
+        elsif ($r eq 'ARRAY') {
+            return;  # TODO
+        }
+        else {
+            return;
+        }
+    }
+    return $obj->{$k};
 }
 
 1;
