@@ -1,12 +1,13 @@
-package Biblio::Folio::Site::Site::BatchFile;
+package Biblio::Folio::Site::BatchFile;
 
 use strict;
 use warnings;
 
 use POSIX qw(strftime);
 use Data::UUID;
+use Biblio::Folio::Util qw(_run_hooks);
 
-@Biblio::Folio::Site::Site::BatchFile::ISA = qw(Biblio::Folio::Object);
+@Biblio::Folio::Site::BatchFile::ISA = qw(Biblio::Folio::Object);
 
 sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
 sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }
@@ -48,27 +49,12 @@ sub _uuid {
     return $uuid;
 }
 
-sub _run_hooks {
-    my $hooks = shift
-        or return;
-    my $r = ref $hooks;
-    if ($r eq 'CODE') {
-        $hooks->(@_);
-    }
-    elsif ($r eq 'ARRAY') {
-        $_->(@_) for @$hooks;
-    }
-    else {
-        die "unrunnable hook: $r";
-    }
-}
-
 sub iterate {
     my $self = shift;
     local $_;
     my %arg = (%$self, @_);
     unshift @_, 'file' if @_ % 2;
-    my ($file, $fh, $batch_size, $limits, $first, $before, $each, $error, $after, $last) = @arg{qw(file fh batch_size limits first before each error after last)};
+    my ($file, $fh, $batch_size, $limits, $begin, $before, $each, $error, $after, $end) = @arg{qw(file fh batch_size limits begin before each error after end)};
     die "no callback" if !defined $each;
     $batch_size ||= 1;
     my $max_errors = $limits ? $limits->{'errors'} : 1<<31;
@@ -80,11 +66,20 @@ sub iterate {
     my @batch;
     my $success = 0;
     my $n = 0;
+    my %params = ('source' => $self, 'batch' => \@batch, map { $_ => $arg{$_} } qw(file format limit offset profile site));
+    my $proc = sub {
+        _run_hooks('begin'  => $begin,  %params, 'n' => $n, @_) if $n == 1;
+        _run_hooks('before' => $before, %params, 'n' => $n, @_);
+        _run_hooks('each'   => $each,   %params, 'n' => $n, @_);
+        _run_hooks('after'  => $after,  %params, 'n' => $n, @_);
+        @batch = ();
+    };
+    my $user;
     eval {
         my $num_consecutive_errors = 0;
         my $num_errors = 0;
         while (1) {
-            my ($user, $ok);
+            my $ok;
             eval {
                 $user = $self->_next($fh);
                 ($ok, $num_consecutive_errors) = (1, 0);
@@ -92,13 +87,7 @@ sub iterate {
             if (defined $user) {
                 $n++;
                 push @batch, $user;
-                _run_hooks($first, $self) if $n == 1;
-                if (@batch == $batch_size) {
-                    _run_hooks($before);
-                    _run_hooks($each, @batch);
-                    _run_hooks($after);
-                    @batch = ();
-                }
+                $proc->() if @batch == $batch_size;
             }
             elsif ($ok) {
                 # EOF
@@ -111,12 +100,12 @@ sub iterate {
                 $num_consecutive_errors++;
                 my $die = 1;
                 eval {
-                    _run_hooks($error, $n);
+                    _run_hooks('error' => $error, %params, 'n' => $n);
                     $die = 0;
                 };
                 if ($die) {
                     my $msg = "error handler failed at $n";
-                    ($err) = split /\n/, $@;
+                    my ($err) = split /\n/, $@;
                     $msg .= ': ' . $err if $err =~ /\S/;
                     die $msg;
                 }
@@ -126,12 +115,8 @@ sub iterate {
                     if $num_consecutive_errors >= $max_consecutive_errors;
             }
         }
-        if (@batch) {
-            _run_hooks($before);
-            _run_hooks($each, @batch);
-            _run_hooks($after);
-        }
-        _run_hooks($last, $self) if $n > 0;
+        $proc->() if @batch;
+        _run_hooks('end' => $end, %params, 'n' => $n) if $n > 0;
         $success = 1;
     };
     delete $self->{'fh'};

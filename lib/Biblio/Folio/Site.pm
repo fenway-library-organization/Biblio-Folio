@@ -10,9 +10,10 @@ use Text::Balanced qw(extract_delimited);
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Util;
+use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional);
 use Biblio::Folio::Site::Stash;
 use Biblio::Folio::Site::LoadProfile;
+use Biblio::Folio::Site::Matcher;
 
 # Tracing: states
 use constant qw(ON       ON     );
@@ -31,11 +32,6 @@ use constant qw(UUID    UUID   );
 our $AUTOLOAD;
 
 my $rxuuid = qr/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-my %tok2const = (
-    'null' => JSON::null,
-    'true' => JSON::true,
-    'false' => JSON::false,
-);
 
 sub new {
     my $cls = shift;
@@ -75,7 +71,7 @@ sub load_profiles {
         my @files = $self->file("profile/$type/*.profile");
         foreach my $file (@files) {
             (my $name = $file) =~ s{^.+/|\.profile$}{}g;
-            my $profile = Biblio::Folio::Util::read_config($file);
+            my $profile = _read_config($file);
             $profiles->{$name} = Biblio::Folio::Site::LoadProfile->new(
                 'name' => $name,
                 'type' => $type,
@@ -87,13 +83,13 @@ sub load_profiles {
     return $profiles;
 }
 
-# my $profile = $site->load_profile('users');
-# my $profile = $site->load_profile('users', 'default');
+# my $profile = $site->load_profile('user');
+# my $profile = $site->load_profile('user', 'default');
 sub load_profile {
-    my ($self, $type, $name) = @_;
+    my ($self, $kind, $name) = @_;
     $name = 'default' if !defined $name;
-    return $self->load_profiles($type)->{$name}
-        || die "no such profile for $type: $name";
+    return $self->load_profiles($kind)->{$name}
+        || die "no such profile for $kind: $name";
 }
 
 sub compile_profile {
@@ -124,7 +120,7 @@ sub _read_config_files {
         my $name = $1;
         next if $seen{$name}++;
         undef $name if $name eq 'site';
-        Biblio::Folio::Util::read_config($file, $self->{'config'}, $name);
+        _read_config($file, $self->{'config'}, $name);
     }
 }
 
@@ -340,10 +336,10 @@ sub cached {
 sub class {
     my ($self, $pkg) = @_;
     return if $pkg eq '*';
-    $pkg = Biblio::Folio::Util::_2pkg($pkg);
+    $pkg = _2pkg($pkg);
     my $class = $self->{'_classes'}{$pkg};
     return $class if $class && $class->is_defined;
-    my $kind = Biblio::Folio::Util::_pkg2kind($pkg);
+    my $kind = _pkg2kind($pkg);
     return $class ||= Biblio::Folio::Class->new(
         'site' => $self,
         'package' => $pkg,
@@ -367,7 +363,7 @@ sub object {
     # $site->object($kind, 'query' => $cql, 'limit' => $n, 'offset' => $p);
     # $site->object($kind, 'id' => $id, 'uri' => $uri);
     my ($self, $kind) = splice @_, 0, 2;
-    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
+    my $pkg = _kind2pkg($kind);
     my (@args, @from, $id, $query);
     if (@_ == 1) {
         my ($arg) = @_;
@@ -493,7 +489,7 @@ sub fetch {
 
 sub create {
     my ($self, $kind, %arg) = @_;
-    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
+    my $pkg = _kind2pkg($kind);
     my $uri = delete $arg{'uri'} || $pkg->_uri_create || $pkg->_uri
         or die "no URI to create a $pkg";
     my $res = $self->POST($uri, \%arg);
@@ -549,7 +545,7 @@ sub create {
 
 sub objects {
     my ($self, $kind, %arg) = @_;
-    my $pkg = Biblio::Folio::Util::_kind2pkg($kind);
+    my $pkg = _kind2pkg($kind);
     my $uri = $pkg->_uri_search || $pkg->_uri;
     my $key = delete $arg{'key'};
     my $res = $self->GET($uri, \%arg);
@@ -569,121 +565,16 @@ sub objects {
     } @$objects;
 }
 
-sub match_users {
-    my ($self, $p, @users) = @_;
-    my $profile = $self->profile('users', $p);
-    my @clauses;
-    my @has_term;
-    my @match;
-    my @results;
-    foreach my $u (0..$#users) {
-        my $user = $users[$u];
-        $match[$u] = [];
-        my @mp = $self->_matchpoints('users', $user);
-        push @results, {
-            'user' => $user,
-            'matches' => [],
-        };
-        next if !@mp;
-        my (@may_terms, @must_terms);
-        foreach (@mp) {
-            my ($k, $v, $mp) = @$_;
-            my $term = _cql_term($k, $v, $mp);
-            $has_term[$u]{$term} = 1;
-            if ($mp->{'required'}) {
-                push @must_terms, $term;
-            }
-            else {
-                push @may_terms, $term;
-            }
-        }
-        next if !@may_terms;  # All we have left is required terms -- we can't build a determinative query
-        push @clauses, _cql_and(
-            @must_terms,
-            _cql_or(@may_terms)
-        );
-    }
-    return @results if !@clauses;
-    my $query = _cql_or(@clauses);
-    $query =~ s/\)$// or die "unbalanced parentheses"
-        if $query =~ s/^\(//;
-    my $res = $self->GET('/users', {
-        query => $query,
-    });
-    my $all_matches = $self->json->decode($res->content);
-    $all_matches = $all_matches->{'users'} or return @results;
-    # We have at least one matching user in FOLIO
-    foreach my $m (0..$#$all_matches) {
-        my $match = $all_matches->[$m];
-        my @mp = sort {
-            my ($A, $B) = ($a->[-1], $b->[-1]);
-            my ($afld, $areq, $aord) = @$A{qw(field required order)};
-            my ($bfld, $breq, $bord) = @$B{qw(field required order)};
-            $areq <=> $breq || $aord <=> $bord || $afld cmp $bfld
-        } $self->_matchpoints('users', $match);
-        foreach (@mp) {
-            my ($k, $v, $mp) = @$_;
-            my $term = _cql_term($k, $v, $mp);
-            my $required = $mp->{'required'};
-            foreach my $u (0..$#users) {
-                my $user = $users[$u];
-                if (!$has_term[$u]{$term}) {
-                    # Not a match by $term -- not a match at all, if $term is required
-                    undef $match[$u][$m] if $required;
-                }
-                elsif (!$required) {
-                    # A match by an optional matchpoint -- this is where we "connect the dots"
-                    $match[$u][$m] = 1;
-                    push @{ $results[$u]{'matches'}[$m]{'by'} ||= [] }, $mp->{'field'};
-                }
-                else {
-                    # A match by a required matchpoint -- no need to do anything
-                    1;
-                }
-            }
-        }
-        foreach my $u (0..$#users) {
-            if ($match[$u][$m]) {
-                $results[$u]{'matches'}[$m]{'user'} = $match;
-            }
-###         else {
-###             $matches->[$m] ||= {};
-###             # $results[$u]{'matches'}[$m] = 0;
-###         }
-        }
-    }
-    foreach my $result (@results) {
-        @{ $result->{'matches'} } = grep { defined $_ } @{ $result->{'matches'} };
-    }
-    return @results;
-}
-
-sub _cql_term {
-    my ($k, $v, $mp) = @_;
-    $v =~ s/(["()\\\*\?])/\\$1/g;
-    return qq{$k == "$v"} if $mp->{'exact'};
-    return qq{$k = "$v"};
-}
-
-sub _cql_and {
-    return shift if @_ == 1;
-    return '(' . join(' and ', @_) . ')';
-}
-
-sub _cql_or {
-    return shift if @_ == 1;
-    return '(' . join(' or ', @_) . ')';
-}
-
-sub _matchpoints {
-    my ($self, $type, $obj) = @_;
-    my $matching = $self->config($type)->{'match'} ||= {};
-    my @mp;
-    while (my ($k, $mp) = each %$matching) {
-        my $v = _get_attribute_from_dotted($obj, $mp->{'from'} || $k);
-        push @mp, [$k, $v, $mp] if defined $v && length $v;
-    }
-    return @mp;
+sub matcher {
+    my ($self, $kind, %arg) = @_;
+    my $p = delete $arg{'profile'};
+    my $profile = $self->load_profile($kind, $p);
+    return Biblio::Folio::Site::Matcher->new(
+        'site' => $self,
+        'kind' => $kind,
+        'profile' => $profile,
+        %arg,
+    );
 }
 
 sub choose_any { shift @_ }
@@ -699,24 +590,6 @@ sub choose_highest {
 sub choose_unique {
     return if @_ != 1;
     return shift;
-}
-
-sub _get_attribute_from_dotted {
-    my ($obj, $k) = @_;
-    while ($k =~ s/^([^.]+)\.(?=[^.])//) {
-        return if !$obj;
-        my $r = ref $obj;
-        if ($r eq 'HASH') {
-            $obj = $obj->{$1};
-        }
-        elsif ($r eq 'ARRAY') {
-            return;  # TODO
-        }
-        else {
-            return;
-        }
-    }
-    return $obj->{$k};
 }
 
 sub GET {
@@ -878,11 +751,12 @@ sub _uncamel {
     return lc $_;
 }
 
-sub _apply_update_to_user {
-    my ($self, $existing, $incoming) = @_;
-    # Apply changes from $incoming to $existing
+sub update_object {
+    my ($self, %arg) = @_;
+    my ($object, $using, $profile) = @arg{qw(object using profile)};
+    # Apply changes from $using to $object
     my @changes;
-    my $updating = $self->config('users')->{'update'};
+    my $fields = $profile->{'fields'};
     1;  # TODO
     return @changes;
 }
@@ -1009,9 +883,9 @@ sub search {
     my $results = eval {
         my $res = $self->GET($uri, {
             'query' => $cql,
-            Biblio::Folio::Util::_optional('offset' => $arg{'offset'}),
-            Biblio::Folio::Util::_optional('limit' => $arg{'limit'}),
-            Biblio::Folio::Util::_optional('order_by' => $arg{'order_by'}),
+            _optional('offset' => $arg{'offset'}),
+            _optional('limit' => $arg{'limit'}),
+            _optional('order_by' => $arg{'order_by'}),
         });
         $self->json->decode($res->content);
     } or die "search failed: $cql";
@@ -1025,7 +899,7 @@ sub _initialize_classes_and_properties {
         or die "no classes configured";
     while (my ($k, $c) = each %$classes) {
         my $kind = $c->{'kind'} ||= _uncamel($k);
-        my $pkg = $c->{'package'} ||= Biblio::Folio::Util::_kind2pkg($kind);
+        my $pkg = $c->{'package'} ||= _kind2pkg($kind);
         die "class $pkg redefined" if exists $class{$pkg};
         my @refs = split(/,\s*/, delete($c->{'references'}) || '');
         my %uri;
@@ -1045,7 +919,7 @@ sub _initialize_classes_and_properties {
             /^(\*|[a-z][A-Za-z]*)\.([a-z][A-Za-z]*)(\[\])?$/
                 or die "bad blessed reference in class $pkg: $_";
             my ($from_kind, $from_property, $each) = ($1, $2, defined $3);
-            my $from_pkg = $from_kind eq '*' ? '*' : Biblio::Folio::Util::_kind2pkg($from_kind);
+            my $from_pkg = $from_kind eq '*' ? '*' : _kind2pkg($from_kind);
             my $blessing = {
                 'kind' => $kind,
                 'package' => $pkg,
