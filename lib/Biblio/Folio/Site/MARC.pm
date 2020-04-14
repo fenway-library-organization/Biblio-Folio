@@ -1,11 +1,11 @@
-package Biblio::Folio::MARC;
+package Biblio::Folio::Site::MARC;
 
 use strict;
 use warnings;
 
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 
-@Biblio::Folio::MARC::ISA = qw(Biblio::Folio::Object);
+@Biblio::Folio::Site::MARC::ISA = qw(Biblio::Folio::Object);
 
 sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
 sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
@@ -35,7 +35,7 @@ sub parse {
     }
     my ($leader, $fields) = marcparse($marcref);
     $self->{'leader'} = $leader;
-    $self->{'fields'} = [ map { Biblio::Folio::MARC::Field->new($_) } @$fields ];
+    $self->{'fields'} = [ map { Biblio::Folio::Site::MARC::Field->new($_) } @$fields ];
     $self->{'is_parsed'} = 1;
     return $self;
 }
@@ -165,12 +165,12 @@ sub _default_leader {
     return '00000cam a2200000 a 4500';
 }
 
-package Biblio::Folio::MARC::Field;
+package Biblio::Folio::Site::MARC::Field;
 
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 
 sub new {
-    # $field = Biblio::Folio::MARC::Field->new($record->field(...));
+    # $field = Biblio::Folio::Site::MARC::Field->new($record->field(...));
     my ($cls, $ary) = @_;
     # Shallow clone of the array ref
     return bless [ @$ary ], $cls;
