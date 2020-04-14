@@ -9,7 +9,7 @@ build: config.mk
 config.mk: config.mk.def
 	cp $< $@
 
-install: classes
+install: classes check
 	./install $(PREFIX)
 
 classes: lib/Biblio/Folio/Classes.pm
@@ -23,4 +23,7 @@ diff:
 	diff -ur lib /usr/local/folio/lib || true
 	diff -ur bin /usr/local/folio/bin || true
 
-.PHONY: build install classes diff
+check:
+	@for f in bin/folio $(shell find lib -name \*.pm); do perl -Ilib -c $$f; done
+
+.PHONY: build install classes diff check
