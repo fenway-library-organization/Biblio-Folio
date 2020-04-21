@@ -54,11 +54,11 @@ sub iterate {
     local $_;
     my %arg = (%$self, @_);
     unshift @_, 'file' if @_ % 2;
-    my ($file, $fh, $batch_size, $limits, $begin, $before, $each, $error, $after, $end) = @arg{qw(file fh batch_size limits begin before each error after end)};
+    my ($site, $kind, $file, $fh, $batch_size, $limit, $begin, $before, $each, $error, $after, $end) = @arg{qw(site kind file fh batch_size limit begin before each error after end)};
     die "no callback" if !defined $each;
     $batch_size ||= 1;
-    my $max_errors = $limits ? $limits->{'errors'} : 1<<31;
-    my $max_consecutive_errors = $limits ? $limits->{'consecutive_errors'} : 100;
+    my $max_errors = $limit ? $limit->{'errors'} : 1<<31;
+    my $max_consecutive_errors = $limit ? $limit->{'consecutive_errors'} : 100;
     if (!defined $fh) {
         die "no file to iterate over" if !defined $file;
         $fh = $self->{'fh'} = $self->_open($file);
@@ -66,7 +66,7 @@ sub iterate {
     my @batch;
     my $success = 0;
     my $n = 0;
-    my %params = ('source' => $self, 'batch' => \@batch, map { $_ => $arg{$_} } qw(file format limit offset profile site));
+    my %params = ('source' => $self, 'batch' => \@batch, map { $_ => $arg{$_} } qw(file format limit offset profile site kind));
     my $proc = sub {
         _run_hooks('begin'  => $begin,  %params, 'n' => $n, @_) if $n == 1;
         _run_hooks('before' => $before, %params, 'n' => $n, @_);
@@ -74,19 +74,19 @@ sub iterate {
         _run_hooks('after'  => $after,  %params, 'n' => $n, @_);
         @batch = ();
     };
-    my $user;
+    my $obj;
     eval {
         my $num_consecutive_errors = 0;
         my $num_errors = 0;
         while (1) {
             my $ok;
             eval {
-                $user = $self->_next($fh);
+                $obj = $self->_next($fh);
                 ($ok, $num_consecutive_errors) = (1, 0);
             };
-            if (defined $user) {
+            if (defined $obj) {
                 $n++;
-                push @batch, $user;
+                push @batch, defined $kind ? $site->object($kind, $obj) : $obj;
                 $proc->() if @batch == $batch_size;
             }
             elsif ($ok) {

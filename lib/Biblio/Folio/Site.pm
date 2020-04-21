@@ -48,6 +48,7 @@ sub name { @_ > 1 ? $_[0]{'name'} = $_[1] : $_[0]{'name'} }
 sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
 sub ua { @_ > 1 ? $_[0]{'ua'} = $_[1] : $_[0]{'ua'} }
 sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
+sub cache { @_ > 1 ? $_[0]{'cache'} = $_[1] : $_[0]{'cache'} }
 
 sub config {
     my ($self, $key) = @_;
@@ -181,7 +182,7 @@ sub _read_cache {
     my ($self) = @_;
     my %cache;
     # TODO
-    $self->{'_cached_object'} = \%cache;
+    $self->cache(\%cache);
 }
 
 sub decode_uuid {
@@ -316,16 +317,34 @@ sub all {
 }
 
 sub cached {
-    my ($self, $kind, $id) = @_;
-    return if !defined $id;
+    my ($self, $kind, $what) = @_;
+    return if !defined $what;
+    my ($obj, $id);
+    if (!defined $what) {
+        return;
+    }
+    elsif (ref $what) {
+        $obj = $what;
+        $id = $obj->{'id'}
+            or return $what;
+    }
+    else {
+        $id = $what;
+    }
     my $key = $kind . ':' . $id;
-    my $cached = $self->{'_cached_object'}{$key};
     my $t = time;
-    return $cached->{'object'} if $cached && $cached->{'expiry'} >= $t;
-    my $obj = ref($id) =~ /^Biblio::Folio::/ ? $id : eval { $self->object($kind, $id) };
+    my $cache = $self->cache;
+    my $cached = $cache->{$key};
+    if (!$obj) {
+        return $cached->{'object'} if $cached && $cached->{'expiry'} >= $t;
+        $obj = $self->object($kind, $id);
+    }
     my $ttl = $obj->_ttl || 3600;  # One hour
-    if ($ttl != -1) {
-        $self->{'_cached_object'}{$key} = {
+    if ($ttl == -1) {
+        delete $cache->{$key} if $cached;
+    }
+    elsif (!$cached || $cached->{'expiry'} < $t) {
+        $cache->{$key} = {
             'object' => $obj,
             'expiry' => $t + $ttl,
         };
@@ -359,6 +378,7 @@ sub property {
 
 sub object {
     # $site->object($kind, $id);
+    # $site->object($kind, $object_data);
     # $site->object($kind, \@ids);
     # $site->object($kind, 'query' => $cql, 'limit' => $n, 'offset' => $p);
     # $site->object($kind, 'id' => $id, 'uri' => $uri);
@@ -474,7 +494,7 @@ sub fetch {
         return if $code eq '404';  # Not Found
         die $res->status_line, ' : ', $uri if !$res->is_success;
     }
-    else {
+    elsif (!@return) {
         die "can't construct or fetch $pkg objects without data or an ID or query";
     }
     my $instantiate = !$arg{'scalar'} && !$arg{'array'};
@@ -1192,6 +1212,29 @@ sub _old_initialize_classes_and_properties {
 ### sub Biblio::Folio::Campus::_uri         { '/location-units/campuses/%s' }
 ### sub Biblio::Folio::Library::_uri        { '/location-units/libraries/%s' }
 
+sub formatter {
+    my ($self, $kind, %arg) = @_;
+    my $pkg = _kind2pkg($kind);
+    return $pkg->formatter(%arg);
+}
+
+sub process_file {
+    my ($self, $kind, $file, %arg) = @_;
+    my $parser = $self->parser_for($kind, $file, %arg);
+    $parser->iterate(%arg);
+}
+
+sub parser_for {
+    my ($self, $kind, $file, %arg) = @_;
+    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my %parser = %{ $profile->{'parser'} };
+    my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
+    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+    delete $parser{'class'};
+    use_class($parser_cls);
+    return $parser_cls->new('site' => $self, %parser, 'file' => $file);
+}
+
 sub TO_JSON {
     my %self = %{ shift() };
     delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)$/ } keys %self};
@@ -1210,7 +1253,7 @@ sub AUTOLOAD {
     my $class = eval { $self->class($pkg) };
     if ($class) {
         my $cache = $class->{'cache'};
-        unshift @_, $kind;
+        unshift @_, $self, $kind;
         if ($cache && @_ == 2) {
             goto &cached;
         }
