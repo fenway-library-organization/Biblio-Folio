@@ -950,8 +950,9 @@ sub cmd_user_parse {
     );
     my $argv = $self->argv;
     usage "user match [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
-    @arg{qw(site file)} = ($site, @$argv);
-    $site->proc_userfile(%arg, 'each' => sub {
+    my ($file) = @$argv;
+    $arg{'site'} = $site;
+    $site->process_file('user', $file, %arg, 'each' => sub {
         my %param = @_;
         my $batch = $param{'batch'};
         my ($user) = @$batch;
@@ -970,12 +971,12 @@ sub cmd_user_match {
     );
     my $argv = $self->argv;
     usage "user match [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
-    @arg{qw(site file)} = ($site, @$argv);
+    my ($file) = @$argv;
     my $matcher = $site->matcher('user', %arg);
+    $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
-    $arg{'kind'} = 'user';
     my $batch_base = 1;
-    $site->proc_userfile(%arg, 'each' => sub {
+    $site->process_file('user', $file, %arg, 'each' => sub {
         my %param = @_;
         my $batch = $param{'batch'};
         my $results = $matcher->match(@$batch);
@@ -993,10 +994,11 @@ sub cmd_user_load {
     );
     my $argv = $self->argv;
     usage "user load [-n] [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
-    @arg{qw(site file)} = ($site, @$argv);
-    my $matcher = $site->matcher('user', $arg{'profile'});
+    my ($file) = @$argv;
+    my $matcher = $site->matcher('user', %arg);
+    $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
-    $site->proc_userfile(%arg, 'each' => sub {
+    $site->process_file('user', $file, %arg, 'each' => sub {
         my %param = @_;
         my $batch = $param{'batch'};
         my @results = $matcher->match(@$batch);
@@ -1115,33 +1117,33 @@ sub marc_source_record_id {
     return;
 }
 
-sub userfile_parser {
-    my %arg = @_;
-    my $site = $arg{'site'};
-    my $profile = $site->load_profile('user', $arg{'profile'});
-    my %parser = %{ $profile->{'parser'} };
-    my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
-    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
-    delete $parser{'class'};
-    use_class($parser_cls);
-    return $parser_cls->new('site' => $site, %parser, 'file' => $arg{'file'});
-}
-
-sub proc_userfile {
-    my ($site, %arg) = @_;
-    # TODO
-    if (0 && defined $arg{'format'}) {
-        my $formatter = output_formatter($arg{'format'});
-        %arg = _make_hooks(
-            %arg,
-            'before' => sub { $formatter->before },
-            'after' => sub { $formatter->after },
-        );
-    }
-    my $parser = userfile_parser(%arg);
-    $parser->iterate(%arg);
-}
-
+### sub userfile_parser {
+###     my %arg = @_;
+###     my $site = $arg{'site'};
+###     my $profile = $site->load_profile('user', $arg{'profile'});
+###     my %parser = %{ $profile->{'parser'} };
+###     my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
+###     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+###     delete $parser{'class'};
+###     use_class($parser_cls);
+###     return $parser_cls->new('site' => $site, %parser, 'file' => $arg{'file'});
+### }
+### 
+### sub proc_userfile {
+###     my ($site, %arg) = @_;
+###     # TODO
+###     if (0 && defined $arg{'format'}) {
+###         my $formatter = output_formatter($arg{'format'});
+###         %arg = _make_hooks(
+###             %arg,
+###             'before' => sub { $formatter->before },
+###             'after' => sub { $formatter->after },
+###         );
+###     }
+###     my $parser = userfile_parser(%arg);
+###     $parser->iterate(%arg);
+### }
+### 
 ### sub match_or_load_users {
 ###     my ($verb, %arg) = @_;
 ###     my $site = $arg{'site'};
@@ -1510,18 +1512,6 @@ sub hook {
 
 sub hook_login {
     1;
-}
-
-sub use_class {
-    my ($cls) = @_;
-    my $ok;
-    eval qq{
-        use $cls;
-        \$ok = 1;
-    };
-    return if $ok;
-    my ($err) = split /\n/, $@;
-    fatal "use class $cls: $err";
 }
 
 sub orient {

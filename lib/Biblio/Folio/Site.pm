@@ -10,7 +10,7 @@ use Text::Balanced qw(extract_delimited);
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional);
+use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class);
 use Biblio::Folio::Site::Stash;
 use Biblio::Folio::Site::LoadProfile;
 use Biblio::Folio::Site::Matcher;
@@ -1231,7 +1231,7 @@ sub parser_for {
     my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
     delete $parser{'class'};
-    use_class($parser_cls);
+    _use_class($parser_cls);
     return $parser_cls->new('site' => $self, %parser, 'file' => $file);
 }
 

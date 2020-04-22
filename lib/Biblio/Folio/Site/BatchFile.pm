@@ -52,8 +52,8 @@ sub _uuid {
 sub iterate {
     my $self = shift;
     local $_;
-    my %arg = (%$self, @_);
     unshift @_, 'file' if @_ % 2;
+    my %arg = (%$self, @_);
     my ($site, $kind, $file, $fh, $batch_size, $limit, $begin, $before, $each, $error, $after, $end) = @arg{qw(site kind file fh batch_size limit begin before each error after end)};
     die "no callback" if !defined $each;
     $batch_size ||= 1;

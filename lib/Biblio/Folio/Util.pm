@@ -22,6 +22,7 @@ our @EXPORT_OK = qw(
 	_make_hooks
 	_run_hooks
     _get_attribute_from_dotted
+    _use_class
 );
 
 use JSON;
@@ -212,6 +213,18 @@ sub _get_attribute_from_dotted {
         }
     }
     return $obj->{$k};
+}
+
+sub _use_class {
+    my ($cls) = @_;
+    my $ok;
+    eval qq{
+        use $cls;
+        \$ok = 1;
+    };
+    return if $ok;
+    my ($err) = split /\n/, $@;
+    die "use class $cls: $err";
 }
 
 1;
