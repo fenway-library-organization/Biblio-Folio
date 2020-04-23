@@ -3,12 +3,12 @@ package Biblio::Folio::Object;
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
 
-@Biblio::Folio::Instance::ISA =
-@Biblio::Folio::HoldingsRecord::ISA =
-@Biblio::Folio::Item::ISA =
-@Biblio::Folio::SourceRecord::ISA =
-@Biblio::Folio::Location::ISA =
-@Biblio::Folio::CallNumberType::ISA =
+@Biblio::Folio::Object::Instance::ISA =
+@Biblio::Folio::Object::HoldingsRecord::ISA =
+@Biblio::Folio::Object::Item::ISA =
+@Biblio::Folio::Object::SourceRecord::ISA =
+@Biblio::Folio::Object::Location::ISA =
+@Biblio::Folio::Object::CallNumberType::ISA =
     qw(Biblio::Folio::Object);
 
 *_camel = *Biblio::Folio::Site::_camel;

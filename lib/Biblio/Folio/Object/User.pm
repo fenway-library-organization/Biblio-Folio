@@ -1,4 +1,4 @@
-package Biblio::Folio::User;
+package Biblio::Folio::Object::User;
 
 use strict;
 use warnings;

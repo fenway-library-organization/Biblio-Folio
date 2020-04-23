@@ -1,4 +1,4 @@
-package Biblio::Folio::HoldingsRecord;
+package Biblio::Folio::Object::HoldingsRecord;
 
 # sub call_number { shift()->{'callNumber'} }
 

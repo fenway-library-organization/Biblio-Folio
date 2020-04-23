@@ -672,7 +672,6 @@ sub make_request {
 
 sub req {
     my ($self, $method, $what, $content) = @_;
-    my $self = shift;
     my $req = $self->make_request($method, $what, $content);
     _trace($self, REQUEST => $req);
     my $ua = $self->ua;
@@ -906,7 +905,7 @@ sub source {
             die '$site->source($id|instance=>$id|query=>$cql)';
         }
     }
-    return Biblio::Folio::SourceRecord->new('_site' => $self, %$source);
+    return Biblio::Folio::Object::SourceRecord->new('_site' => $self, %$source);
 }
 
 sub search {
@@ -1054,175 +1053,6 @@ sub _make_marc2instance {
     };
 }
 
-sub _old_initialize_classes_and_properties {
-    my ($self) = @_;
-    my (%class, %prop2class, %unresolved);
-    # Property name (without Id/Ids)    Definition
-    # Key to property definitions:
-    #   =PROP   same as PROP (must be the only flag)
-    #   +       cached (default TTL)
-    #   NUM     cached TTL
-    #   auto    auto-instantiated
-    #   :CLASS  class to use
-    my $properties = q{
-        ### UUIDs for short-lived objects:
-            courseId                   UUID +1      fetch:/coursereserves/courses/{course_id}
-            courseListingId            UUID +1      fetch:/coursereserves/courselistings/{listing_id}
-            holdingsRecordId           UUID +1      fetch:/holdings-storage/holdings/{holdingsRecordId}
-            instanceId                 UUID +1      fetch:/inventory/instances/{instanceId}
-            itemId                     UUID +1      fetch:/item-storage/items/%s
-            userId                     UUID +1      fetch:/users/{userId}
-        ### Non-properties:
-            jobExecutionId             UUID +1      fetch:/change-manager/jobExecutions/{id}
-        ### UUIDs for long-lived objects:
-            addressTypeId              UUID +3600   fetch:/addresstypes/{addresstypeId}
-            alternativeTitleTypeId     UUID +3600   fetch:/alternative-title-types/{id}
-            callNumberTypeId           UUID +3600   fetch:/call-number-types/{id}
-            campusId                   UUID +3600   fetch:/location-units/campuses/{id}
-            classificationTypeId       UUID +3600   fetch:/classification-types/{classificationTypeId}
-            contributorNameTypeId      UUID +3600   fetch:/contributor-name-types/{contributorNameTypeId}
-            contributorTypeId          UUID +3600   fetch:/contributor-types/{contributorTypeId}
-            copyrightStatusId          UUID +3600   fetch:/coursereserves/copyrightstatuses/{status_id}
-            courseTypeId               UUID +3600   fetch:/coursereserves/coursetypes/{type_id}
-            departmentId               UUID +3600   fetch:/coursereserves/departments/{department_id}
-            holdingsNoteTypeId         UUID +3600   fetch:/holdings-note-types/{id}
-            holdingsTypeId             UUID +3600   fetch:/holdings-types/{id}
-            identifierTypeId           UUID +3600   fetch:/identifier-types/{identifierTypeId}
-            illPolicyId                UUID +3600   fetch:/ill-policies/{id}
-            instanceFormatId           UUID +3600   fetch:/instance-formats/{instanceFormatId}
-            instanceNoteTypeId         UUID +3600   fetch:/instance-note-types/{id}
-            instanceRelationshipTypeId UUID +3600   fetch:/instance-relationship-types/{relationshipTypeId}
-            instanceTypeId             UUID +3600   fetch:/instance-types/{instanceTypeId}
-            institutionId              UUID +3600   fetch:/location-units/institutions/{id}
-            itemDamagedStatusId        UUID +3600   fetch:/item-damaged-statuses/{id}
-            itemNoteTypeId             UUID +3600   fetch:/item-note-types/{id}
-            libraryId                  UUID +3600   fetch:/location-units/libraries/{id}
-            locationId                 UUID +3600   fetch:/locations/{id}
-            materialTypeId             UUID +3600   fetch:/material-types/{materialtypeId}
-            modeOfIssuanceId           UUID +3600   fetch:/modes-of-issuance/{modeOfIssuanceId}
-            natureOfContentTermId      UUID +3600   fetch:/nature-of-content-terms/{id}
-            permanentLoanTypeId        UUID +3600   fetch:/loan-types/{loantypeId}
-            platformId                 UUID +3600   fetch:/platforms/{platformId}
-            preferredContactTypeId     UUID +3600   fetch:/no-api/{id}
-            processingStatusId         UUID +3600   fetch:/coursereserves/processingstatuses/{status_id}
-            scheduleId                 UUID +3600   fetch:/no-api/{id}
-            servicePointId             UUID +3600   fetch:/service-points/{servicepointId}
-            sourceRecordId             UUID +3600   fetch:/source-storage/records/{id}
-            statisticalCodeId          UUID +3600   fetch:/statistical-codes/{statisticalCodeId}
-            statisticalCodeTypeId      UUID +3600   fetch:/statistical-code-types/{statisticalCodeTypeId}
-            temporaryLoanTypeId        UUID +3600   fetch:/loan-types/{loantypeId}
-            termId                     UUID +3600   fetch:/coursereserves/terms/{term_id}
-        ### XXX not sure:
-            relationshipId             UUID +3600   fetch:/instance-relationship-types/{relationshipTypeId}
-            statusId                   UUID +3600   fetch:/instance-statuses/{instanceStatusId}
-        ### Literals:
-            countryId                  LITERAL
-            externalId                 LITERAL
-            externalSystemId           LITERAL
-            formerId                   LITERAL
-            intervalId                 LITERAL
-            registerId                 LITERAL
-            registrarId                LITERAL
-        ### Aliases:
-            defaultServicePointId               = servicePointId
-            effectiveLocationId                 = locationId
-            inTransitDestinationServicePointId  = servicePointId
-            itemLevelCallNumberTypeId           = callNumberTypeId
-            permanentLocationId                 = locationId
-            proxyUserId                         = userId
-            servicePointsId                     = servicePointId
-            servicepointId                      = servicePointId
-            staffMemberId                       = userId
-            subInstanceId                       = instanceId
-            superInstanceId                     = instanceId
-            temporaryLocationId                 = locationId
-            typeId                              = callNumberTypeId
-    };
-    foreach my $propdef (split /\n/, $properties) {
-        next if $propdef =~ /^\s*(?:#.*)?$/;  # Skip blank lines and comments
-        chomp $propdef;
-        $propdef =~ s/^\s+//;
-        $propdef =~ s/\s+/ /g;
-        my $err = "internal error: unrecognized property definition: $propdef";
-        $propdef =~ s/^([A-Za-z]+)// or die $err;
-        my $name = $1;
-        my @names = $name =~ m{Id/s$} ? ($name, $name.'s') : ($name);
-        foreach $name (@names) {
-            local $_ = $propdef;
-            $unresolved{$name} = $1, next if /^ = (\w+)/;
-            my %uri;
-            my %p = ('uri' => \%uri);
-            my $kind;
-            if ($name =~ m{(.+)Ids?$}) {
-                $kind = $p{'kind'} = _uncamel($1);
-            }
-            while (s/^ (?=\S)//) {
-                if (s/^[+]([0-9]*|(?= )|$)//) {
-                    $p{'ttl'} = length $1 ? $1 : 1;
-                    $p{'cache'} = 1;
-                }
-                elsif (s/^-(?:(?= )|$)//) {
-                    $p{'ttl'} = 0;
-                }
-                elsif (s/^!(\S+)//) {
-                    $p{'method'} = $1;
-                }
-                elsif (s/^%(\S+)//) {
-                    $kind = $p{'kind'} = $1;
-                }
-                elsif (s{^(?:(fetch|base|search):)?(/\S+)}{}) {
-                    my $action = $1 || 'fetch';
-                    (my $uri = $2) =~ s/{[^{}]+}/%s/;
-                    $uri{$action} = $uri;
-                }
-                elsif (s/^(UUID|LITERAL)//) {
-                    $p{'type'} = $1;
-                }
-                else {
-                    die $err;
-                }
-            }
-            my $class;
-            if (defined $kind && $p{'type'} ne LITERAL) {
-                my $pkg = 'Biblio::Folio::' . ucfirst _camel($kind);
-                $p{'package'} = $pkg;
-                $class = $class{$pkg} = {
-                    'site' => $self,
-                    'name' => $name,
-                    %p,
-                };
-            }
-            $prop2class{$name} = Biblio::Folio::Class->new(
-                'site' => $self,
-                'name' => $name,
-                %p,
-            );
-        }
-    }
-    my $n = 5;
-    while (keys(%unresolved) && $n--) {
-        foreach my $alias (keys %unresolved) {
-            my $name = $unresolved{$alias};
-            if (exists $prop2class{$name}) {
-                $prop2class{$alias} = $prop2class{$name};
-                delete $unresolved{$alias};
-            }
-        }
-    }
-    my @unresolved = sort keys %unresolved;
-    die "unresolved property aliases: @unresolved" if @unresolved;
-    $self->{'_properties'} = \%prop2class;
-    $self->{'_classes'} = \%class;
-    # $self->_define_classes(values %class);
-}
-
-### sub Biblio::Folio::Location::_uri       { '/locations/%s' }
-### sub Biblio::Folio::CallNumberType::_uri { '/call-number-types/%s' }
-### sub Biblio::Folio::LoanType::_uri       { '/loan-types/%s' }
-### sub Biblio::Folio::Institution::_uri    { '/location-units/institutions/%s' }
-### sub Biblio::Folio::Campus::_uri         { '/location-units/campuses/%s' }
-### sub Biblio::Folio::Library::_uri        { '/location-units/libraries/%s' }
-
 sub formatter {
     my ($self, $kind, %arg) = @_;
     my $pkg = _kind2pkg($kind);
@@ -1240,7 +1070,7 @@ sub parser_for {
     my $profile = $self->load_profile($kind, $arg{'profile'});
     my %parser = %{ $profile->{'parser'} };
     my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
-    $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
+    $parser_cls = 'Biblio::FolioX::' . $parser_cls if $parser_cls =~ s/^[+](::)?//;
     delete $parser{'class'};
     _use_class($parser_cls);
     return $parser_cls->new('site' => $self, %parser, 'file' => $file);

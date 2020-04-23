@@ -1,4 +1,4 @@
-package Biblio::Folio::Item;
+package Biblio::Folio::Object::Item;
 
 sub location {
     my ($self) = @_;

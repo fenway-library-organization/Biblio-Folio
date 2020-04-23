@@ -1,4 +1,4 @@
-package Biblio::Folio::Instance;
+package Biblio::Folio::Object::Instance;
 
 # sub _obj_uri { '/instance-storage/instances/%s' }
 

@@ -36,6 +36,9 @@ sub enqueue {
                 or die "don't know how to $method a(n) $r";
         }
         my @params;
+        while ($u =~ m{/%s}g) {
+            push @params, $obj->id;
+        }
         while ($u =~ s/{([^{}]+)}$/%s/) {
             my $k = $1;
             my $v = $obj->{$k};
@@ -48,10 +51,23 @@ sub enqueue {
     return $self;
 }
 
+sub dequeue {
+    my ($self) = @_;
+    my $queue = $self->queue;
+    return if !@$queue;
+    return shift @$queue;
+}
+
 sub load {
+    # my @responses = $loader->load('POST', '/foo', @opt_records);
     my $self = shift;
     $self->enqueue(@_) if @_;
-    XXX;
+    my $site = $self->site;
+    my @responses;
+    while (my $req = $self->dequeue) {
+        my $res = $site->req($req);
+        push @responses, $res;
+    }
 }
 
 1;

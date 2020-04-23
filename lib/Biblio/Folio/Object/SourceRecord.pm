@@ -1,4 +1,4 @@
-package Biblio::Folio::SourceRecord;
+package Biblio::Folio::Object::SourceRecord;
 
 sub ttl { 1 }
 

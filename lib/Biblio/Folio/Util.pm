@@ -142,12 +142,13 @@ sub _2pkg {
 
 sub _kind2pkg {
     my ($kind) = @_;
-    return 'Biblio::Folio::' . ucfirst _camel($kind);
+    return 'Biblio::Folio::Object' if $kind eq 'object';
+    return 'Biblio::Folio::Object::' . ucfirst _camel($kind);
 }
 
 sub _pkg2kind {
     my ($pkg) = @_;
-    $pkg =~ s/^Biblio::Folio:://;
+    $pkg =~ s/^Biblio::Folio::Object:://;
     return lcfirst _uncamel($pkg);
 }
 
