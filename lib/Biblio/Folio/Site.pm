@@ -636,15 +636,27 @@ sub DELETE {
     goto &req;
 }
 
-sub req {
-    my ($self, $method, $path, $content) = @_;
+sub make_request {
+    my ($self, $method, $what, $content) = @_;
     my $endpoint = $self->config('endpoint');
     my $state = $self->state;
-    my $uri = URI->new($endpoint->{'uri'} . $path);
-    if ($content && keys %$content && ($method eq 'GET' || $method eq 'DELETE')) {
-        $uri->query_form(%$content);
+    my $r = ref $what;
+    my ($path, $uri, $req);
+    if ($r eq '') {
+        $uri = URI->new($endpoint->{'uri'} . $what);
+        if ($content && keys %$content && ($method eq 'GET' || $method eq 'DELETE')) {
+            $uri->query_form(%$content);
+        }
+        $req = HTTP::Request->new($method, $uri);
     }
-    my $req = HTTP::Request->new($method, $uri);
+    else {
+        die "attempt to request a $r"
+            if !$what->can('uri');
+        $req = $what;
+        $uri = $req->uri;
+        $uri = URI->new($uri) if !ref $uri;
+        $path = $uri->path;
+    }
     $req->header('X-Okapi-Tenant' => $endpoint->{'tenant'});
     $req->header('Accept' => 'application/json');
     # $req->header('X-Forwarded-For' => '69.43.75.60');
@@ -655,19 +667,18 @@ sub req {
         $req->content_type('application/json');
         $req->content($self->json->encode($content));
     }
+    return $req;
+}
+
+sub req {
+    my ($self, $method, $what, $content) = @_;
+    my $self = shift;
+    my $req = $self->make_request($method, $what, $content);
     _trace($self, REQUEST => $req);
     my $ua = $self->ua;
     my $res = $ua->request($req);
     _trace($self, RESPONSE => $res);
     return $res;
-    if (0) {
-        if ($res->is_success) {
-            return $res;
-        }
-        else {
-            die "FAIL: $method $path -> ", $res->status_line, "\n";
-        }
-    }
 }
 
 sub _trace {
