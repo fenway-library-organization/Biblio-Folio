@@ -3,11 +3,14 @@ package Biblio::Folio::Site::BatchFile;
 use strict;
 use warnings;
 
-use POSIX qw(strftime);
-use Data::UUID;
+use Biblio::Folio::Object;
 use Biblio::Folio::Util qw(_run_hooks);
 
-@Biblio::Folio::Site::BatchFile::ISA = qw(Biblio::Folio::Object);
+use POSIX qw(strftime);
+use Data::UUID;
+
+use vars qw(@ISA);
+@ISA = qw(Biblio::Folio::Object);
 
 sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
 sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }

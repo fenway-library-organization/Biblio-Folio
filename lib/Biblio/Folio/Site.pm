@@ -14,6 +14,7 @@ use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use
 use Biblio::Folio::Site::Stash;
 use Biblio::Folio::Site::LoadProfile;
 use Biblio::Folio::Site::Matcher;
+use Biblio::Folio::Site::BatchLoader;
 
 # Tracing: states
 use constant qw(ON       ON     );
@@ -585,18 +586,6 @@ sub objects {
     } @$objects;
 }
 
-sub matcher {
-    my ($self, $kind, %arg) = @_;
-    my $p = delete $arg{'profile'};
-    my $profile = $self->load_profile($kind, $p);
-    return Biblio::Folio::Site::Matcher->new(
-        'site' => $self,
-        'kind' => $kind,
-        'profile' => $profile,
-        %arg,
-    );
-}
-
 sub choose_any { shift @_ }
 
 sub choose_lowest {
@@ -1068,13 +1057,79 @@ sub process_file {
 sub parser_for {
     my ($self, $kind, $file, %arg) = @_;
     my $profile = $self->load_profile($kind, $arg{'profile'});
-    my %parser = %{ $profile->{'parser'} };
-    my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
+    my %parser = %{ $profile->{'parser'} || {} };
+    my $parser_cls = delete $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
     $parser_cls = 'Biblio::FolioX::' . $parser_cls if $parser_cls =~ s/^[+](::)?//;
-    delete $parser{'class'};
     _use_class($parser_cls);
-    return $parser_cls->new('site' => $self, %parser, 'file' => $file);
+    return $parser_cls->new(
+        %parser,
+        'site' => $self,
+        'profile' => $profile,
+        'kind' => $kind,
+        'file' => $file,
+    );
 }
+
+sub matcher_for {
+    my ($self, $kind, $file, %arg) = @_;
+    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my %matcher = %{ $profile->{'matcher'} || {} };
+    my $matcher_cls = delete $matcher{'class'} || 'Biblio::Folio::Site::Matcher';
+    $matcher_cls = 'Biblio::FolioX::' . $matcher_cls if $matcher_cls =~ s/^[+](::)?//;
+    _use_class($matcher_cls);
+    return $matcher_cls->new(
+        %matcher,
+        'site' => $self,
+        'profile' => $profile,
+        'kind' => $kind,
+        'file' => $file,
+    );
+}
+
+sub loader_for {
+    my ($self, $kind, $file, %arg) = @_;
+    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my %loader = %{ $profile->{'loader'} || {} };
+    my $loader_cls = delete $loader{'class'} || 'Biblio::Folio::Site::BatchLoader';
+    $loader_cls = 'Biblio::FolioX::' . $loader_cls if $loader_cls =~ s/^[+](::)?//;
+    _use_class($loader_cls);
+    return $loader_cls->new(
+        %loader,
+        'site' => $self,
+        'profile' => $profile,
+        'kind' => $kind,
+        'file' => $file,
+    );
+}
+
+### sub matcher {
+###     my ($self, $kind, $file, %arg) = @_;
+###     my $p = delete $arg{'profile'};
+###     my $profile = $self->load_profile($kind, $p);
+###     return Biblio::Folio::Site::Matcher->new(
+###         'site' => $self,
+###         'kind' => $kind,
+###         'file' => $file,
+###         'profile' => $profile,
+###         %arg,
+###     );
+### }
+
+### sub loader {
+###     my ($self, $kind, %arg) = @_;
+###     my $p = delete $arg{'profile'};
+###     my $profile = $self->load_profile($kind, $p);
+###     my $loader_cls = $profile->{'loader'}{'class'}
+###         or die "no batch loader class defined for $kind objects";
+###     $loader_cls = 'Biblio::FolioX::' . $loader_cls if $loader_cls =~ s/^[+](::)?//;
+###     _use_class($loader_cls);
+###     return $loader_cls->new(
+###         'site' => $self,
+###         'kind' => $kind,
+###         'profile' => $profile,
+###         %arg,
+###     );
+### }
 
 sub TO_JSON {
     my %self = %{ shift() };

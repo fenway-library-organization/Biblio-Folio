@@ -21,6 +21,10 @@ use File::Basename qw(dirname basename);
 use Getopt::Long
     qw(GetOptionsFromArray :config posix_default gnu_compat require_order bundling no_ignore_case);
 
+use constant FORMAT_MARC => 'marc';
+use constant FORMAT_JSON => 'json';
+use constant FORMAT_TEXT => 'text';
+
 sub dd;
 sub usage;
 sub fatal;
@@ -255,13 +259,11 @@ sub cmd_instance_source_get {
     my ($site, %arg) = $self->orient(qw(:formats));
     my $argv = $self->argv;
     usage "instance source get [-JMT] INSTANCE_ID..." if !@$argv;
-    my %format = %{ $arg{'format'} };
-    usage if keys(%format) > 1;
-    $format{'json'} = 1 if keys(%format) == 0;
+    my $format = $arg{'format'} || FORMAT_JSON;
     foreach my $id (@$argv) {
         my $source = $site->source('instance' => $id);
         my $rectype = $source->record_type;
-        if ($format{'marc'}) {
+        if ($format eq FORMAT_MARC) {
             if ($rectype ne 'MARC') {
                 print STDERR "record not in MARC format; $id\n";
                 next;
@@ -281,7 +283,7 @@ sub cmd_instance_source_get {
             #1;
             #print $marc;
         }
-        elsif ($format{'text'}) {
+        elsif ($format eq FORMAT_TEXT) {
             if ($rectype ne 'MARC') {
                 print STDERR "record not in MARC format; $id\n";
                 next;
@@ -320,7 +322,7 @@ sub cmd_instance_harvest {
         || ($id_file && @$argv)
         || ($query   && @$argv)
         ;
-    my %as = %{ $arg{'format'} || { 'marc' => 1 } };
+    my $format = $arg{'format'} || FORMAT_MARC;
     $with{'holdings'} = 1 if $with{'items'};
     my $t0 = time;
     my $err = 0;
@@ -392,7 +394,7 @@ sub cmd_instance_harvest {
             $n++;
             my $id = $instance->id;
             my $hrid = $instance->hrid;
-            if ($as{'marc'}) {
+            if ($format eq FORMAT_MARC) {
                 my $marc;
                 eval {
                     $marc = $instance->marc_record;
@@ -433,7 +435,7 @@ sub cmd_instance_harvest {
                 }
                 print $marc;
             }
-            elsif ($as{'json'}) {
+            elsif ($format eq FORMAT_JSON) {
                 my $json = $self->json;
                 if ($with{'holdings'}) {
                     my @holdings = $instance->holdings;
@@ -461,7 +463,7 @@ sub cmd_instance_harvest {
                 @num{qw(instances holdings items)};
         }
     }
-    print "\n]\n}\n" if $as{'json'};
+    print "\n]\n}\n" if $format eq FORMAT_JSON;
     if ($self->verbose && defined $query || $mod) {
         printf STDERR "\r%8d instances : %8d holdings : %8d items => %.1f seconds\n",
             @num{qw(instances holdings items)},
@@ -584,7 +586,7 @@ sub cmd_source_search {
     $arg{'deleted'} = JSON::true if $deleted;
     my $argv = $self->argv;
     usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @$argv != 1;
-    my %format = %{ $arg{'format'} || { 'json' => 1 } };
+    my $format = $arg{'format'} || FORMAT_JSON;
     my ($cql) = @$argv;
     my $content = $site->search('/source-storage/records', $cql, %arg);
     my ($total, $sources) = @$content{qw(totalRecords records)};
@@ -593,7 +595,7 @@ sub cmd_source_search {
     foreach my $srec (@$sources) {
         $n++;
         my $rectype = $srec->{'recordType'};
-        if ($format{'marc'}) {
+        if ($format eq FORMAT_MARC) {
             if ($rectype ne 'MARC') {
                 print STDERR "record not in MARC format: $cql [$n]\n";
                 next;
@@ -967,22 +969,43 @@ sub cmd_user_match {
         'p|parser=s' => 'parser_cls',
         'L|load-profile=s' => 'profile',
         'x|include-rejects' => 'include_rejects',
+        'y|prepare' => 'prepare',
         qw(:formats !as-marc),
     );
     my $argv = $self->argv;
-    usage "user match [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
+    my $format = $arg{'format'} ||= FORMAT_JSON;
+    usage "user match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
+        if @$argv != 1
+        || $arg{'prepare'} && $format ne FORMAT_JSON
+        ;
     my ($file) = @$argv;
-    my $matcher = $site->matcher('user', %arg);
+    my $matcher = $site->matcher_for('user', $file, %arg);
     $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
     my $batch_base = 1;
-    $site->process_file('user', $file, %arg, 'each' => sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my $results = $matcher->match(@$batch);
-        $self->show_matching_users(%param, 'batch_base' => $batch_base, 'results' => $results);
+    if ($arg{'prepare'}) {
+        my $loader = $site->loader_for('user', $file, %arg);
+        my $json = $self->json;
+        $arg{'each'} = sub {
+            my %param = @_;
+            my $batch = $param{'batch'};
+            my @results = $matcher->match(@$batch);
+            my @objects = $loader->prepare(@results);
+            1;
+        };
+    }
+    else {
+        $arg{'each'} = sub {
+            my %param = @_;
+            my $batch = $param{'batch'};
+            my $results = $matcher->match(@$batch);
+            $self->show_matching_users(%param, 'batch_base' => $batch_base, 'results' => $results);
+        };
+    };
+    $arg{'after'} = sub {
         $batch_base += $arg{'batch_size'};
-    });
+    };
+    $site->process_file('user', $file, %arg);
 }
 
 sub cmd_user_load {
@@ -993,19 +1016,64 @@ sub cmd_user_load {
         'L|load-profile=s' => 'profile',
     );
     my $argv = $self->argv;
-    usage "user load [-n] [-s NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
+    usage "user load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
     my ($file) = @$argv;
-    my $matcher = $site->matcher('user', %arg);
+    my $matcher = $site->matcher_for('user', $file, %arg);
     $arg{'site'} = $site;
+    my $loader = $site->loader_for('user', $file, %arg);
     $arg{'batch_size'} ||= 10;
-    $site->process_file('user', $file, %arg, 'each' => sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my @results = $matcher->match(@$batch);
-        foreach my $result (@results) {
-            $self->update_or_create_user(%param, 'result' => $result);
-        }
-    });
+    my $batch_base = 1;
+    $site->process_file(
+        'user',
+        $file,
+        %arg,
+        'each' => sub {
+            my %param = @_;
+            my $batch = $param{'batch'};
+            my @match_results = $matcher->match(@$batch);
+            $batch = $loader->prepare(@match_results);
+            #my @objects = $loader->prepare(@match_results);
+            if ($self->dryrun) {
+                my @items = @{ $batch->items };
+                my $json = $self->json;
+                foreach my $item (@items) {
+                    my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
+                        = @$item{qw(n action record object matches warning rejected matching)};
+                    my @matches = $matches ? @$matches : ();
+                    my $raw = $record->{'_raw'};
+                    my $parsed = $record->{'_parsed'};
+                    $n += $batch_base;
+                    print "--------------------------------------------------------------------------------\n" if $n;
+                    print "Record: $n\n";
+                    print "Action: ", uc $action, "\n";
+                    print "Raw input: $raw\n";
+                    print "Parsed:\n";
+                    print _indent($json->encode($parsed));
+                    print "Matches: ", scalar(@matches), "\n";
+                    my $what = $action eq 'create' ? $record : $object;
+                    if (defined $what) {
+                        print "Object:\n";
+                        print _indent($json->encode($what));
+                        if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
+                            my $m = 0;
+                            foreach my $match (@matches) {
+                                $m++;
+                                # TODO
+                            }
+                        }
+                    }
+                    else {
+                        print "No match to $action\n";
+                    }
+                }
+            }
+            else {
+                my @load_results = $loader->load($batch);
+                1;
+            }
+        },
+        'after' => sub { $batch_base += $arg{'batch_size'} },
+    );
 }
 
 sub cmd_address {
@@ -1440,6 +1508,12 @@ sub add_items_to_marc_fields {
     }
 }
 
+sub _indent {
+    my $str = shift;
+    my $indent = ' ' x (@_ ? pop : 4);
+    return join '', map { $indent . $_ . "\n" } split /\n/, $str;
+}
+
 sub _33x_field_subfields {
     my ($fields) = @_;
     my %f33x = map { $_ => {} } qw(336 337 338);
@@ -1518,7 +1592,7 @@ sub orient {
     my $self = shift;
     my $root = $self->root;
     my $site_name = $self->site_name;
-    my @args = (':standard', @_);
+    my @specs = (':standard', @_);
     my %arg;
     my %tracing;
     my %optgroup = (
@@ -1534,9 +1608,9 @@ sub orient {
             'o|order-by=s' => \$arg{'order_by'},
         },
         'formats' => {
-            'J|as-json' => sub { $arg{'format'}{'json'} = 1 },
-            'M|as-marc' => sub { $arg{'format'}{'marc'} = 1 },
-            'T|as-text' => sub { $arg{'format'}{'text'} = 1 },
+            'J|as-json' => sub { $arg{'format'} = FORMAT_JSON },
+            'M|as-marc' => sub { $arg{'format'} = FORMAT_MARC },
+            'T|as-text' => sub { $arg{'format'} = FORMAT_TEXT },
         },
         'debugging' => {
             'X|tracing=s' => sub {
@@ -1546,19 +1620,18 @@ sub orient {
     );
     my %opt;
     my %not;
-    while (@args) {
-        my $arg = shift @args;
-        my %o = parse_opt_spec($arg);
+    while (@specs) {
+        my %o = parse_opt_spec(shift @specs);
         my $name = $o{'name'};
         if ($o{'is_group'}) {
             my $opts = $optgroup{$name} || fatal "unrecognized option group: $name";
-            push @args, %$opts;
+            push @specs, %$opts;
         }
         elsif ($o{'is_negator'}) {
             $not{$name} = 1;
         }
-        elsif (@args) {
-            my $dest = shift @args;
+        elsif (@specs) {
+            my $dest = shift @specs;
             if (!ref $dest) {
                 my $key = $dest;
                 $dest = \$arg{$key};

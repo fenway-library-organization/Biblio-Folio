@@ -7,6 +7,7 @@ use warnings;
 
 use FindBin qw($Bin);
 use lib "$Bin/../lib";
+use lib "$Bin/../../Biblio-FolioX/lib";  # In case we're running from development directory
 
 use Biblio::Folio::App;
 
@@ -19,6 +20,7 @@ my $app = Biblio::Folio::App->new(
     'argv' => [@ARGV],
     'root' => $ENV{'FOLIO_ROOT'} || '/usr/local/folio',
     'site_name' => $ENV{'FOLIO_SITE'},
+    'debug' => do { no strict 'refs'; defined $DB::single },
 );
 $app->run;
 

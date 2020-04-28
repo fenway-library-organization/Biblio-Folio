@@ -192,12 +192,17 @@ sub results {
         %$irej = ( %$irej, %$rejected ) if $rejected;
         my @by = keys %$imat;
         my @rej = keys %$irej;
-        push @{ $ires->{'matches'} ||= [] }, { 'user' => $crec, 'by' => \@by, 'rejected' => \@rej };
-        #push @{ $cres->{'matches'} ||= [] }, { 'user' => $irec, 'by' => $by, 'rejected' => $rejected };
+        push @{ $ires->{'matches'} ||= [] }, { 'object' => $crec, 'by' => \@by, 'rejected' => \@rej };
+        #push @{ $cres->{'matches'} ||= [] }, { 'object' => $irec, 'by' => $by, 'rejected' => $rejected };
         push @match_pairs, [$i, $c];
     }
     $matrix->{'match_pairs'} = \@match_pairs;
-    return $matrix;
+    if (wantarray) {
+        return @{ $matrix->{'incoming'}{'results'} };
+    }
+    else {
+        return $matrix;
+    }
 }
 
 ###     if (0) {

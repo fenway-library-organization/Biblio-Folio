@@ -1,17 +1,22 @@
 package Biblio::Folio::Object;
 
+use strict;
+use warnings;
+
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
 
-@Biblio::Folio::Object::Instance::ISA =
-@Biblio::Folio::Object::HoldingsRecord::ISA =
-@Biblio::Folio::Object::Item::ISA =
-@Biblio::Folio::Object::SourceRecord::ISA =
-@Biblio::Folio::Object::Location::ISA =
-@Biblio::Folio::Object::CallNumberType::ISA =
-    qw(Biblio::Folio::Object);
+use Biblio::Folio::Util qw(_camel);
 
-*_camel = *Biblio::Folio::Site::_camel;
+# @Biblio::Folio::Object::Instance::ISA =
+# @Biblio::Folio::Object::HoldingsRecord::ISA =
+# @Biblio::Folio::Object::Item::ISA =
+# @Biblio::Folio::Object::SourceRecord::ISA =
+# @Biblio::Folio::Object::Location::ISA =
+# @Biblio::Folio::Object::CallNumberType::ISA =
+#     qw(Biblio::Folio::Object);
+
+#*_camel = *Biblio::Folio::Site::_camel;
 
 our $AUTOLOAD;
 
@@ -27,6 +32,31 @@ sub new {
 sub DESTROY { }
 
 sub init { }
+
+sub _uri_create {
+    my ($self) = @_;
+    my $uri = $self->_uri;
+    $uri =~ s{/%s$}{};
+    return $uri;
+}
+
+sub _uri_update {
+    my ($self) = @_;
+    my $uri = $self->_uri;
+    my $id = $self->id;
+    $uri =~ s{/%s$}{$id}
+        or die "no placeholder in uri $uri to use for updates";
+    return $uri;
+}
+
+sub _uri_delete {
+    my ($self) = @_;
+    my $uri = $self->_uri;
+    my $id = $self->id;
+    $uri =~ s{/%s$}{$id}
+        or die "no placeholder in uri $uri to use for deletes";
+    return $uri;
+}
 
 sub _search_results {
     my ($pkg, $content, @dig) = @_;
@@ -125,6 +155,12 @@ sub TO_JSON {
     delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)?$/ } keys %self};
     return \%self;
 }
+
+### sub as_hash {
+###     my %self = %{ shift() };
+###     delete @self{grep { /^_/ } keys %self};
+###     return \%self;
+### }
 
 sub cached {
     unshift @_, shift(@_)->{'_site'};
