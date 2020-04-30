@@ -14,6 +14,7 @@ our @EXPORT_OK = qw(
 	_kind2pkg
 	_pkg2kind
 	_optional
+    _cql_query
 	_cql_value
 	_cql_term
 	_cql_and
@@ -156,6 +157,20 @@ sub _optional {
     my ($k, $v) = @_;
     return if !defined $v;
     return ($k, $v);
+}
+
+sub _cql_query {
+    my ($terms) = @_;
+    my @terms;
+    while (my ($k, $v) = each %$terms) {
+        next if $k =~ /^\@/;  # Query parameters (limit, offset)
+        $k =~ s{^([~%]+)}{};
+        my $signs = $1;
+        my $exact  = ($signs =~ /~/ ? 0 : 1);
+        my $is_cql = ($signs =~ /%/ ? 1 : 0);
+        push @terms, _cql_term($k, $v, {'exact' => $exact}, $is_cql);
+    }
+    return _cql_and(@terms);
 }
 
 sub _cql_value {

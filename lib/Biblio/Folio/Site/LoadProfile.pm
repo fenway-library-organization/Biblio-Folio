@@ -24,6 +24,7 @@ sub init {
         local $_ = $fields->{$f};
         my %field = (
             'field' => $f,
+            'key' => $f,
             'qualifier' => 'any',
             'is_matchpoint' => 0,
             'is_check' => 0,
@@ -53,6 +54,7 @@ sub init {
             }
             elsif (s/^(?:in|not )exact//) {
                 $field{'exact'} = 0;
+                $field{'key'} =~ s/^[~]?/~/;
             }
             elsif (s/^default://) {
                 my $dv = extract_value();

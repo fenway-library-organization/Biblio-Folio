@@ -3,7 +3,7 @@ package Biblio::Folio::Site::Searcher;
 use strict;
 use warnings;
 
-use Biblio::Folio::Util qw(_kind2pkg _cql_term _cql_and);
+use Biblio::Folio::Util qw(_kind2pkg _cql_query);
 
 sub new {
     my $cls = shift;
@@ -79,17 +79,7 @@ sub prepare {
         $param{'query'} = $query;
     }
     elsif ($terms) {
-        my @terms;
-        my $exact = {'exact' => 1};
-        while (my ($k, $v) = each %$terms) {
-            if (ref($v) eq 'ARRAY') {
-                push @terms, _cql_term($k, $v, $exact, $k =~ /id$/i);
-            }
-            else {
-                push @terms, _cql_term($k, $v, $exact);
-            }
-        }
-        $param{'query'} = _cql_and(@terms);
+        $param{'query'} = _cql_query($terms);
     }
     else {
         my $pkg = _kind2pkg($kind);
