@@ -317,10 +317,10 @@ sub cmd_harvest {
         if @$argv && ($query || $all);
     my $bsearcher;
     if (defined $query) {
-        $bsearcher = $site->searcher('instance', {'query' => $query, 'limit' => $batch_size});
+        $bsearcher = $site->searcher('instance', '@query' => $query, '@limit' => $batch_size);
     }
     elsif ($all) {
-        $bsearcher = $site->searcher('instance', {'limit' => $batch_size});
+        $bsearcher = $site->searcher('instance', '@limit' => $batch_size);
     }
     else {
         die "not yet implemented";
@@ -367,8 +367,8 @@ sub cmd_harvest {
         }
         my $n = keys %bid2instance;
         if ($n && (!$instance || $n >= $batch_size)) {
-#my $ssearcher = $site->searcher('source_record', {'limit' => scalar @bids}, 'externalIdsHolder.instanceId' => \@bids);
-            my $hsearcher = $site->searcher('holdings_record', {'limit' => scalar @bids}, 'instanceId' => \@bids);
+#my $ssearcher = $site->searcher('source_record', 'externalIdsHolder.instanceId' => \@bids, '@limit' => scalar @bids);
+            my $hsearcher = $site->searcher('holdings_record', 'instanceId' => \@bids, '@limit' => scalar @bids);
             foreach ($hsearcher->all) {
                 push @{ $bid2holdings{$_->{'instanceId'}} ||= [] }, $_;
             }
@@ -752,6 +752,65 @@ sub cmd_source_replace {
         1;
     }
     1;  # Then what?
+}
+
+sub cmd_source_harvest {
+    # ofs=0; while (( ofs < 225222 )); do time folio @sim-fameflower get "/source-storage/records?limit=1000&offset=$ofs" > var/sources-$ofs.json; (( ofs += 1000 )); done
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient(
+        'a|all' => 'all',
+        'i|instance-id-file=s' => 'instance_id_file',
+        'q|query=s' => 'query',
+        'k|batch-size=i' => 'batch_size',
+        'b|source-record-database=s' => 'source_record_db',
+    );
+    my $argv = $self->argv;
+    usage "source harvest [-a|-i FILE|-q CQL] [-b DBFILE]"
+        if @$argv || 1 < scalar grep { exists $arg{$_} } qw(all instance_id_file query);
+    my $batch_size = $arg{'batch_size'} || 100;
+    my $next;
+    if (defined $arg{'all'}) {
+        my $searcher = $site->searcher('source_record', '@limit' => $batch_size);
+        $next = sub { $searcher->next };
+    }
+    elsif (defined $arg{'query'}) {
+        my $searcher = $site->searcher('source_record', '@query' => $arg{'query'}, '@limit' => $batch_size);
+        $next = sub { $searcher->next };
+    }
+    elsif (defined $arg{'instance_id_file'}) {
+        fatal 'not yet implemented: -i FILE';
+        my $f = $arg{'instance_id_file'};
+        open my $fh, '<', $f or fatal "open $f: $!";
+        my @instance_ids;
+        $next = sub {
+            while (1) {
+                my $instance_id = <$fh>;
+                if (defined $instance_id) {
+                    chomp $instance_id;
+                    push @instance_ids, $instance_id;
+                }
+                elsif (@instance_ids < $batch_size) {
+                    next if defined $instance_id;
+                }
+                elsif (@instance_ids) {
+                    my $searcher = $site->searcher('source_record', 'instanceId' => [@instance_ids], '@limit' => $batch_size);
+                    @instance_ids = ();
+                    my $instance = $searcher->next;
+                    return $instance if defined $instance;
+                }
+                return if !defined $instance_id;
+                # If we get to this point, we haven't hit the end of the file,
+                # but we have just read a whole batch of instance IDs for
+                # nonexistent instances -- which is totally bizarre, but
+                # just barely possible
+                print STDERR "warning: batch of entirely nonexistent instances\n";
+            }
+        };
+    }
+    while (1) {
+        my $source_record = $next->();
+        1;
+    }
 }
 
 sub cmd_job {
