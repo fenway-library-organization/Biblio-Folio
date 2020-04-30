@@ -385,43 +385,27 @@ sub property {
 
 sub searcher {
     # $searcher = $site->searcher($kind);
-    # $searcher = $site->searcher($kind, $limit);
-    # $searcher = $site->searcher($kind, '@'.$offset, $limit);
-    # $searcher = $site->searcher($kind, 'id' => \@ids, 'active' => true);
-    # $searcher = $site->searcher($kind, 'id' => \@ids, {'limit' => 20});
+    # $searcher = $site->searcher($kind, '@limit' => $limit);
+    # $searcher = $site->searcher($kind, 'id' => [@ids], 'active' => true);
+    # $searcher = $site->searcher($kind, '@limit' => 20, 'id' => [@ids], '@offset' => 100);
     # $searcher->limit(100);
     # while (my $object = $searcher->next) {
     #     print $object->id, "\n";
     # }
-    my $self = shift;
-    my $kind = shift;
+    my ($self, $kind, %term) = @_;
     # Look for offset and limit parameters
     my %param;
-    while (@_ && $_[0] !~ /^[a-z]/) {
-        my $v = shift;
-        my $r = ref $v;
-        if ($r eq 'HASH') {
-            %param = %$v;
-            last;
+    foreach my $k (keys %term) {
+        if ($k =~ /^\@(.+)/) {
+            $param{$1} = delete $term{$k};
         }
-        elsif ($r eq '') {
-            if ($v =~ /^[1-9][0-9]*$/) {
-                $param{'limit'} = $v;
-                next;
-            }
-            elsif ($v =~ /^\@([1-9][0-9]*)$/) {
-                $param{'offset'} = $1;
-                next;
-            }
-        }
-        die "unrecognized argument: $v";
     }
     die "unrecognized argument" if @_ % 2;
     return Biblio::Folio::Site::Searcher->new(
         'site' => $self,
         'kind' => $kind,
         %param,
-        @_ ? ('terms' => { @_ }) : (),
+        %term ? ('terms' => \%term) : (),
     );
 }
 
@@ -990,7 +974,7 @@ sub source {
 
 sub source_records {
     my ($self, @iids) = @_;
-    my $searcher = $self->searcher('source_record', 'externalIdsHolder.instanceId' => \@iids, {'limit' => scalar @iids});
+    my $searcher = $self->searcher('source_record', 'externalIdsHolder.instanceId' => \@iids, '@limit' => scalar @iids);
     return $searcher->all;
 }
 
