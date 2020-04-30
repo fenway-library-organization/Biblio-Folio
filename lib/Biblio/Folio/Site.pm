@@ -10,7 +10,8 @@ use Text::Balanced qw(extract_delimited);
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class);
+use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class _cql_term _cql_or);
+use Biblio::Folio::Site::Searcher;
 use Biblio::Folio::Site::Stash;
 use Biblio::Folio::Site::LoadProfile;
 use Biblio::Folio::Site::Matcher;
@@ -50,6 +51,7 @@ sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
 sub ua { @_ > 1 ? $_[0]{'ua'} = $_[1] : $_[0]{'ua'} }
 sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
 sub cache { @_ > 1 ? $_[0]{'cache'} = $_[1] : $_[0]{'cache'} }
+sub dont_cache { @_ > 1 ? $_[0]{'dont_cache'} = $_[1] : $_[0]{'dont_cache'} }
 
 sub config {
     my ($self, $key) = @_;
@@ -315,6 +317,7 @@ sub location {
 
 sub all {
     my ($self, $kind) = @_;
+    return $self->objects($kind, 'limit' => 1<<31);
 }
 
 sub cached {
@@ -331,6 +334,9 @@ sub cached {
     }
     else {
         $id = $what;
+    }
+    if ($self->dont_cache->{$kind}) {
+        return $obj || $self->object($kind, $id);
     }
     my $key = $kind . ':' . $id;
     my $t = time;
@@ -376,6 +382,77 @@ sub property {
     return $prop if $prop;
     die "no such property: $prop";
 }
+
+sub searcher {
+    # $searcher = $site->searcher($kind);
+    # $searcher = $site->searcher($kind, $limit);
+    # $searcher = $site->searcher($kind, '@'.$offset, $limit);
+    # $searcher = $site->searcher($kind, 'id' => \@ids, 'active' => true);
+    # $searcher = $site->searcher($kind, 'id' => \@ids, {'limit' => 20});
+    # $searcher->limit(100);
+    # while (my $object = $searcher->next) {
+    #     print $object->id, "\n";
+    # }
+    my $self = shift;
+    my $kind = shift;
+    # Look for offset and limit parameters
+    my %param;
+    while (@_ && $_[0] !~ /^[a-z]/) {
+        my $v = shift;
+        my $r = ref $v;
+        if ($r eq 'HASH') {
+            %param = %$v;
+            last;
+        }
+        elsif ($r eq '') {
+            if ($v =~ /^[1-9][0-9]*$/) {
+                $param{'limit'} = $v;
+                next;
+            }
+            elsif ($v =~ /^\@([1-9][0-9]*)$/) {
+                $param{'offset'} = $1;
+                next;
+            }
+        }
+        die "unrecognized argument: $v";
+    }
+    die "unrecognized argument" if @_ % 2;
+    return Biblio::Folio::Site::Searcher->new(
+        'site' => $self,
+        'kind' => $kind,
+        %param,
+        @_ ? ('terms' => { @_ }) : (),
+    );
+}
+
+### sub query {
+###     # $site->query($kind, 'id' => \@ids, 'active' => true, [$offset, $limit]);
+###     my $self = shift;
+###     my $kind = shift;
+###     my @terms;
+###     my $exact = { 'exact' => 1 };
+###     my ($cql, @terms, $offset, $limit, %arg);
+###     if (@_ > 1 && $_[0] eq 'cql') {
+###         shift;
+###         $arg{'query'} = shift;
+###     }
+###     else {
+###         while (@_ > 1) {
+###             my ($k, $v) = splice @_, 0, 2;
+###             if (ref($v) eq 'ARRAY') {
+###                 push @terms, _cql_term($k, $v, $exact, $k =~ /id$/i);
+###             }
+###             else {
+###                 push @terms, _cql_term($k, $v, $exact);
+###             }
+###         }
+###         $arg{'query'} = _cql_and(@terms);
+###     }
+###     if (@_ == 1) {
+###         @arg{qw(offset limit)} = @{ shift() };
+###     }
+###     return $self->object($kind, %arg);
+### }
 
 sub object {
     # $site->object($kind, $id);
@@ -430,6 +507,7 @@ sub fetch {
     my $id = delete $arg{'id'};
     my $idref = ref $id;
     my $query = $arg{'query'};
+    my $burst;
     my @return;
     if ($objs) {
         # Just construct the object(s)
@@ -479,15 +557,22 @@ sub fetch {
         else {
             if (defined $id) {
                 $uri = sprintf($uri, $id);
+                $res = $self->GET($uri);
             }
-            elsif ($uri !~ s{/%s$}{}) {
-                die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
+            else {
+                $burst = 1;
+                foreach (qw(offset limit)) {
+                    $content{$_} = $arg{$_} if defined $arg{$_};
+                }
+                delete $content{'query'};
+                $uri =~ s{/%s$}{};  # or die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
+                $res = $self->GET($uri, \%content);
             }
-            $res = $self->GET($uri);
             $code = $res->code;
             if ($res->is_success) {
                 my $content = $self->json->decode($res->content);
-                @return = (ref($content) eq 'ARRAY' ? @$content : $content);
+                @return = $burst ? _burst($content, $arg{'key'})
+                                 : (ref($content) eq 'ARRAY' ? @$content : $content);
             }
         }
         #die "unable to execute API call: $uri"
@@ -572,6 +657,14 @@ sub objects {
     my $res = $self->GET($uri, \%arg);
     return if !$res->is_success;
     my $content = $self->json->decode($res->content);
+    my @elems = _burst($content, $arg{'key'});
+    return map {
+        $pkg->new('_site' => $self, '_json' => $self->json, %$_)
+    } @elems;
+}
+
+sub _burst {
+    my ($content, $key) = @_;
     my $n = delete $content->{'totalRecords'};
     delete @$content{qw(resultInfo errorMessages)};
     if (!defined $key) {
@@ -579,11 +672,9 @@ sub objects {
         die "which key?" if @keys != 1;
         ($key) = @keys;
     }
-    my $objects = $content->{$key};
-    die "not an array: $key" if !$objects || ref($objects) ne 'ARRAY';
-    return map {
-        $pkg->new('_site' => $self, '_json' => $self->json, %$_)
-    } @$objects;
+    my $elems = $content->{$key};
+    die "not an array: $key" if !$elems || ref($elems) ne 'ARRAY';
+    return @$elems;
 }
 
 sub choose_any { shift @_ }
@@ -895,6 +986,12 @@ sub source {
         }
     }
     return Biblio::Folio::Object::SourceRecord->new('_site' => $self, %$source);
+}
+
+sub source_records {
+    my ($self, @iids) = @_;
+    my $searcher = $self->searcher('source_record', 'externalIdsHolder.instanceId' => \@iids, {'limit' => scalar @iids});
+    return $searcher->all;
 }
 
 sub search {

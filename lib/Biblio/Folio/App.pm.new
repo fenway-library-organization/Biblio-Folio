@@ -299,122 +299,6 @@ sub cmd_instance_source_get {
 sub cmd_instance_source_replace {
 }
 
-sub cmd_harvest {
-    my ($self) = @_;
-    my ($all, $query, $batch_size, $spell_out_locations, $source_record_db);
-    my ($site, %arg) = $self->orient(
-        qw(:fetch !offset !order-by),
-        qw(:formats !as-text),
-        'a|all' => \$all,
-        'q|query=s' => \$query,
-        'k|batch-size=i' => \$batch_size,
-        'L|spell-out-locations' => \$spell_out_locations,
-        'b|source-record-database=s' => \$source_record_db,
-    );
-    $batch_size ||= 25;
-    my $argv = $self->argv;
-    usage "harvest [-k BATCHSIZE] [-a|-q CQL]"
-        if @$argv && ($query || $all);
-    my $bsearcher;
-    if (defined $query) {
-        $bsearcher = $site->searcher('instance', {'query' => $query, 'limit' => $batch_size});
-    }
-    elsif ($all) {
-        $bsearcher = $site->searcher('instance', {'limit' => $batch_size});
-    }
-    else {
-        die "not yet implemented";
-    }
-    $site->dont_cache({ map { $_ => 1 } qw(instance source_record holdings_record)});
-    my (@bids, %bid2instance, %bid2marc, %bid2holdings);
-    my %num = map { $_ => 0 } qw(instances holdings suppressed nonmarc errors);
-    my $verbose = $self->verbose;
-    my $t0 = time;
-    my $marc_fetch;
-    if (defined $source_record_db) {
-        die "can't use DBI" if !eval 'use DBI; 1';
-        my $dbh = DBI->connect("dbi:SQLite:dbname=$source_record_db", '', '', {
-            'AutoCommit' => 1,
-            'RaiseError' => 1,
-        });
-        my $sth = $dbh->prepare(q{SELECT marc FROM source_records WHERE instance_id = ?});
-        $marc_fetch = sub {
-            my ($instance, $instance_id) = @_;
-            $sth->execute($instance_id);
-            my ($marc) = $sth->fetchrow_array;
-            die "no such instance: $instance_id\n" if !defined $marc;
-            return Biblio::Folio::Site::MARC->new('marcref' => \$marc);
-        };
-    }
-    else {
-        $marc_fetch = sub {
-            my ($instance, $instance_id) = @_;
-            return $instance->marc_record;
-        };
-    }
-    while (1) {
-        my $instance = $bsearcher->next;
-        if ($instance) {
-            $num{'instances'}++;
-            $num{'suppressed'}++, next if $instance->{'discoverySuppress'};
-            $num{'nonmarc'}++, next if $instance->{'source'} ne 'MARC';
-            my $bid = $instance->id;
-            my $marc = eval { $marc_fetch->($instance, $bid)->parse };
-            $num{'errors'}++, next if !defined $marc;
-            push @bids, $bid;
-            $bid2instance{$bid} = $instance;
-            $bid2marc{$bid} = $marc;
-        }
-        my $n = keys %bid2instance;
-        if ($n && (!$instance || $n >= $batch_size)) {
-#my $ssearcher = $site->searcher('source_record', {'limit' => scalar @bids}, 'externalIdsHolder.instanceId' => \@bids);
-            my $hsearcher = $site->searcher('holdings_record', {'limit' => scalar @bids}, 'instanceId' => \@bids);
-            foreach ($hsearcher->all) {
-                push @{ $bid2holdings{$_->{'instanceId'}} ||= [] }, $_;
-            }
-            foreach my $bid (@bids) {
-                my $instance = $bid2instance{$bid};
-                my $holdings = $bid2holdings{$bid};
-                my $marc = $bid2marc{$bid};
-                # Build the MARC record
-                my ($leader, $fields) = ($marc->leader, $marc->fields);
-                @$fields = (
-                    marcfield('001', $bid),
-                    ( grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields ),
-                );
-                my $num_holdings = @{ $holdings || [] };
-                if ($num_holdings) {
-                    add_holdings_to_marc_fields(
-                        'fields' => $fields,
-                        'holdings' => $holdings,
-                        'spell_out_locations' => \$spell_out_locations,
-                    );
-                    $num{'holdings'} += $num_holdings;
-                }
-# XXX This whole hack with $classifier is crazy -- it should be done in a separate, post-processing script (or plugin)
-                my $classifier;
-                my $f33x = _33x_field_subfields($fields);
-                $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
-                $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
-# END crazy hack
-                my $hrid = $instance->hrid;
-                push @$fields, marcfield('901', ' ', ' ', 'h' => $hrid);
-                print marcbuild($leader, $fields);
-            }
-            @bids = %bid2instance = %bid2marc = %bid2holdings = ();
-            if ($verbose) {
-                my $dtime = time - $t0;
-                printf STDERR "\r%12s elapsed : %.2f inst/sec : %8d instances : %8d holdings : %8d suppressed : %8d non-MARC : %8d errors",
-                    sec2dur($dtime),
-                    $dtime ? $num{'instances'} / $dtime : 'Inf',
-                    @num{qw(instances holdings suppressed nonmarc errors)};
-            }
-        }
-        last if !$instance;
-    }
-    print STDERR "\n" if $verbose;
-}
-
 sub cmd_instance_harvest {
     my ($self) = @_;
     my (%with, $mod, $id_file);
@@ -1292,52 +1176,25 @@ sub cmd_course_reserves {
         'k|batch-size=i' => \$batch_size,
     );
     my $argv = $self->argv;
-    if (@$argv) {
-        fatal "not yet implemented";
+    my $rsearcher = $site->searcher('reserve', @$argv ? ('id' => $argv) : ());
+    $rsearcher->limit($batch_size);
+    my (@iids, @hids, %iseen, %hseen, %bseen);
+    while (my $reserve = $rsearcher->next) {
+        my $iid = $reserve->{'itemId'};
+        push @iids, $iid if !$iseen{$iid}++;
     }
-    else {
-        my $n = 0;
-        my %seen;
-        while (1) {
-            my @reserves = $site->objects('reserve', 'offset' => $n, 'limit' => $batch_size);
-            last if !@reserves;
-if (1) {
-            my %item;
-            foreach my $reserve (@reserves) {
-                $item{$_} = 1 for $reserve->{'itemId'};
-            }
-            my $cql = _cql_term('id', [keys %item], {'exact' => 1}, 1);
-            my @items = $site->object('item', 'query' => $cql, 'limit' => $batch_size);
-            $cql = _cql_term('id', [map { $_->{'holdingsRecordId'} } @items], {'exact' => 1}, 1);
-            my @holdings = $site->object('holdings_record', 'query' => $cql, 'limit' => $batch_size);
-            if ($want{'instance_ids'}) {
-                foreach my $holding (@holdings) {
-                    my $bid = $holding->{'instanceId'};
-                    print $bid, "\n" if !$seen{"b:$bid"}++;
-                }
-            }
-}
-if (0) {
-            foreach my $reserve (@reserves) {
-                my $item = $reserve->item;
-                if ($want{'instance_ids'}) {
-                    my $bid = eval { $item->holdings_record->{'instanceId'} };
-                    if (!defined $bid) {
-                        my $iid = $item->id;
-                        print STDERR "warning: could not retrieve holdings record for item $iid";
-                    }
-                    print $bid, "\n" if !$seen{"b:$bid"}++;
-                }
-            }
-}
-            last if @reserves < $batch_size;
-            $n += @reserves;
-            if ($self->verbose) {
-                printf STDERR "\r%8d course reserves processed", $n;
-            }
+    while (@iids) {
+        my $isearcher = $site->searcher('item', splice @iids, 0, $batch_size);
+        while (my $item = $isearcher->next) {
+            my $hid = $item->{'holdingsRecordId'};
+            push @hids, $hid if !$hseen{$hid}++;
         }
-        if ($self->verbose) {
-            printf STDERR "\r%8d course reserves processed\n", $n;
+    }
+    while (@hids) {
+        my $hsearcher = $site->searcher('holdings_record', splice @hids, 0, $batch_size);
+        while (my $holdings_record = $hsearcher->next) {
+            my $bid = $holdings_record->{'instanceId'};
+            print $bid, "\n" if !$bseen{$bid}++;
         }
     }
 }
@@ -1369,21 +1226,6 @@ sub cmd_course_item_list {
 }
 
 # --- Supporting functions
-
-sub sec2dur {
-    my $s = int(shift);
-    my @parts;
-    if ($s > 3600) {
-        my $h = int($s / 3600);
-        $s -= $h * 3600;
-        push @parts, $h;
-    }
-    my $m = int($s / 60);
-    $s -= $m * 60;
-    push @parts, sprintf '%02d', $m;
-    push @parts, sprintf '%02d', $s;
-    return join(':', @parts);
-}
 
 sub json_output_loop {
     my ($self, $hash, $key, $code) = @_;

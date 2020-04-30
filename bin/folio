@@ -20,7 +20,7 @@ my $app = Biblio::Folio::App->new(
     'argv' => [@ARGV],
     'root' => $ENV{'FOLIO_ROOT'} || '/usr/local/folio',
     'site_name' => $ENV{'FOLIO_SITE'},
-    'debug' => do { no strict 'refs'; defined $DB::single },
+    'debug' => DB->can("readline"),
 );
 $app->run;
 
