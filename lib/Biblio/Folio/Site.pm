@@ -384,59 +384,65 @@ sub property {
 }
 
 sub searcher {
-    # $searcher = $site->searcher($kind);
-    # $searcher = $site->searcher($kind, '@limit' => $limit);
-    # $searcher = $site->searcher($kind, 'id' => [@ids], 'active' => true);
-    # $searcher = $site->searcher($kind, '@limit' => 20, 'id' => [@ids], '@offset' => 100);
-    # $searcher->limit(100);
-    # while (my $object = $searcher->next) {
-    #     print $object->id, "\n";
-    # }
+    #
+    # INSTANTIATING
+    # -------------
+    #   Search for all $kind objects:
+    #       $searcher = $site->searcher($kind);
+    #   Ditto but with a non-default batch size, offset, or both:
+    #       $searcher = $site->searcher($kind, '@limit' => $limit);
+    #       $searcher = $site->searcher($kind, '@offset' => $offset);
+    #       $searcher = $site->searcher($kind, '@limit' => $limit, '@offset' => $offset);
+    #   Search for $kind objects using search terms:
+    #       $searcher = $site->searcher($kind, 'id' => [@ids], 'active' => true);
+    #       $searcher = $site->searcher($kind, 'title' => [@titles], '@limit' => 20, '@offset' => 100);
+    #   Search for $kind objects using a bespoke CQL query:
+    #       $searcher = $site->searcher($kind, '@query' => $cql);
+    #   Search for $kind objects using a file of identifiers:
+    #       $searcher = $site->searcher($kind, '@file' => $file);
+    #
+    # SEARCHING AND RETRIEVING
+    # ------------------------
+    #   One record at a time:
+    #       while (my $object = $searcher->next) { ... }
+    #   Many records at a time:
+    #       my @objects = $searcher->next(100);
+    #
     my ($self, $kind, %term) = @_;
     # Look for offset and limit parameters
     my %param;
+    my %allowed = map { $_ => 1 } qw(file id_field uri query offset limit);
     foreach my $k (keys %term) {
         if ($k =~ /^\@(.+)/) {
+            die "unrecognized searcher parameter: $1" if !$allowed{$1};
             $param{$1} = delete $term{$k};
         }
     }
     die "unrecognized argument" if @_ % 2;
-    return Biblio::Folio::Site::Searcher->new(
-        'site' => $self,
-        'kind' => $kind,
-        %param,
-        %term ? ('terms' => \%term) : (),
-    );
+    if (defined $param{'file'}) {
+        die "searcher by file of IDs has search terms!?"
+            if keys %term;
+        die "searcher by file of IDs has a query!?"
+            if defined $param{'query'};
+        return Biblio::Folio::Site::Searcher::ByIdFile->new(
+            'site' => $self,
+            'kind' => $kind,
+            'file' => delete $param{'file'},
+            'id_field' => delete $param{'id_field'},
+            'params' => \%param,
+        );
+    }
+    else {
+        die "searcher by query or terms has ID field!?"
+            if defined $param{'id_field'};
+        return Biblio::Folio::Site::Searcher->new(
+            'site' => $self,
+            'kind' => $kind,
+            %term ? ('terms' => \%term) : (),
+            'params' => \%param,
+        );
+    }
 }
-
-### sub query {
-###     # $site->query($kind, 'id' => \@ids, 'active' => true, [$offset, $limit]);
-###     my $self = shift;
-###     my $kind = shift;
-###     my @terms;
-###     my $exact = { 'exact' => 1 };
-###     my ($cql, @terms, $offset, $limit, %arg);
-###     if (@_ > 1 && $_[0] eq 'cql') {
-###         shift;
-###         $arg{'query'} = shift;
-###     }
-###     else {
-###         while (@_ > 1) {
-###             my ($k, $v) = splice @_, 0, 2;
-###             if (ref($v) eq 'ARRAY') {
-###                 push @terms, _cql_term($k, $v, $exact, $k =~ /id$/i);
-###             }
-###             else {
-###                 push @terms, _cql_term($k, $v, $exact);
-###             }
-###         }
-###         $arg{'query'} = _cql_and(@terms);
-###     }
-###     if (@_ == 1) {
-###         @arg{qw(offset limit)} = @{ shift() };
-###     }
-###     return $self->object($kind, %arg);
-### }
 
 sub object {
     # $site->object($kind, $id);

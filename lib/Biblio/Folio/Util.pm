@@ -164,7 +164,7 @@ sub _cql_query {
     my @terms;
     while (my ($k, $v) = each %$terms) {
         next if $k =~ /^\@/;  # Query parameters (limit, offset)
-        $k =~ s{^([~%]+)}{};
+        $k =~ s{^([~%]*)}{};
         my $signs = $1;
         my $exact  = ($signs =~ /~/ ? 0 : 1);
         my $is_cql = ($signs =~ /%/ ? 1 : 0);
