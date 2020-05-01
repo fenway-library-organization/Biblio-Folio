@@ -9,6 +9,10 @@ use vars qw(@ISA);
 
 @ISA = qw(Biblio::Folio::Site::Searcher);
 
+# XXX PROBLEM PROBLEM PROBLEM
+# This class should have a way to inform its caller when no object with an ID
+# listed in the file exists -- but first, it needs to be reworked so that it
+# can actually detect that condition itself.
 sub new {
     my $cls = shift;
     unshift @_, 'file' if @_ % 2;
