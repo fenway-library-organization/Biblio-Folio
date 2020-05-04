@@ -1209,11 +1209,11 @@ sub cmd_user_load {
             $batch = $loader->prepare(@match_results);
             #my @objects = $loader->prepare(@match_results);
             if ($self->dryrun) {
-                my @items = @{ $batch->items };
+                my @members = @{ $batch->members };
                 my $json = $self->json;
-                foreach my $item (@items) {
+                foreach my $member (@members) {
                     my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
-                        = @$item{qw(n action record object matches warning rejected matching)};
+                        = @$member{qw(n action record object matches warning rejected matching)};
                     my @matches = $matches ? @$matches : ();
                     my $raw = $record->{'_raw'};
                     my $parsed = $record->{'_parsed'};

@@ -57,14 +57,14 @@ sub init {
                 $field{'key'} =~ s/^[~]?/~/;
             }
             elsif (s/^default://) {
-                my $dv = extract_value();
+                my $dv = _extract_value();
                 die "invalid default in field spec: $f = $fields->{$f}" if !defined $dv;
                 $field{'default'} = $dv;
             }
             elsif (s/^([^:,\s]+)//) {
                 my ($pk, $pv) = ($1, 1);
                 if (s/^:\s*//) {
-                    $pv = extract_value();
+                    $pv = _extract_value();
                     die "invalid value for $pk in field spec: $f = $fields->{$f}" if !defined $pv;
                 }
                 # if ($pk =~ /^(lowest|highest)$/) {
@@ -115,7 +115,15 @@ sub fields {
     return \%field;
 }
 
-sub extract_value {
+sub tiebreakers {
+    my ($self) = @_;
+    my @fields = $self->fields;
+    return sort { $b->{'tiebreaker'} <=> $a->{'tiebreaker'} }
+           grep { $_->{'tiebreaker'} }
+           @fields;
+}
+
+sub _extract_value {
     # This function operates (destructively) on $_
     my $v = extract_delimited(undef, q{"'}, '\s*');
     if (defined $v) {
