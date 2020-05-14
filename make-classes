@@ -6,6 +6,9 @@ use strict;
 use constant OBJECT => 'Object';
 use constant OBJECTS => 'Objects';
 
+use lib 'lib';
+
+use Biblio::Folio::Site;
 use String::Expando;
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
@@ -110,13 +113,15 @@ sub parse {
             blather "ttl: $ttl";
             $class->{'ttl'} = $ttl;
         }
-        elsif (/^(references)\s*=\s*(.+)$/) {
+        elsif (/^code\s*=\s*(.+)$/) {
+            $class->{'code_property'} = $1;
+        }
+        elsif (/^references\s*=\s*(.+)$/) {
             # Inbound foreign keys -- i.e., properties (typically found in
             # objects of other classes) that store a UUID for an object in
             # *this* class
-#$key = $1;
             my @references;
-            foreach my $prop (split /,\s*/, $2) {
+            foreach my $prop (split /,\s*/, $1) {
                 my $multi = 1 if $prop =~ s/\[\]//;
                 my $from = $generic;
                 if ($prop =~ s/^([^.]+)\.//) {
@@ -226,6 +231,14 @@ sub parse {
                 'from' => $class,
                 'body' => sprintf(q{return shift()->site->objects(%s, 'limit' => 1<<31);}, quote($kind)),
             );
+        }
+        elsif (/^plural\s*=\s*(.+)$/) {
+            if ($1 eq '!') {
+                delete $class->{'plural'};
+            }
+            else {
+                $class->{'plural'} = $1;
+            }
         }
         elsif (/^(\w+)\s*=\s*(.+)$/) {
             # Class method; for example:
@@ -371,7 +384,12 @@ sub class_sg_pl {
         $pl = $cls;
     }
     else {
-        $pl = $cls . 's';
+        $pl = $cls;
+        $pl =~ s/(?<=[bcdfghjklmnp-tv-z])y$/ie/
+            ||
+        $pl =~ s/(?<=[hsxz])$/e/
+            ;
+        $pl .= 's';
     }
     return ($cls, $pl);
 }
@@ -426,6 +444,10 @@ EOS
             printf qq{\nsub _%s { %s }}, $_, quote($uri2);
         }
         print qq{\n\n};
+        my $code_prop = $class->{'code_property'};
+        if ($code_prop) {
+            printf qq{sub _code { shift()->{%s} }\n}, $code_prop;
+        }
         my $methods = $class->{'methods'} = $method{$cls} || {};
         foreach my $m (sort keys %$methods) {
             blather "method $m";
@@ -504,16 +526,29 @@ EOS
     my (@all, %datafile);
     foreach (sort keys %class) {
         my $class = $class{$_};
-        my $pkg = $class{$_}{'package'};
-        my $cls = $class{$_}{'package'};
+        my $pkg = $class->{'package'};
         fatal "no package for class $_" if !defined $pkg;
         push @all, $pkg;
         my $datafile_base = $class->{'datafile_base'}
             or next;
-        blather "data file: $cls -> $datafile_base";
+        blather "data file: $pkg -> $datafile_base";
         $datafile{$pkg} = $class->{'datafile_base'};
     }
     block <<'EOS';
+# ------------------------------------------------------------------------------
+package Biblio::Folio::Site;
+EOS
+    foreach my $class ($object, sort { $a->{'package'} cmp $b->{'package'} } values %class) {
+        my $kind = $class->{'kind'} or next;
+        my $plural = pkg2kind($class->{'plural'} or next);
+        if (!Biblio::Folio::Site->can($plural)) {
+            printf <<'EOS', $plural, quote($kind);
+sub %s { my $searcher = shift()->searcher(%s); wantarray ? $searcher->all : $searcher }
+EOS
+        }
+    }
+    block <<'EOS';
+
 # ------------------------------------------------------------------------------
 EOS
     print "package Biblio::Folio::Site::Classes;\n\n";
@@ -629,6 +664,7 @@ sub x2cls {
 
 sub kind2pkg {
     my ($kind) = @_;
+    $DB::single = 1 if !defined $kind;
     return 'Biblio::Folio::Object' if $kind eq 'object';
     return 'Biblio::Folio::Object::' . ucfirst camel($kind);
 }
