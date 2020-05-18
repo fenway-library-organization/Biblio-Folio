@@ -62,7 +62,6 @@ sub init {
     $self->_read_config_files;
     $self->_read_map_files;
     $self->_read_cache;
-    # $self->_initialize_classes_and_properties;
     my $ua = LWP::UserAgent->new;
     $ua->agent("folio/0.1");
     $self->{'ua'} = $ua;
@@ -1012,66 +1011,6 @@ sub search {
         $self->json->decode($res->content);
     } or die "search failed: $cql";
     return $results;
-}
-
-sub _initialize_classes_and_properties {
-    my ($self) = @_;
-    my (%class, %prop2pkg, %prop2class, %blessing);
-    my $classes = $self->config('classes')
-        or die "no classes configured";
-    while (my ($k, $c) = each %$classes) {
-        my $kind = $c->{'kind'} ||= _uncamel($k);
-        my $pkg = $c->{'package'} ||= _kind2pkg($kind);
-        die "class $pkg redefined" if exists $class{$pkg};
-        my @refs = split(/,\s*/, delete($c->{'references'}) || '');
-        my %uri;
-        foreach my $action (qw(fetch base search)) {
-            my $uri = $c->{$action}
-                or next;
-            ($uri{$action} = $uri) =~ s/{[^{}]+}/%s/;
-        }
-        $c->{'uri'} = \%uri;
-        $c->{'references'} = \@refs;
-        foreach my $ref (@refs) {
-            die "reference property $ref redefined" if exists $prop2class{$ref};
-            $prop2pkg{$ref} = $pkg;
-        }
-        my @blessed_refs;
-        foreach (split(/,\s*/, delete($c->{'blessedReferences'}) || '')) {
-            /^(\*|[a-z][A-Za-z]*)\.([a-z][A-Za-z]*)(\[\])?$/
-                or die "bad blessed reference in class $pkg: $_";
-            my ($from_kind, $from_property, $each) = ($1, $2, defined $3);
-            my $from_pkg = $from_kind eq '*' ? '*' : _kind2pkg($from_kind);
-            my $blessing = {
-                'kind' => $kind,
-                'package' => $pkg,
-                'property' => $from_property,
-                'each' => $each,
-            };
-            push @{ $blessing{$from_pkg} ||= [] }, $blessing;
-        }
-    }
-    while (my ($k, $c) = each %$classes) {
-        next if $k eq '*';
-        my $pkg = $c->{'package'};
-        my @blessings = @{ $blessing{$pkg} || [] };
-        my $class = $class{$pkg} = Biblio::Folio::Class->new(
-            'site' => $self,
-            'blessed_references' => \@blessings,
-            %$c,
-        );
-        my $ok;
-        eval { eval "use $pkg"; $ok = 1 };
-        if (!$ok) {
-            die $@;
-        }
-    }
-    while (my ($p, $pkg) = each %prop2pkg) {
-        $prop2class{$p} = $class{$pkg}
-            or die "no such class: $pkg";
-    }
-    $self->{'_classes'} = \%class;
-    $self->{'_properties'} = \%prop2class;
 }
 
 sub marc2instance {
