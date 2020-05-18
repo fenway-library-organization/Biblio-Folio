@@ -12,6 +12,7 @@ use Biblio::Folio::Util qw(
 	_cql_and
 	_cql_or
     _get_attribute_from_dotted
+    $rx_const_token
 );
 use Text::Balanced qw(extract_delimited);
 
@@ -49,7 +50,7 @@ sub init {
             elsif (s/^optional//) {
                 $field{'is_required'} = 0;
             }
-            elsif (s/^copy from (\w+)//) {
+            elsif (s/^from:(\w+)//) {
                 $field{'copy_from'} = $1;
             }
             elsif (s/^(?:in|not )exact//) {
@@ -125,21 +126,32 @@ sub tiebreakers {
 
 sub _extract_value {
     # This function operates (destructively) on $_
+    _extract_string()
+        //
+    _extract_token()
+        //
+    _extract_literal()
+}
+
+sub _extract_string {
+    # This function operates (destructively) on $_
     my $v = extract_delimited(undef, q{"'}, '\s*');
-    if (defined $v) {
-        $v =~ /^(["'])(.*)$1$/ or die "wtf?";
-        $v = $2;
-    }
-    elsif (s/^(true|false|null)//) {
-        $v = _tok2const($1);
-    }
-    elsif (s/^([0-9]+(?:\.[0-9]+)?)//) {
-        $v = $1;
-    }
-    elsif (s/^(\w+)//) {
-        $v = $1;
-    }
-    return $v;
+    return if !defined $v;
+    $v =~ /^(["'])(.*)$1$/ or die "wtf?";
+    return $2;
+}
+
+sub _extract_token {
+    # This function operates (destructively) on $_
+    return if !s/^($rx_const_token)//o;
+    return _tok2const($1);
+}
+
+sub _extract_literal {
+    # This function operates (destructively) on $_
+    return $1 if s/^([0-9]+(?:\.[0-9]+)?)//;
+    return if !s/^(\w+)//;
+    return $1;
 }
 
 1;
