@@ -1542,68 +1542,6 @@ sub marc_source_record_id {
     return;
 }
 
-### sub userfile_parser {
-###     my %arg = @_;
-###     my $site = $arg{'site'};
-###     my $profile = $site->load_profile('user', $arg{'profile'});
-###     my %parser = %{ $profile->{'parser'} };
-###     my $parser_cls = $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
-###     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
-###     delete $parser{'class'};
-###     use_class($parser_cls);
-###     return $parser_cls->new('site' => $site, %parser, 'file' => $arg{'file'});
-### }
-### 
-### sub proc_userfile {
-###     my ($site, %arg) = @_;
-###     # TODO
-###     if (0 && defined $arg{'format'}) {
-###         my $formatter = output_formatter($arg{'format'});
-###         %arg = _make_hooks(
-###             %arg,
-###             'before' => sub { $formatter->before },
-###             'after' => sub { $formatter->after },
-###         );
-###     }
-###     my $parser = userfile_parser(%arg);
-###     $parser->iterate(%arg);
-### }
-### 
-### sub match_or_load_users {
-###     my ($verb, %arg) = @_;
-###     my $site = $arg{'site'};
-###     my $parser = userfile_parser(%arg);
-###     my ($batch_size, $parser_cls) = @arg{qw(batch_size parser_cls)};
-###     my $profile = $site->load_profile('user', $arg{'profile'});
-### # $batch_size ||= 5;
-###     my %parser = %{ $profile->{'parser'} };
-###     $parser_cls ||= $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
-###     $parser_cls = 'Biblio::FolioX' . $parser_cls if $parser_cls =~ /^[+]/;
-###     delete $parser{'class'};
-###     my ($file) = @ARGV;
-###     use_class($parser_cls);
-###     my $parser = $parser_cls->new('site' => $site, %parser);
-###     my $sub = $verb eq 'match' ? \&show_matching_users : \&update_or_create_user;
-###     my %count;
-###     my $n = 0;
-###     $parser->iterate(
-###         'file' => $file,
-###         'batch_size' => $batch_size,
-###         'each' => sub {
-###             foreach my $result ($site->match_users($profile, @_)) {
-###                 my ($user, $matches) = @$result{qw(user matches)};
-###                 my $res = $sub->($site, $file, ++$n, \%arg, $user, @$matches);
-###                 $count{$res}++;
-###             }
-###         },
-###     );
-###     print "result counts {\n";
-###     foreach my $k (sort keys %count) {
-###         printf "  %6d %s\n", $count{$k}, $k;
-###     }
-###     print "}\n";
-### }
-
 sub print_user {
     my ($self, %arg) = @_;
     my $user = $arg{'user'};
@@ -1766,47 +1704,6 @@ sub _user_to_text {
     }
     return $text;
 }
-
-### sub update_or_create_user {
-###     my ($self, %arg) = @_;
-###     my ($site, $source, $result, $batch_base) = @arg{qw(site source result batch_base)};
-###     my ($user, $matches, $n) = @$result{qw(record matches n)};
-###     my $file = $source->{'file'};
-###     $n += $batch_base;
-###     my $folio = $self->folio;
-###     if (@$matches == 0) {
-###         $user->{'id'} ||= _uuid();
-###         my $res = $site->POST('/users', $user);
-###         if ($res->is_success) {
-###             $user = $self->content($res);
-###             my $id = $user->{'id'};
-###             print STDERR "ADD user $id created: record $n in $file\n";
-###         }
-###         else {
-###             print STDERR "ERR user not created: record $n in $file: ", $res->status_line, "\n";
-###         }
-###     }
-###     elsif (@$matches == 1) {
-###         my $match = $matches->[0];
-###         my $id = $match->{'id'};
-###         my @changes = $site->update_object('object' => $match, 'using' => $user, 'profile' => $arg{'profile'});
-###         if (!@changes) {
-###             print STDERR "IGN user $id unchanged: record $n in $file\n";
-###         }
-###         else {
-###             my $res = $site->PUT("/users/$id", $match);
-###             if ($res->is_success) {
-###                 print STDERR "UPD user $id updated: record $n in $file\n";
-###             }
-###             else {
-###                 print STDERR "ERR user $id not updated: record $n in $file: ", $res->status_line, "\n";
-###             }
-###         }
-###     }
-###     else {
-###         print STDERR "UNR user unresolved: record $n in $file\n";
-###     }
-### }
 
 sub skip_marc_records {
     my ($fh, $n) = @_;
@@ -2141,13 +2038,11 @@ sub orient {
         #     if !login_if_necessary($site);
     }
     if (wantarray) {
-#no warnings 'once';
         $DB::single = 1;
         return ($site, %arg);
     }
     else {
         $self->usage if grep { defined $arg{$_} } keys %arg;
-#no warnings 'once';
         $DB::single = 1;
         return $site;
     }

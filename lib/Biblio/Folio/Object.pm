@@ -8,16 +8,6 @@ use constant qw(UUID    UUID   );
 
 use Biblio::Folio::Util qw(_camel _unbless);
 
-# @Biblio::Folio::Object::Instance::ISA =
-# @Biblio::Folio::Object::HoldingsRecord::ISA =
-# @Biblio::Folio::Object::Item::ISA =
-# @Biblio::Folio::Object::SourceRecord::ISA =
-# @Biblio::Folio::Object::Location::ISA =
-# @Biblio::Folio::Object::CallNumberType::ISA =
-#     qw(Biblio::Folio::Object);
-
-#*_camel = *Biblio::Folio::Site::_camel;
-
 our $AUTOLOAD;
 
 # sub ttl { 3600 }
@@ -114,57 +104,12 @@ sub _search_results {
     }
 }
 
-### sub old_init {
-###     my ($self) = @_;
-###     my $site = $self->site;
-###     my $cls = ref $self;
-###     my $class = $site->class($cls);
-###     my $wild  = $site->class('*');
-###     my @blessings = (
-###         @{ $wild->{'blessings'} ||= [] },
-###         @{ $class->{'blessings'} ||= [] },
-###     );
-###     my %blessed;
-###     foreach my $blessing (@blessings) {
-###         my ($prop, $pkg, $each) = @$blessing{qw(property package each)};
-###         next if $blessed{$prop}++;
-###         my $propval = $self->{$prop};
-###         next if !defined $propval;
-###         my $propref = ref $propval;
-###         my $bclass = $site->class($pkg);
-###         if ($propref eq 'ARRAY' && $each) {
-###             @$propval = map {
-###                 die "can't bless a non-hash member of an array"
-###                     if ref($_) ne 'HASH';
-###                 bless $_, $pkg
-###             } @$propval;
-###         }
-###         else {
-###             if ($propref eq '') {
-###                 print STDERR "DEBUG: $cls.$prop is scalar ($propval)\n";
-###             }
-###             else {
-###                 print STDERR "DEBUG: $cls.$prop isa $propref\n"
-###                     if $each || $propref ne 'HASH';
-###                 $self->{$prop} = bless $propval, $pkg;
-###             }
-###         }
-###     }
-###     return $self;
-### }
-
 sub TO_JSON {
     return _unbless(shift());
     #my %self = %{ shift() };
     #delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)?$/ } keys %self};
     #return \%self;
 }
-
-### sub as_hash {
-###     my %self = %{ shift() };
-###     delete @self{grep { /^_/ } keys %self};
-###     return \%self;
-### }
 
 sub cached {
     unshift @_, shift(@_)->{'_site'};
@@ -222,9 +167,6 @@ sub AUTOLOAD {
     my $ttl  = $prop->{'ttl'};
     my $pkg  = $prop->{'package'};
     my $class = $site->class($pkg);
-###     if (!eval "keys %${pkg}::") {
-###         $site->define_classes($pkg);
-###     }
     my $get_method = $self->can($prop->{'method'} || ($ttl ? 'cached' : 'object'));
     if ($rkey =~ /Ids$/) {
         no strict 'refs';
@@ -255,17 +197,6 @@ sub old_init {
     foreach my $method (@auto_deref) {
         $self->$method;
         next;
-# Old code:
-###     $prop =~ /^([-+]?)(.+)Id(s?)$/;
-###     my ($nocache, $newprop, $plural) = ($1, $2, $3);
-###     $newprop .= $plural;
-###     my $sub = $nocache ? $site->can('object') : $site->can('cached');
-###     if ($plural) {
-###         $self->{$newprop} = [ map { $sub->($site, $kind, $_) } @{ $self->{$prop} } ];
-###     }
-###     else {
-###         $self->{$newprop} = $sub->($site, $kind, $_);
-###     }
     }
     return $self;
 }

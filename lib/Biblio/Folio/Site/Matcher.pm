@@ -205,49 +205,6 @@ sub results {
     }
 }
 
-###     if (0) {
-###         while (my ($f, $v2set) = each %$sets) {
-###             my $chk = $check_fields->{$f};
-###             my $mat = $matchpoints->{$f};
-###             while (my ($v, $set) = each %$v2set) {
-###                 my $i2node = $set->{'incoming'  } or next;
-###                 my $c2node = $set->{'candidates'} or next;
-###                 my @i = keys %$i2node;
-###                 my @c = keys %$c2node;
-###                 # We have one or more matches at a matchpoint, but it may or may not be enough
-###                 foreach my $i (@i) {
-###                     #my $m = $match[$i];
-###                     foreach my $c (@c) {
-###                         #$m->[$c]{$f}{$v} = $mat ? 1 : 0;
-###                         #delete $unsatisfied[$i][$c]{$f} if $chk;
-###                     }
-###                 }
-###             }
-###         }
-###         foreach my $i (@iall) {
-###             #my $m = $match[$i];
-###             #my $u = $unsatisfied[$i];
-###             my $nmatch = 0;
-###             foreach my $c (@call) {
-###                 next if !keys %{ $m->[$c] };
-###                 #my $unsatisfied = $u->[$c];
-###                 #undef($m->[$c]), next if keys %$unsatisfied;
-###                 my $ires = $iresults->[$i];
-###                 my $irec = $irecords->[$i];
-###                 my $cres = $cresults->[$c];
-###                 my $crec = $crecords->[$c];
-###                 my %matched_by = %{ $m->[$c] };
-###                 delete @matched_by{ keys %$check_fields };
-###                 if (keys %matched_by) {
-###                     # XXX This is a hack -- we shouldn't have to check for keys %matched_by!
-###                     push @{ $ires->{'matches'} ||= [] }, { 'user' => $crec, 'by' => \%matched_by };
-###                     push @{ $cres->{'matches'} ||= [] }, { 'user' => $irec, 'by' => \%matched_by };
-###                     push @match_pairs, [$i, $c];
-###                 }
-###             }
-###         }
-###     }
-
 sub make_matching_criteria {
     my ($self, $records) = @_;
     my $profile = $self->profile;

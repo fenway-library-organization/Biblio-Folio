@@ -13,21 +13,6 @@ use Biblio::Folio::Site::Batch;
 use Biblio::Folio::Util qw(_uuid _cmpable _unbless _kind2pkg);
 use Scalar::Util qw(blessed);
 
-### my %action2setup = (
-###     'create' => sub {
-###         my ($member) = @_;
-###         @$member{qw(method uri)} = ('POST', $member->{'object'}->_uri_create);
-###     },
-###     'update' => sub {
-###         my ($member) = @_;
-###         @$member{qw(method uri)} = ('PUT', $member->{'object'}->_uri_update);
-###     },
-###     'delete' => sub {
-###         my ($member) = @_;
-###         @$member{qw(method uri)} = ('PUT', $member->{'object'}->_uri_delete);
-###     },
-### );
-
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
@@ -112,21 +97,6 @@ sub _make_delete {
     $member->{'uri'} = $member->{'object'}->_uri_delete;
     return $member;
 }
-
-### sub prepare_one {
-###     # Default implementation
-###     my ($self, $member) = @_;
-###     my $profile = $self->profile;
-###     my $match_action = $self->action('match');
-###     my $matches_action = $self->action('matches');
-###     my $nomatch_action = $self->action('nomatch');
-###     my @matches = @{ $member->{'matches'} };
-###     if (@matches == 0) {
-###         $member->{'method'} = 'POST';
-###     }
-###     1;  # TODO Update $member->{'object'}
-###     return $member;  # TODO
-### }
 
 sub prepare_one {
     my ($self, $member) = @_;

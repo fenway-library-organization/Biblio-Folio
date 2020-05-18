@@ -657,44 +657,6 @@ sub create {
     return $pkg->new('_site' => $self, '_json' => $json, %$content);
 }
 
-### sub _results {
-###     my ($self, $content, %arg) = @_;
-###     return if !@$content;
-###     if (@$content == 1) {
-###         $content = $content->[0];
-###         my $cref = ref $content;
-###         if ($cref eq 'ARRAY') {
-###             return map { $pkg->new('_site' => $self, '_json' => $self->json, %$_) } @$content if $instantiate;
-###             return @$content;
-###         }
-###         elsif (wantarray) {
-###             return ($content);
-###         }
-###     }
-###     elsif (!defined $arg{'query'} && ref $arg{'id'} eq '') {
-###         die "expected one return value, got multiple";
-###     }
-###     elsif ($instantiate) {
-###         @return = $instantiate
-###             ? ($pkg->new('_site' => $self, '_json' => $self->json, %$content))
-###             : ($content);
-###     }
-###     return @return if wantarray;
-###     return if @return == 0;
-###     return \@return if $idref eq 'ARRAY' || defined $query;
-###     return $return[0] if @return == 1;
-###     die "package $pkg can't return multiple values from $uri if you only asked for one";
-### }
-
-### sub property {
-###     my ($self, $obj, $name) = @_;
-###     my $ref = ref $obj;
-###     return if $ref eq '';
-###     return $obj->property($name)
-###         if $ref =~ /::/ && $obj->can('property');
-###     die;
-### }
-
 sub objects {
     my ($self, $kind, %arg) = @_;
     my $pkg = _kind2pkg($kind);
@@ -990,58 +952,6 @@ sub properties {
     return \%val;
 }
 
-### sub deref_hash_elem {
-###     my ($self, $hash, $k, $v) = @_;
-###     my $r = ref $v;
-###     if ($r eq 'HASH') {
-###         $hash->{$k} = $self->deref($v);
-###     }
-###     elsif ($k =~ /^(.+)Id(s)$/ && $r eq 'ARRAY') {
-###         $hash->{$k} = $v;
-###         my $kind = $property{$k}{'kind'} || die;
-###         my $plural = $property{$k}{'plural'} || $1 . 's';
-###         $hash->{$plural} = [ map { ref($_) eq '' && $_ =~ $rxuuid ? $self->deref($self->object($kind, $_)) : $self->deref($_) } @$v ];
-###     }
-###     elsif ($k =~ /^(.+)Id$/ && $r eq '' && $v =~ $rxuuid) {
-###         $hash->{$k} = $v;
-###         my $kind = $property{$k}{'kind'} || die;
-###         $hash->{$1} = $self->deref($self->object($kind, $v));
-###     }
-###     elsif ($r eq 'ARRAY') {
-###         $hash->{$k} = [ map { $self->deref($_) } @$v ];
-###     }
-###     return $hash;
-### }
-### 
-### sub deref {
-###     my ($self, $val) = @_;
-###     my $ref = ref $val;
-###     return $val if !$ref;
-###     return [ map { $self->deref($_) } @$val ] if $ref eq 'ARRAY';
-###     my %h;
-###     foreach my $propkey (keys %$val) {
-###         my $propval = $val->{$propkey};
-###         my $propref = ref $propval;
-###         if ($propref eq '' && $propkey =~ /^(.+)Ids?$/ && $propval =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/) {
-###             my $propid = $propkey;
-###             $propkey = $1;
-###             $h{$propid} = $propval;
-###             $h{$propkey} = $property{$propid}{'package'}->new($propval);
-###         }
-###         elsif ($propref eq '') {
-###             $h{$propkey} = $propval;
-###         }
-###         elsif ($propref =~ /::/) {
-###             $h{$propkey} = $self->deref($propval);
-###         }
-###         else {
-###             die;
-###         }
-###     }
-###     return \%h;
-### }
-### 
-
 sub source { goto &source_record }
 
 sub source_record {
@@ -1232,12 +1142,6 @@ sub formatter {
     return $pkg->formatter(%arg);
 }
 
-### sub process_file {
-###     my ($self, $kind, $file, %arg) = @_;
-###     my $parser = $self->parser_for($kind, $file, %arg);
-###     $parser->iterate(%arg);
-### }
-
 sub parser_for {
     my ($self, $kind, $file, %arg) = @_;
     my $profile = $self->load_profile($kind, $arg{'profile'});
@@ -1285,35 +1189,6 @@ sub loader_for {
         'file' => $file,
     );
 }
-
-### sub matcher {
-###     my ($self, $kind, $file, %arg) = @_;
-###     my $p = delete $arg{'profile'};
-###     my $profile = $self->load_profile($kind, $p);
-###     return Biblio::Folio::Site::Matcher->new(
-###         'site' => $self,
-###         'kind' => $kind,
-###         'file' => $file,
-###         'profile' => $profile,
-###         %arg,
-###     );
-### }
-
-### sub loader {
-###     my ($self, $kind, %arg) = @_;
-###     my $p = delete $arg{'profile'};
-###     my $profile = $self->load_profile($kind, $p);
-###     my $loader_cls = $profile->{'loader'}{'class'}
-###         or die "no batch loader class defined for $kind objects";
-###     $loader_cls = 'Biblio::FolioX::' . $loader_cls if $loader_cls =~ s/^[+](::)?//;
-###     _use_class($loader_cls);
-###     return $loader_cls->new(
-###         'site' => $self,
-###         'kind' => $kind,
-###         'profile' => $profile,
-###         %arg,
-###     );
-### }
 
 sub TO_JSON {
     my %self = %{ shift() };
