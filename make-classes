@@ -521,7 +521,7 @@ EOS
         # Pick up any hand-written code
         printf qq{eval q{use %s};\n\n}, $pkg;
     }
-    # Build Biblio::Folio::Site::Classes methods
+    # Build Biblio::Folio::Classes methods
     class('Classes');
     my (@all, %datafile);
     foreach (sort keys %class) {
@@ -551,7 +551,7 @@ EOS
 
 # ------------------------------------------------------------------------------
 EOS
-    print "package Biblio::Folio::Site::Classes;\n\n";
+    print "package Biblio::Folio::Classes;\n\n";
     printf <<'EOS', join("\n", map { '        ' . $_ } @all);
 sub all {
     return qw(
