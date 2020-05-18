@@ -1380,7 +1380,7 @@ sub cmd_ref_get {
     my $site = $self->orient(
         'd|output-directory=s' => \$dir,
     );
-    $dir ||= $site->dir('ref');
+    $dir ||= $site->directory('ref');
     my $argv = $self->argv;
     if (@$argv) {
         usage "ref get [NAME...]" if grep { m{/} } @$argv;

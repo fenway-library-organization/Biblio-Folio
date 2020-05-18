@@ -136,6 +136,15 @@ sub file {
     return $files[0];
 }
 
+sub directory {
+    my ($self, $path) = @_;
+    my @dirs = grep { -d } $self->file($path);
+    return @dirs if wantarray;
+    die "multiple directories for $path" if @dirs > 1;
+    return if !@dirs;
+    return $dirs[0];
+}
+
 sub _read_config_files {
     my ($self) = @_;
     my @files = (
