@@ -8,7 +8,7 @@ use warnings;
 use Biblio::Folio;
 use Biblio::Folio::Site::MARC;
 use Biblio::Folio::Classes;
-use Biblio::Folio::Util qw(_make_hooks _optional _cql_term);
+use Biblio::Folio::Util qw(_make_hooks _optional _cql_term _use_class _uuid _unbless);
 
 use LWP::UserAgent;
 use HTTP::Headers;
@@ -29,13 +29,12 @@ sub dd;
 sub usage;
 sub fatal;
 
-my $prog;
-
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
     $self->init;
-    $prog = $self->program;
+    my $progfile = $self->{'program_file'} ||= $0;
+    $self->{'program'} ||= basename($progfile);
     return $self;
 }
 
@@ -62,19 +61,19 @@ sub run {
     my ($self) = @_;
     my $argv = $self->argv;
     my ($root, $folio, $site_name);
-    usage if !@$argv;
+    $self->usage if !@$argv;
     if ($argv->[0] =~ s/^\@(.+)//) {
         fatal "ambiguous site name: -s $site_name or \@$1?"
             if defined($site_name) && $site_name ne $1;
         $self->site_name($1);
         shift @$argv;
-        usage if !@$argv;
+        $self->usage if !@$argv;
     }
     my $cmd = shift @$argv;
 ### $self->command($cmd);
     $cmd =~ tr/-/_/;
     $self->command($cmd);
-    goto &{ $self->can('cmd_' . $cmd) or usage };
+    goto &{ $self->can('cmd_' . $cmd) or $self->usage };
 }
 
 
@@ -133,7 +132,7 @@ sub cmd_get {
     if (@$argv) {
         my %arg;
         foreach (@$argv) {
-            usage if !/^([^=]+)=(.*)/;
+            $self->usage if !/^([^=]+)=(.*)/;
             $arg{$1} = $2;
         }
         push @args, \%arg;
@@ -171,14 +170,23 @@ sub cmd_post {
     elsif (@$argv) {
         my %arg;
         foreach (@$argv) {
-            usage if !/^([^=]+)=(.*)$/;
+            $self->usage if !/^([^=]+)=(.*)$/;
             $arg{$1} = $2;
         }
         push @args, \%arg;
     }
     my $res = $site->POST($uri, @args);
-    my $json = $self->json;
-    print $json->encode($json->decode($res->content));
+    print $res->status_line, "\n";
+    my $content = $res->content;
+    if (defined $content && length $content) {
+        if ($res->content_type eq 'application/json') {
+            my $json = $self->json;
+            print $json->encode($json->decode($content));
+        }
+        else {
+            print $content;
+        }
+    }
 }
 
 sub cmd_put {
@@ -194,14 +202,23 @@ sub cmd_put {
     elsif (@$argv) {
         my %arg;
         foreach (@$argv) {
-            usage if !/^([^=]+)=(.*)$/;
+            $self->usage if !/^([^=]+)=(.*)$/;
             $arg{$1} = $2;
         }
         push @args, \%arg;
     }
     my $res = $site->PUT($uri, @args);
-    my $json = $self->json;
-    print $json->encode($json->decode($res->content));
+    print $res->status_line, "\n";
+    my $content = $res->content;
+    if (defined $content && length $content) {
+        if ($res->content_type eq 'application/json') {
+            my $json = $self->json;
+            print $json->encode($json->decode($content));
+        }
+        else {
+            print $content;
+        }
+    }
 }
 
 sub cmd_instance {
@@ -731,7 +748,7 @@ sub cmd_source_replace {
     my $argv = $self->argv;
     usage "source replace [MARCFILE]" if @$argv > 1;
     my $folio = $site->folio;
-    my $j = $folio->uuid;
+    my $j = _uuid();
     my $res = $site->POST("/source-storage/snapshots", {
         'jobExecutionId' => $j,
         'status' => 'NEW',
@@ -743,7 +760,7 @@ sub cmd_source_replace {
         my $res = $site->PUT("/source-storage/records/$id", {
             'recordType' => 'MARC',
             'rawRecord' => {
-                'id' => $folio->uuid,
+                'id' => _uuid(),
                 'content' => $$marcref,
             },
             'snapshotId' => $j,
@@ -752,6 +769,25 @@ sub cmd_source_replace {
         1;
     }
     1;  # Then what?
+}
+
+sub cmd_source_sync {
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient;
+    my $argv = $self->argv;
+    usage "source sync DBFILE"
+        if @$argv != 1;
+    my ($dbfile) = @$argv;
+    my $db = $site->local_source_database($dbfile);
+    my $t0 = time;
+    my $total = 0;
+    printf STDERR "\r%8d source records fetched in %d seconds\n", 0, 0;
+    $db->sync('progress' => sub {
+        my ($n) = @_;
+        $total = $n;
+        printf STDERR "\r%8d source records fetched in %d seconds", $n, time - $t0;
+    });
+    printf STDERR "\r%8d source records fetched in %d seconds\n", $total, time - $t0;
 }
 
 sub cmd_source_harvest {
@@ -829,11 +865,11 @@ sub cmd_job_begin {
         'files' => [],
         'sourceType' => 'ONLINE',
         'jobProfileInfo' => {
-            'id' => $folio->uuid,
+            'id' => _uuid(),
             'name' => 'Default job profile',
             'dataType' => 'MARC'
         },
-        'userId' => $user_id || $folio->uuid,
+        'userId' => $user_id || _uuid(),
     );
     my $res = $site->POST('/change-manager/jobExecutions', \%job);
     my $jobexecs = $self->content($res);
@@ -996,7 +1032,7 @@ sub cmd_file_batch_upload {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage if @$argv != 2;
+    $self->usage if @$argv != 2;
     my $bid = shift @$argv;
     my $batch = $site->upload_definition($bid);
     my @files = @{ $batch->file_definitions };
@@ -1118,7 +1154,12 @@ sub cmd_user_get {
     print $self->json->encode(\@users) if @users;
 }
 
-sub cmd_user_parse {
+sub cmd_user_batch {
+    my ($self) = @_;
+    $self->subcmd();
+}
+
+sub cmd_user_batch_parse {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(
         'p|parser=s' => 'parser_cls',
@@ -1126,18 +1167,22 @@ sub cmd_user_parse {
         qw(:formats !as-marc !as-json),
     );
     my $argv = $self->argv;
-    usage "user match [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
+    usage "user batch parse [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
     my ($file) = @$argv;
     $arg{'site'} = $site;
-    $site->process_file('user', $file, %arg, 'each' => sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my ($user) = @$batch;
-        print_user(%arg, 'user' => $user);
-    });
+    my $parser = $site->parser_for('user', $file, %arg);
+    $parser->iterate(
+        %arg,
+        'each' => sub {
+            my %param = @_;
+            my $batch = $param{'batch'};
+            my ($user) = @$batch;
+            $self->print_user(%arg, 'user' => $user);
+        },
+    );
 }
 
-sub cmd_user_match {
+sub cmd_user_batch_match {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(
         'k|batch-size=i' => 'batch_size',
@@ -1149,7 +1194,7 @@ sub cmd_user_match {
     );
     my $argv = $self->argv;
     my $format = $arg{'format'} ||= FORMAT_JSON;
-    usage "user match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
+    usage "user batch match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
         if @$argv != 1
         || $arg{'prepare'} && $format ne FORMAT_JSON
         ;
@@ -1158,32 +1203,58 @@ sub cmd_user_match {
     $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
     my $batch_base = 1;
-    if ($arg{'prepare'}) {
-        my $loader = $site->loader_for('user', $file, %arg);
-        my $json = $self->json;
-        $arg{'each'} = sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my @results = $matcher->match(@$batch);
-            my @objects = $loader->prepare(@results);
-            1;
-        };
-    }
-    else {
-        $arg{'each'} = sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my $results = $matcher->match(@$batch);
-            $self->show_matching_users(%param, 'batch_base' => $batch_base, 'results' => $results);
-        };
+    $arg{'each'} = sub {
+        my %param = @_;
+        my $batch = $param{'batch'};
+        my $results = $matcher->match(@$batch);
+        $self->show_matching_users(%param, %arg, 'batch_base' => $batch_base, 'results' => $results);
     };
     $arg{'after'} = sub {
         $batch_base += $arg{'batch_size'};
     };
-    $site->process_file('user', $file, %arg);
+    my $parser = $site->parser_for('user', $file, %arg);
+    $parser->iterate(%arg);
 }
 
-sub cmd_user_load {
+sub cmd_user_batch_prepare {
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient(
+        'k|batch-size=i' => 'batch_size',
+        'p|parser=s' => 'parser_cls',
+        'L|load-profile=s' => 'profile',
+        'x|include-rejects' => 'include_rejects',
+        'S|split-into=s' => 'split_into',
+        'O|only-batches=s' => 'only_batches',
+        qw(:formats !as-marc),
+    );
+    my $argv = $self->argv;
+    my $format = $arg{'format'} ||= FORMAT_JSON;
+    usage "user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
+        if @$argv != 1
+        || $format ne FORMAT_JSON
+        ;
+    my ($file) = @$argv;
+    my $matcher = $site->matcher_for('user', $file, %arg);
+    $arg{'site'} = $site;
+    $arg{'batch_size'} ||= 10;
+    my $batch_base = 1;
+    my $loader = $site->loader_for('user', $file, %arg);
+    my $json = $self->json;
+    $arg{'each'} = sub {
+        my %param = @_;
+        my $batch = $param{'batch'};
+        my @match_results = $matcher->match(@$batch);
+        my $prepared_batch = $loader->prepare(@match_results);
+        $self->show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+    };
+    $arg{'after'} = sub {
+        $batch_base += $arg{'batch_size'};
+    };
+    my $parser = $site->parser_for('user', $file, %arg);
+    $parser->iterate(%arg);
+}
+
+sub cmd_user_batch_load {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(
         'k|batch-size=i' => 'batch_size',
@@ -1191,25 +1262,24 @@ sub cmd_user_load {
         'L|load-profile=s' => 'profile',
     );
     my $argv = $self->argv;
-    usage "user load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
+    usage "user batch load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
     my ($file) = @$argv;
     my $matcher = $site->matcher_for('user', $file, %arg);
     $arg{'site'} = $site;
     my $loader = $site->loader_for('user', $file, %arg);
     $arg{'batch_size'} ||= 10;
     my $batch_base = 1;
-    $site->process_file(
-        'user',
-        $file,
+    my $parser = $site->parser_for('user', $file, %arg);
+    $parser->iterate(
         %arg,
         'each' => sub {
             my %param = @_;
             my $batch = $param{'batch'};
             my @match_results = $matcher->match(@$batch);
-            $batch = $loader->prepare(@match_results);
+            my $prepared_batch = $loader->prepare(@match_results);
             #my @objects = $loader->prepare(@match_results);
             if ($self->dryrun) {
-                my @members = @{ $batch->members };
+                my @members = @{ $prepared_batch->{'members'} };
                 my $json = $self->json;
                 foreach my $member (@members) {
                     my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
@@ -1243,8 +1313,8 @@ sub cmd_user_load {
                 }
             }
             else {
-                my @load_results = $loader->load($batch);
-                1;
+                my ($ok, $failed) = $loader->load($prepared_batch);
+                $self->show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
             }
         },
         'after' => sub { $batch_base += $arg{'batch_size'} },
@@ -1283,7 +1353,7 @@ sub cmd_marc_to_instance {
         'm|mapping=f' => \$mapping_file,
     );
     my $argv = $self->argv;
-    usage if @$argv > 1;
+    $self->usage if @$argv > 1;
     my $fh = @$argv ? oread(@$argv) : \*STDIN;
     my $mapping;
     if (defined $mapping_file) {
@@ -1535,6 +1605,76 @@ sub marc_source_record_id {
 ### }
 
 sub print_user {
+    my ($self, %arg) = @_;
+    my $user = $arg{'user'};
+    my $n = $arg{'n'};
+    printf "user %d \{\n", $n;
+    printf "  file:         %s\n", $arg{'file'};
+    printf "    row number: %s\n", $n;
+    printf "    raw data:   %s\n", $user->{'_raw'};
+    print $self->_user_to_text($user, 2);
+    print "\}\n";
+}
+
+sub show_prepared_users {
+    my ($self, %arg) = @_;
+    my $json = $self->site->json;
+    my $batch = $arg{'batch'};
+    my $batch_size = $arg{'batch_size'};
+    my $batch_base = $arg{'batch_base'} || 1;
+    my $batch_number = ($batch_base - 1) / $batch_size;
+    my $match_results = $arg{'match_results'};
+    my $splitter;
+    if ($arg{'split_into'}) {
+        my $fmt = $arg{'split_into'};
+        if ($fmt =~ /%.+%/) {
+        }
+        elsif ($fmt =~ /%/) {
+            $fmt =~ s{(?:\.json)?$}{-%s.json};
+        }
+        else {
+            # Split into a directory, use default file name pattern
+            $fmt =~ s{/?$}{/%03d-%s.json};
+        }
+        my $reverse = ($fmt =~ /%[0-9]*d.*%s/ ? 1 : 0);
+        $splitter = sub {
+            my ($name, $n) = @_;
+            sprintf $fmt, $reverse ? ($n, $name) : ($name, $n);
+        };
+    }
+    my $n = $batch_base;
+    my $double_divider = scalar('=' x 80) . "\n";
+    my $divider = scalar('-' x 80) . "\n";
+    print $double_divider if !$splitter;
+    print "Batch $batch_number\n";
+    foreach my $member ($batch->members) {
+        my $action = $member->{'action'};
+        my $user = $member->{$action};
+        my ($old, $via) = (_unbless($member->{'object'}), _unbless($member->{'record'}));
+# TODO: if ($arg{'diff'}) { my $diff = _diff3($old, $via, $new); ... }
+        if ($splitter) {
+            foreach (['old', $old], ['new', $user], ['via', $via], ['changes', $member->{'changes'}]) {
+                my ($name, $obj) = @$_;
+                next if !$obj;
+                my $f = $splitter->($name, $n);
+                die "file exists: $f" if -e $f;
+                open my $fh, '>', $f or die "open $f for writing: $!";
+                print $fh $json->encode($obj);
+                close $fh;
+            }
+        }
+        else {
+            print $divider;
+            printf "[%5d] %s\n", $n, $action;
+            print $json->encode({
+                'old' => $old,
+                'new' => $user,
+                'via' => $via,
+                'changes' => $member->{'changes'},
+            });
+        }
+        $n++;
+    }
 }
 
 sub show_matching_users {
@@ -1547,7 +1687,7 @@ sub show_matching_users {
         $n += $batch_base;
         my $m = @$matches;
         my $res = $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
-        if ($format->{'json'}) {
+        if ($format eq FORMAT_JSON) {
             my $json = $self->json;
             print "# ------------------------------------------------------------------------------\n"
                 if $n > 1;
@@ -1559,78 +1699,114 @@ sub show_matching_users {
             });
         }
         else {
-            my $pg = $site->patron_group($user->{'patronGroup'});
             printf "user %d \{\n", $n;
-            printf "  hrid:             %s\n", $user->{'hrid'}             if defined $user->{'hrid'};
-            printf "  patronGroup:      %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
-            printf "  username:         %s\n", $user->{'username'}         if defined $user->{'username'};
-            printf "  externalSystemId: %s\n", $user->{'externalSystemId'} if defined $user->{'externalSystemId'};
-            printf "  lastName:         %s\n", $user->{'personal'}{'lastName'};
-            printf "  firstName:        %s\n", $user->{'personal'}{'firstName'};
+            print $self->_user_to_text($user, 2);
             printf "  file:             %s\n", $file;
             printf "    row number: %s\n", $n;
             printf "    raw data:   %s\n", $user->{'_raw'};
             printf "    matches:    %d\n", $m;
-            my $i = 0;
-            foreach my $match (@$matches) {
-                $i++;
-                my ($matched_user, $matched_by) = @$match{qw(user by)};
+            foreach my $i (0..$#$matches) {
+                my $match = $matches->[$i];
+                my ($matched_user, $matched_by) = @$match{qw(object by)};
                 my $bystr = join(', ', @$matched_by);
                 printf "  match %d on %s \{\n", $i, $bystr;
-                printf "    id:               %s\n", $matched_user->{'id'};
-                printf "    hrid:             %s\n", $matched_user->{'hrid'}             if defined $matched_user->{'hrid'};
-                printf "    patronGroup:      %s\n", $site->expand_uuid('patronGroup' => $user->{'patronGroup'});
-                printf "    username:         %s\n", $matched_user->{'username'}         if defined $matched_user->{'username'};
-                printf "    externalSystemId: %s\n", $matched_user->{'externalSystemId'} if defined $matched_user->{'externalSystemId'};
-                printf "    lastName:         %s\n", $matched_user->{'personal'}{'lastName'};
-                printf "    firstName:        %s\n", $matched_user->{'personal'}{'firstName'};
-                print  "  \}\n";
+                print $self->_user_to_text($matched_user, 4);
+                print "  \}\n";
             }
             print "\}\n";
         }
     }
+    1;
 }
 
-sub update_or_create_user {
+sub show_user_load_results {
     my ($self, %arg) = @_;
-    my ($site, $source, $result, $batch_base) = @arg{qw(site source result batch_base)};
-    my ($user, $matches, $n) = @$result{qw(record matches n)};
-    my $file = $source->{'file'};
-    $n += $batch_base;
-    my $folio = $self->folio;
-    if (@$matches == 0) {
-        $user->{'id'} ||= $folio->uuid;
-        my $res = $site->POST('/users', $user);
-        if ($res->is_success) {
-            $user = $self->content($res);
-            my $id = $user->{'id'};
-            print STDERR "ADD user $id created: record $n in $file\n";
-        }
-        else {
-            print STDERR "ERR user not created: record $n in $file: ", $res->status_line, "\n";
-        }
-    }
-    elsif (@$matches == 1) {
-        my $match = $matches->[0];
-        my $id = $match->{'id'};
-        my @changes = $site->update_object('object' => $match, 'using' => $user, 'profile' => $arg{'profile'});
-        if (!@changes) {
-            print STDERR "IGN user $id unchanged: record $n in $file\n";
-        }
-        else {
-            my $res = $site->PUT("/users/$id", $match);
-            if ($res->is_success) {
-                print STDERR "UPD user $id updated: record $n in $file\n";
-            }
-            else {
-                print STDERR "ERR user $id not updated: record $n in $file: ", $res->status_line, "\n";
-            }
-        }
-    }
-    else {
-        print STDERR "UNR user unresolved: record $n in $file\n";
-    }
+    my $batch = $arg{'batch'};
+    my ($num_ok, $num_failed) = @arg{qw(ok failed)};
+    1;
 }
+
+sub _indentf {
+    my ($lvl, $fmt) = splice @_, 0, 2;
+    return scalar(' ' x $lvl) . sprintf($fmt, map { defined ? $_ : '' } @_);
+}
+
+sub _user_to_text {
+    my ($self, $user, $lvl) = @_;
+    $lvl ||= 0;
+    my $site = $self->site;
+    my $personal = $user->{'personal'} || {};
+    my $addresses = $personal->{'addresses'} || [];
+    my $text = '';
+    $text .= _indentf($lvl, "patronGroup:      %s\n", $site->expand_uuid('group', $user->{'patronGroup'}));
+    $text .= _indentf($lvl, "id:               %s\n", $user->{'id'})               if defined $user->{'id'};
+    $text .= _indentf($lvl, "hrid:             %s\n", $user->{'hrid'})             if defined $user->{'hrid'};
+    $text .= _indentf($lvl, "externalSystemId: %s\n", $user->{'externalSystemId'}) if defined $user->{'externalSystemId'};
+    $text .= _indentf($lvl, "barcode:          %s\n", $user->{'barcode'})          if defined $user->{'barcode'};
+    $text .= _indentf($lvl, "username:         %s\n", $user->{'username'})         if defined $user->{'username'};
+    $text .= _indentf($lvl, "lastName:         %s\n", $personal->{'lastName'} || '[none]');
+    $text .= _indentf($lvl, "firstName:        %s\n", $personal->{'firstName'} || '[none]');
+    $text .= _indentf($lvl, "enrollmentDate:   %s\n", $user->{'enrollmentDate'});
+    $text .= _indentf($lvl, "expirationDate:   %s\n", $user->{'expirationDate'});
+    $text .= _indentf($lvl, "addresses:        %d\n", scalar @$addresses);
+    if (@$addresses) {
+        foreach my $i (0..$#$addresses) {
+            my $addr = $addresses->[$i];
+            my $type = $site->expand_uuid('address_type', $addr->{'addressTypeId'});
+            $text .= _indentf($lvl, "address %d {\n", $i);
+            $text .= _indentf($lvl+2, "type:           %s\n", $type);
+            $text .= _indentf($lvl+2, "primaryAddress: %s\n", $addr->{'primaryAddress'} ? 'true' : 'false');
+            foreach my $k (qw(addressLine1 addressLine2 city region postalCode)) {
+                my $v = $addr->{$k};
+                next if !defined $v || !length $v;
+                $text .= _indentf($lvl+2, "%-15s %s\n", $k.':', $v);
+            }
+            $text .= _indentf($lvl, "}\n");
+        }
+    }
+    return $text;
+}
+
+### sub update_or_create_user {
+###     my ($self, %arg) = @_;
+###     my ($site, $source, $result, $batch_base) = @arg{qw(site source result batch_base)};
+###     my ($user, $matches, $n) = @$result{qw(record matches n)};
+###     my $file = $source->{'file'};
+###     $n += $batch_base;
+###     my $folio = $self->folio;
+###     if (@$matches == 0) {
+###         $user->{'id'} ||= _uuid();
+###         my $res = $site->POST('/users', $user);
+###         if ($res->is_success) {
+###             $user = $self->content($res);
+###             my $id = $user->{'id'};
+###             print STDERR "ADD user $id created: record $n in $file\n";
+###         }
+###         else {
+###             print STDERR "ERR user not created: record $n in $file: ", $res->status_line, "\n";
+###         }
+###     }
+###     elsif (@$matches == 1) {
+###         my $match = $matches->[0];
+###         my $id = $match->{'id'};
+###         my @changes = $site->update_object('object' => $match, 'using' => $user, 'profile' => $arg{'profile'});
+###         if (!@changes) {
+###             print STDERR "IGN user $id unchanged: record $n in $file\n";
+###         }
+###         else {
+###             my $res = $site->PUT("/users/$id", $match);
+###             if ($res->is_success) {
+###                 print STDERR "UPD user $id updated: record $n in $file\n";
+###             }
+###             else {
+###                 print STDERR "ERR user $id not updated: record $n in $file: ", $res->status_line, "\n";
+###             }
+###         }
+###     }
+###     else {
+###         print STDERR "UNR user unresolved: record $n in $file\n";
+###     }
+### }
 
 sub skip_marc_records {
     my ($fh, $n) = @_;
@@ -1716,11 +1892,11 @@ sub content {
 sub subcmd {
     my ($self) = @_;
     my $argv = $self->argv;
-    usage if !@$argv;
+    $self->usage if !@$argv;
     my $subcmd = shift @$argv;
     my @caller = caller 1;
     $caller[3] =~ /(cmd_\w+)$/ or die;
-    goto &{ $self->can($1.'_'.$subcmd) or usage };
+    goto &{ $self->can($1.'_'.$subcmd) or $self->usage };
 }
 
 sub get_holding {
@@ -1941,7 +2117,9 @@ sub orient {
     };
     my $argv = $self->argv;
     GetOptionsFromArray($argv, %opt) or usage;
-    my $folio = Biblio::Folio->new('root' => $root);
+    my $json = JSON->new->pretty->canonical->convert_blessed;
+    my $folio = Biblio::Folio->new('root' => $root, 'json' => $json);
+    $self->json($json);
     $self->folio($folio);
     my $site;
     if (defined $site_name) {
@@ -1956,16 +2134,23 @@ sub orient {
         );
         $self->site($site);
     }
-    $self->json(JSON->new->pretty->canonical->convert_blessed);
     my $cmd = $self->command;
     if ($cmd ne 'login') {
         $self->login_if_necessary($site);
         # print STDERR "Reusing login for $site_name\n"
         #     if !login_if_necessary($site);
     }
-    return ($site, %arg) if wantarray;
-    usage if grep { defined $arg{$_} } keys %arg;
-    return $site;
+    if (wantarray) {
+#no warnings 'once';
+        $DB::single = 1;
+        return ($site, %arg);
+    }
+    else {
+        $self->usage if grep { defined $arg{$_} } keys %arg;
+#no warnings 'once';
+        $DB::single = 1;
+        return $site;
+    }
 }
 
 sub parse_opt_spec {
@@ -2002,21 +2187,20 @@ sub _parse_tracing {
 }
 
 sub fatal {
-    my $prog = _program_name();
+    if (@_ && ref($_[0]) && $_[0]->isa(__PACKAGE__) && defined $_[0]{'fatal'}) {
+        goto &{ $_[0]{'fatal'} };
+    }
+    my $prog = _program_name(@_);
     print STDERR "$prog: @_\n";
     exit 2;
 }
 
-sub _program_name {
-    (my $prog = $0) =~ s{.*/}{};
-    return $prog;
-}
-
-sub _program_file {
-    return $0;
-}
-
 sub usage {
+    if (@_ && ref($_[0]) && $_[0]->isa(__PACKAGE__) && defined $_[0]{'usage'}) {
+        goto &{ $_[0]{'usage'} };
+    }
+    my $prog = _program_name(@_);
+    my $progfile = _program_file(@_);
     my $usage;
     my @commands;
     my $cmd;
@@ -2028,9 +2212,8 @@ sub usage {
         undef $cmd;
     }
     if (@_) {
-        $usage = '@SITE ' . shift;
+        $usage = defined($cmd) ? '@SITE ' . shift : shift;
     }
-    my $progfile = _program_file();
     if (defined $cmd && open my $fh, '<', $progfile) {
         my $incmd;
         while (<$fh>) {
@@ -2046,6 +2229,16 @@ sub usage {
     print STDERR "commands:\n" if @commands;
     print STDERR '  ', $_, "\n" for sort @commands;
     exit 1;
+}
+
+sub _program_name {
+    (my $prog = _program_file(@_)) =~ s{.*/}{};
+    return $prog;
+}
+
+sub _program_file {
+    return shift()->program if @_;
+    return $0;
 }
 
 sub dd {
