@@ -6,7 +6,7 @@ use warnings;
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
 
-use Biblio::Folio::Util qw(_camel);
+use Biblio::Folio::Util qw(_camel _unbless);
 
 # @Biblio::Folio::Object::Instance::ISA =
 # @Biblio::Folio::Object::HoldingsRecord::ISA =
@@ -34,26 +34,29 @@ sub DESTROY { }
 sub init { }
 
 sub _uri_create {
-    my ($self) = @_;
+    my ($self, $obj) = @_;
+    $self = bless { %$obj }, $self if !ref $self;
     my $uri = $self->_uri;
     $uri =~ s{/%s$}{};
     return $uri;
 }
 
 sub _uri_update {
-    my ($self) = @_;
+    my ($self, $obj) = @_;
+    $self = bless { %$obj }, $self if !ref $self;
     my $uri = $self->_uri;
     my $id = $self->id;
-    $uri =~ s{/%s$}{$id}
+    $uri =~ s{/%s$}{/$id}
         or die "no placeholder in uri $uri to use for updates";
     return $uri;
 }
 
 sub _uri_delete {
-    my ($self) = @_;
+    my ($self, $obj) = @_;
+    $self = bless { %$obj }, $self if !ref $self;
     my $uri = $self->_uri;
     my $id = $self->id;
-    $uri =~ s{/%s$}{$id}
+    $uri =~ s{/%s$}{/$id}
         or die "no placeholder in uri $uri to use for deletes";
     return $uri;
 }
@@ -151,9 +154,10 @@ sub _search_results {
 ### }
 
 sub TO_JSON {
-    my %self = %{ shift() };
-    delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)?$/ } keys %self};
-    return \%self;
+    return _unbless(shift());
+    #my %self = %{ shift() };
+    #delete @self{grep { /^_/ || ref($self{$_}) !~ /^(?:ARRAY|HASH)?$/ } keys %self};
+    #return \%self;
 }
 
 ### sub as_hash {

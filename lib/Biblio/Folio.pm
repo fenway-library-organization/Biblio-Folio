@@ -3,13 +3,11 @@ package Biblio::Folio;
 use strict;
 use warnings;
 
-use Data::UUID;
 use Biblio::Folio::Util qw(_read_config);
 use Biblio::Folio::Site;
 use Biblio::Folio::Classes;
 
 my $default_root ='/usr/local/folio';
-my $ug = Data::UUID->new;
 
 sub new {
     my $cls = shift;
@@ -22,6 +20,22 @@ sub new {
 }
 
 sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
+sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
+
+sub init {
+    my ($self) = @_;
+    my $root = $self->root;
+    my $config = $self->{'config'} ||= {};
+    my @files = $self->file('conf/*.conf');
+    foreach my $file (@files) {
+        $file =~ m{/([^/.]+)\.conf$};
+        my $name = $1;
+        undef $name if $name eq 'folio';
+        _read_config($file, $config, $name);
+    }
+    $self->{'json'} ||= JSON->new->pretty->canonical->convert_blessed;
+    # $self->init_classes_and_properties;
+}
 
 sub file {
     my ($self, $path) = @_;
@@ -46,25 +60,8 @@ sub site {
         @args,
         'name' => $name,
         'folio' => $self,
+        'json' => $self->json,
     );
-}
-
-sub init {
-    my ($self) = @_;
-    my $root = $self->root;
-    my $config = $self->{'config'} ||= {};
-    my @files = $self->file('conf/*.conf');
-    foreach my $file (@files) {
-        $file =~ m{/([^/.]+)\.conf$};
-        my $name = $1;
-        undef $name if $name eq 'folio';
-        _read_config($file, $config, $name);
-    }
-    # $self->init_classes_and_properties;
-}
-
-sub uuid {
-    return $ug->create_str;
 }
 
 1;

@@ -6,6 +6,7 @@ use warnings;
 require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT_OK = qw(
+    _rx_const_token
 	_tok2const
 	_trim
 	_camel
@@ -24,15 +25,45 @@ our @EXPORT_OK = qw(
 	_run_hooks
     _get_attribute_from_dotted
     _use_class
+    _req
+    _opt
+    _str2hash
+    _obj2hash
+    _utc_datetime
+    _uuid
+    _bool
+    _debug
+    _cmpable
+    _unbless
+    _unique
+    _int_set_str_to_hash
+    $rx_const_token
 );
 
 use JSON;
+use Data::UUID;
+use Data::Dumper;
+use Scalar::Util qw(blessed);
+use POSIX qw(strftime);
 
+use constant DEBUGGING => $ENV{'DD'};
+
+use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.000+0000';
+
+use constant CQL_NULL => 'null';
+use constant CQL_TRUE => 'true';
+use constant CQL_FALSE => 'false';
+
+use vars qw($rx_const_token);
+
+my $dumper = Data::Dumper->new([])->Terse(1)->Indent(0)->Sortkeys(1)->Sparseseen(1);
+my $uuidgen = Data::UUID->new;
 my %tok2const = (
-    'null' => JSON::null,
-    'true' => JSON::true,
-    'false' => JSON::false,
+    CQL_NULL() => JSON::null,
+    CQL_TRUE() => JSON::true,
+    CQL_FALSE() => JSON::false,
 );
+$rx_const_token = qr/null|true|false/;
 
 sub _tok2const {
     my ($tok) = @_;
@@ -176,10 +207,10 @@ sub _cql_query {
 sub _cql_value {
     my ($v, $is_cql) = @_;
     my $r = ref $v;
+    return CQL_NULL if !defined $v;
     if ($r eq 'JSON::PP::Boolean') {
         # XXX Hard-coded
-        return 'true' if !!$v;
-        return 'false';
+        return $v ? CQL_TRUE : CQL_FALSE;
     }
     elsif ($r eq 'ARRAY') {
         return _cql_or(map { _cql_value($_, $is_cql) } @$v);
@@ -241,6 +272,199 @@ sub _use_class {
     return if $ok;
     my ($err) = split /\n/, $@;
     die "use class $cls: $err";
+}
+
+sub _req {
+    my ($k, $v) = @_;
+    die if !defined $v;
+    return ($k => $v);
+}
+
+sub _opt {
+    my ($k, $v) = @_;
+    return if !defined $v;
+    return ($k => $v);
+}
+
+sub _str2hash {
+    my ($str) = @_;
+    my %hash = map { s/^\s+//; /^[^#]/ ? (split /\s+/) : () } split /\n/, $str;
+    return %hash if wantarray;
+    return \%hash;
+}
+
+sub _unbless {
+    my ($obj) = @_;
+    my $ret;
+    my (%hash, @array, $ok);
+    eval { %hash = %$obj; $ok = 1 };
+    return _as_hash(\%hash) if $ok;
+    eval { @array = @$obj; $ok = 1 };
+    return _as_array(\@array) if $ok;
+    return $obj;
+}
+
+sub _as_hash {
+    # Remove private elements (e.g., '_foo' => $bar)
+    my ($hash) = @_;
+    my %hash = %$hash;
+    foreach my $k (keys %hash) {
+        if ($k =~ /^_/) {
+            delete $hash{$k};
+            next;
+        }
+        my $v = $hash{$k};
+        my $r = ref $v;
+        if ($r eq 'ARRAY') {
+            $hash{$k} = _as_array($v);
+        }
+        elsif ($r eq 'HASH') {
+            $hash{$k} = _as_hash($v);
+        }
+    }
+    return \%hash;
+}
+
+sub _as_array {
+    my ($array) = @_;
+    my @array = @$array;
+    foreach my $i (0..$#array) {
+        my $v = $array[$i];
+        my $r = ref $v;
+        if ($r eq 'ARRAY') {
+            $array[$i] = _as_array($v);
+        }
+        elsif ($r eq 'HASH') {
+            $array[$i] = _as_hash($v);
+        }
+        elsif (blessed($v)) {
+            $array[$i] = _unbless($v);
+        }
+    }
+    return \@array;
+}
+
+sub _utc_datetime {
+    my ($t, $format) = @_;
+    $format ||= FOLIO_UTC_FORMAT;
+    if ($t =~ m{^[0-9]+$}) {
+        # Seconds since the Unix epoch
+        return strftime($format, gmtime $t);
+    }
+    $t =~ s/
+        ^
+        ([1-9][0-9][0-9][0-9])
+        -?
+        ([0-9][0-9])
+        -?
+        ([0-9][0-9])
+    //x or die "malformed date: $t";
+    my ($Y, $m, $d) = ($1, $2, $3);
+    my ($H, $M, $S) = (0, 0, 0, 0);
+    if ($t =~ s/^T//) {
+        $t =~ s/
+            ^
+            ([0-9][0-9])
+            :?
+            ([0-9][0-9])
+            :?
+            ([0-9][0-9])
+            (?:
+                \.[0-9]+
+            )?
+        //x or die "bad time: $t";
+        ($H, $M, $S) = ($1, $2, $3, $4);
+    }
+    my @datetime = ($S, $M, $H, $d, $m-1, $Y-1900);
+    my $z;
+    if ($t =~ /^([-+]0000|Z)$/) {
+        return strftime($format, @datetime);
+    }
+    elsif ($t =~ /^([-+]) ( [0-9][0-9] (?:[0-9][0-9])? )$/x) {
+        my $offset = int($1 . sprintf('%02d%02d00', $2, $3||0));
+        my $s = strftime('%s', @datetime);
+        $s += $offset;  # ???
+        return strftime($format, gmtime $s);
+    }
+    else {
+        my $s = strftime('%s', @datetime);
+        return strftime($format, localtime $s);
+    }
+}
+
+sub _uuid {
+    return $uuidgen->create_str if !@_;
+    my ($obj, $key) = @_;
+    $key ||= 'id';
+    return $obj->{$key}
+        if defined $obj->{$key};
+    return $obj->{$key} = $uuidgen->create_str;
+}
+
+sub _bool {
+    $_[0] =~ /^[YyTt1]/ ? JSON::true : JSON::false
+}
+
+sub _debug {
+    print STDERR "DEBUG @_\n" if DEBUGGING;
+}
+
+sub _cmpable {
+    my ($v) = @_;
+    return if !defined $v;
+    my $r = ref $v;
+    return $v if $r eq '';
+    return $dumper->Dump([$v]);
+### return join("\n", map { _cmpable($_) } @$v)
+###     if $r eq 'ARRAY';
+### return join("\n", map { $_ . "\t" . _cmpable($_) } sort keys %$v)
+###     if $r eq 'HASH';
+### return $v if !blessed($v);
+### if ($v->can('(0+')) {
+###     return $v + 0;
+### }
+### elsif ($v->can('bool')) {
+###     return $v ? 1 : 0;
+### }
+### elsif ($v->can('""')) {
+###     return "$v";
+### }
+### elsif ($v->can('as_string')) {
+###     return $v->as_string;
+### }
+### else {
+###     return $v;
+### }
+}
+
+sub _unique {
+    my %seen;
+    my @unique;
+    foreach (@_) {
+        push @unique, $_ if !$seen{$_}++;
+    }
+    return @unique;
+}
+
+sub _int_set_str_to_hash {
+    # 1-2,5 => ( 1 => 1, 2 => 1, 5 => 1 )
+    my $str = shift;
+    return if !defined $str || !length $str;
+    my (%hash, $err);
+    foreach (split /,/, $str) {
+        if (/^([0-9]+)-([0-9]+)$/) {
+            $err = 1 if $2 < $1;
+            $hash{$_} = 1 for $1..$2;
+        }
+        elsif (/^([0-9]+)$/) {
+            $hash{$1} = 1;
+        }
+        else {
+            $err = 1;
+        }
+    }
+    die "not a valid list of ranges: $str" if $err;
+    return %hash;
 }
 
 1;

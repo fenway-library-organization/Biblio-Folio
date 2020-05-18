@@ -7,15 +7,17 @@ use JSON;
 use Digest;
 use DBI;
 use Text::Balanced qw(extract_delimited);
+use LWP::UserAgent;
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class _cql_term _cql_or);
+use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class _cql_query _cql_term _cql_or);
 use Biblio::Folio::Site::Searcher;
 use Biblio::Folio::Site::Stash;
 use Biblio::Folio::Site::LoadProfile;
 use Biblio::Folio::Site::Matcher;
 use Biblio::Folio::Site::BatchLoader;
+use Biblio::Folio::Site::LocalSourceDB;
 
 # Tracing: states
 use constant qw(ON       ON     );
@@ -38,10 +40,7 @@ my $rxuuid = qr/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 sub new {
     my $cls = shift;
     unshift @_, 'name' if @_ % 2;
-    my $self = bless {
-        @_,
-        'json' => JSON->new->pretty,
-    }, $cls;
+    my $self = bless { @_ }, $cls;
     return $self->init;
 }
 
@@ -51,7 +50,33 @@ sub root { @_ > 1 ? $_[0]{'root'} = $_[1] : $_[0]{'root'} }
 sub ua { @_ > 1 ? $_[0]{'ua'} = $_[1] : $_[0]{'ua'} }
 sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
 sub cache { @_ > 1 ? $_[0]{'cache'} = $_[1] : $_[0]{'cache'} }
-sub dont_cache { @_ > 1 ? $_[0]{'dont_cache'} = $_[1] : $_[0]{'dont_cache'} }
+
+sub init {
+    my ($self) = @_;
+    my $name = $self->name;
+    my $folio = $self->folio;
+    $self->{'root'} = $folio->root . "/site/$name";
+    $self->{'dont_cache'} ||= {};
+    #$self->{'json'} ||= JSON->new->pretty->canonical->convert_blessed;
+    $self->_trace(START);
+    $self->_read_config_files;
+    $self->_read_map_files;
+    $self->_read_cache;
+    # $self->_initialize_classes_and_properties;
+    my $ua = LWP::UserAgent->new;
+    $ua->agent("folio/0.1");
+    $self->{'ua'} = $ua;
+    my $state = eval { $self->state };  # Force reading state if it exists
+    $self->state({'logged_in' => 0}) if !$state;
+    return $self;
+}
+
+sub dont_cache {
+    my $self = shift;
+    my $dont_cache = $self->{'dont_cache'};
+    $dont_cache->{$_} = 1 for @_;
+    return $dont_cache;
+}
 
 sub config {
     my ($self, $key) = @_;
@@ -128,52 +153,37 @@ sub _read_config_files {
     }
 }
 
-sub init {
-    my ($self) = @_;
-    my $name = $self->name;
-    my $folio = $self->folio;
-    $self->{'root'} = $folio->root . "/site/$name";
-    $self->_trace(START);
-    $self->_read_config_files;
-    $self->_read_map_files;
-    $self->_read_cache;
-    # $self->_initialize_classes_and_properties;
-    my $ua = LWP::UserAgent->new;
-    $ua->agent("folio/0.1");
-    $self->{'ua'} = $ua;
-    my $state = eval { $self->state };  # Force reading state if it exists
-    $self->state({'logged_in' => 0}) if !$state;
-    return $self;
-}
-
 sub _read_map_files {
     my ($self) = @_;
     my %uuidmap;
     my %uuidunmap;
-    my $uuid_maps_glob = $self->{'uuid-maps'} || 'map/*.uuidmap';
-    my @files = $self->file($uuid_maps_glob);
-    foreach my $file (@files) {
-        (my $base = $file) =~ s{\.[^.]+$}{};
-        $base =~ m{([^/]+)(?:\.[^/.]+)?$}
-            or die "invalid UUID map file name: $file";
-        my $name = $1;
-        open my $fh, '<', $file
-            or die "open $file: $!";
-        while (<$fh>) {
-            next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
-            chomp;
-            if (/^(.+)=(.+)$/) {
-                my ($alias, $key) = map { trim($_) } ($1, $2);
-                my $val = $uuidmap{$name}{$key};
-                $uuidmap{$name}{$alias} = $val
-                    or die "alias to undefined UUID in $file: $_";
-                $uuidunmap{$name}{$val} ||= $alias;
-            }
-            elsif (/^([^:]+)(?:\s+:\s+(.+))?$/) {
-                my ($key, $val) = ($1, $2);
-                $val = $key if !defined $val;
-                $uuidmap{$name}{$val} = $key;
-                $uuidunmap{$name}{$key} ||= $val;
+    # XXX Force failure to ferret out code that depended on this
+    if (0) {
+        my $uuid_maps_glob = $self->{'uuid-maps'} || 'map/*.uuidmap';
+        my @files = $self->file($uuid_maps_glob);
+        foreach my $file (@files) {
+            (my $base = $file) =~ s{\.[^.]+$}{};
+            $base =~ m{([^/]+)(?:\.[^/.]+)?$}
+                or die "invalid UUID map file name: $file";
+            my $name = $1;
+            open my $fh, '<', $file
+                or die "open $file: $!";
+            while (<$fh>) {
+                next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+                chomp;
+                if (/^(.+)=(.+)$/) {
+                    my ($alias, $key) = map { trim($_) } ($1, $2);
+                    my $val = $uuidmap{$name}{$key};
+                    $uuidmap{$name}{$alias} = $val
+                        or die "alias to undefined UUID in $file: $_";
+                    $uuidunmap{$name}{$val} ||= $alias;
+                }
+                elsif (/^([^:]+)(?:\s+:\s+(.+))?$/) {
+                    my ($key, $val) = ($1, $2);
+                    $val = $key if !defined $val;
+                    $uuidmap{$name}{$val} = $key;
+                    $uuidunmap{$name}{$key} ||= $val;
+                }
             }
         }
     }
@@ -194,10 +204,21 @@ sub decode_uuid {
 }
 
 sub expand_uuid {
-    my ($self, $name, $uuid) = @_;
-    my $expanded = $self->{'uuidunmap'}{$name}{$uuid};
-    return $uuid if !defined $expanded;
-    return "$uuid <$expanded>";
+    my ($self, $kind, $uuid, $prop) = @_;
+    my $expanded = $self->{'uuidunmap'}{$kind}{$uuid};
+    return "$uuid <$expanded>" if defined $expanded;
+    my $obj = $self->object($kind, $uuid)
+        or return $uuid;
+    $prop ||= eval { $obj->_code_field };
+    return sprintf '%s <%s>', $uuid, $obj->{$prop} // '' if defined $prop;
+    foreach my $method (qw(_code code name desc description)) {
+        my $sub = $obj->can($method)
+            or next;
+        my $val = $sub->($obj)
+            // next;
+        return "$uuid <$val>";
+    }
+    return "$uuid <$obj>";
 }
 
 sub state {
@@ -228,7 +249,7 @@ sub _stash {
     my $stashes = $self->{'_stash'};
     return $stashes->{$name}
         if exists $stashes->{$name};
-    my $dbh = $self->_dbh;
+    my $dbh = $self->_stashes_dbh;
     return $stashes->{$name} = Biblio::Folio::Site::Stash->new(
         'name' => $name,
         'site' => $self,
@@ -236,9 +257,9 @@ sub _stash {
     );
 }
 
-sub _dbh {
+sub _stashes_dbh {
     my ($self) = @_;
-    my $dbfile = $self->file("var/stash/main.sqlite");
+    my $dbfile = $self->file("var/stash/main.db");
     return $self->{'_dbh'}
         ||= DBI->connect("dbi:SQLite:dbname=$dbfile", '', '');
 }
@@ -251,7 +272,7 @@ sub stash {
     if (@_ == 0) {
         return;
     }
-    elsif (@_ > 1) {
+    elsif (@_ > 1 && ref($_[0]) eq '') {
         # @values = $site->stash($name, $table, @columns);
         die "not yet implemented";
     }
@@ -408,51 +429,84 @@ sub searcher {
     #   Many records at a time:
     #       my @objects = $searcher->next(100);
     #
+    die "unrecognized argument" if @_ % 2;
     my ($self, $kind, %term) = @_;
-    # Look for offset and limit parameters
-    my %param;
-    my %allowed = map { $_ => 1 } qw(file id_field uri query offset limit);
+    my (%param, %arg, %cls2arg);
+    my %atsy = (
+        'query'      => \%param,
+        'offset'     => \%param,
+        'limit'      => \%param,
+        'uri'        => \%arg,
+        'file'       => ['ByIdFile'],
+        'set'        => ['ByIdSet'],
+        'id_field'   => ['ByIdFile', 'ByIdSet'],
+        'batch_size' => ['ByIdFile', 'ByIdSet'],
+    );
+    # Look for things that aren't search terms
     foreach my $k (keys %term) {
-        if ($k =~ /^\@(.+)/) {
-            die "unrecognized searcher parameter: $1" if !$allowed{$1};
-            $param{$1} = delete $term{$k};
+        next if $k !~ /^\@(.+)/;
+        my $v = delete $term{$k};
+        $k = $1;
+        my $what = $atsy{$k} or die "unrecognized searcher parameter: $k";
+        my $r = ref $what;
+        if ($r eq 'HASH') {
+            $what->{$k} = $v;
+        }
+        elsif ($r eq 'ARRAY') {
+            $cls2arg{$_}{$k} = $v for @$what;
         }
     }
-    die "unrecognized argument" if @_ % 2;
-    if (defined $param{'file'}) {
-        die "searcher by file of IDs has search terms!?"
-            if keys %term;
-        die "searcher by file of IDs has a query!?"
-            if defined $param{'query'};
-        return Biblio::Folio::Site::Searcher::ByIdFile->new(
-            'site' => $self,
-            'kind' => $kind,
-            'file' => delete $param{'file'},
-            'id_field' => delete $param{'id_field'},
-            'params' => \%param,
-        );
+    my $query = $param{'query'};
+    my ($cls, @oops) = keys %cls2arg;
+    if (defined $cls) {
+        die "internal error: conflicting searcher classes: $cls @oops" if @oops;
+        die "internal error: searcher class builds its own queries: $cls"
+            if keys %term || defined $query;
+        while (my ($k, $v) = each %{ $cls2arg{$cls} }) {
+            $arg{$k} = $v;
+        }
+        $cls = 'Biblio::Folio::Site::Searcher::' . $cls;
     }
     else {
-        die "searcher by query or terms has ID field!?"
-            if defined $param{'id_field'};
-        return Biblio::Folio::Site::Searcher->new(
-            'site' => $self,
-            'kind' => $kind,
-            %term ? ('terms' => \%term) : (),
-            'params' => \%param,
-        );
+        $cls = 'Biblio::Folio::Site::Searcher';
+        $arg{'terms'} = \%term if keys %term;
     }
+    return $cls->new(
+        'site' => $self,
+        'kind' => $kind,
+        'params' => \%param,
+        %arg,
+    );
+}
+
+sub harvester {
+    my ($self, $name, %arg) = @_;
+    my $pkg = __PACKAGE__ . '::Harvester::' . ucfirst _camel($name);
+    _use_class($pkg);
+    return $pkg->new(
+        '_site' => $self,
+        %arg,
+    );
+}
+
+sub local_source_database {
+    my ($self, $file) = @_;
+    return Biblio::Folio::Site::LocalSourceDB->new(
+        'file' => $self->file($file),
+        'site' => $self,
+    );
 }
 
 sub object {
     # $site->object($kind, $id);
     # $site->object($kind, $object_data);
     # $site->object($kind, \@ids);
+    # $site->object($kind, 'terms' => \%term);
     # $site->object($kind, 'query' => $cql, 'limit' => $n, 'offset' => $p);
     # $site->object($kind, 'id' => $id, 'uri' => $uri);
     my ($self, $kind) = splice @_, 0, 2;
     my $pkg = _kind2pkg($kind);
-    my (@args, @from, $id, $query);
+    my (@args, @from, $id, $terms, $query);
     if (@_ == 1) {
         my ($arg) = @_;
         my $argref = ref $arg;
@@ -492,11 +546,13 @@ sub object {
 
 sub fetch {
     my ($self, $pkg, %arg) = @_;
-    my $uri = delete $arg{'uri'};
-    my $objs = delete $arg{'objects'};
-    my $id = delete $arg{'id'};
+    my ($uri, $objs, $id, $terms, $query) = @arg{qw(uri objects id terms query)};
     my $idref = ref $id;
-    my $query = $arg{'query'};
+    if (defined $terms) {
+        die "fetch('$pkg', 'terms' => {...}, 'query' => q{$query}" 
+            if defined $query;
+        $query = _cql_query($terms);
+    }
     my $burst;
     my @return;
     if ($objs) {
@@ -707,7 +763,7 @@ sub DELETE {
 }
 
 sub make_request {
-    my ($self, $method, $what, $content) = @_;
+    my ($self, $method, $what, $content, $content_type, $accept) = @_;
     my $endpoint = $self->config('endpoint');
     my $state = $self->state;
     my $r = ref $what;
@@ -716,6 +772,8 @@ sub make_request {
         $uri = URI->new($endpoint->{'uri'} . $what);
         if ($content && keys %$content && ($method eq 'GET' || $method eq 'DELETE')) {
             $uri->query_form(%$content);
+            undef $content_type;
+            undef $content;
         }
         $req = HTTP::Request->new($method, $uri);
     }
@@ -723,26 +781,62 @@ sub make_request {
         die "attempt to request a $r"
             if !$what->can('uri');
         $req = $what;
+        $req->method($method);
         $uri = $req->uri;
         $uri = URI->new($uri) if !ref $uri;
         $path = $uri->path;
     }
+    # Set the Content-Type: header and the body of the request
+    if (defined $content_type && defined $content) {
+        $content = $self->json->encode($content)
+            if $content_type eq 'application/json';
+        $req->content_type($content_type);
+        $req->content($content);
+    }
+    elsif (!defined $content) {
+        $req->content_type($content_type) if defined $content_type;
+    }
+    elsif ($method eq 'POST' || $method eq 'PUT') {
+        $req->content_type('application/json');
+        $req->content($self->json->encode($content));
+    }
+    elsif ($method ne 'GET') {
+        die "content, but no content type? method: $method";
+    }
+    # Set the Accept: header
+    if (defined $accept) {
+        $req->header('Accept' => $accept);
+    }
+    elsif ($method eq 'GET' || $method eq 'POST') {
+        $req->header('Accept' => 'application/json');
+    }
+    else {
+        $req->header('Accept' => 'text/plain');
+    }
     $req->header('X-Okapi-Tenant' => $endpoint->{'tenant'});
-    $req->header('Accept' => 'application/json');
     # $req->header('X-Forwarded-For' => '69.43.75.60');
     if ($state->{'logged_in'}) {
         $req->header('X-Okapi-Token' => $state->{'token'});
     }
     if ($method eq 'POST' || $method eq 'PUT') {
-        $req->content_type('application/json');
+#$req->header('Accept' => 'text/plain') if $method eq 'PUT';
         $req->content($self->json->encode($content));
     }
     return $req;
 }
 
 sub req {
-    my ($self, $method, $what, $content) = @_;
-    my $req = $self->make_request($method, $what, $content);
+    my $self = shift;
+    my $req;
+    if (@_ == 1) {
+        ($req) = @_;
+        die "not a request: $req" if !eval { $req->isa('HTTP::Request') };
+    }
+    else {
+        my ($method, $what, $content) = @_;
+        die "not a method: $method" if ref $method;
+        $req = $self->make_request($method, $what, $content);
+    }
     _trace($self, REQUEST => $req);
     my $ua = $self->ua;
     my $res = $ua->request($req);
@@ -947,7 +1041,10 @@ sub properties {
 ###     return \%h;
 ### }
 ### 
-sub source {
+
+sub source { goto &source_record }
+
+sub source_record {
     my $self = shift;
     my $source;
     if (@_ == 1) {
@@ -1135,11 +1232,11 @@ sub formatter {
     return $pkg->formatter(%arg);
 }
 
-sub process_file {
-    my ($self, $kind, $file, %arg) = @_;
-    my $parser = $self->parser_for($kind, $file, %arg);
-    $parser->iterate(%arg);
-}
+### sub process_file {
+###     my ($self, $kind, $file, %arg) = @_;
+###     my $parser = $self->parser_for($kind, $file, %arg);
+###     $parser->iterate(%arg);
+### }
 
 sub parser_for {
     my ($self, $kind, $file, %arg) = @_;
