@@ -16,6 +16,14 @@ use Biblio::Folio::Util qw(_kind2pkg _cql_query);
 #     my @obj = $searcher->next($n) or last;
 #     ...
 # }
+# -or-
+# while (my $obj = $searcher-next) {
+#     ...
+# }
+# -or- (maybe, later)
+# $searcher->iterate(1, sub {
+#     my ($obj) = @_;
+# });
 
 sub new {
     my $cls = shift;
@@ -28,6 +36,10 @@ sub init {
     my ($self) = @_;
     $self->{'buffer'} = [];
     $self->{'finished'} = $self->{'prepared'} = 0;
+    $self->{'params'} ||= {
+        'offset' => 0,
+        'limit' => 10,
+    };
 }
 
 sub site { @_ > 1 ? $_[0]{'site'} = $_[1] : $_[0]{'site'} }
@@ -86,25 +98,23 @@ sub prepare {
     my $kind = $self->kind;
     my $terms = $self->terms;
     my $query = $self->query;
-    my (%param, @buffer);
-    $self->{'buffer'} = \@buffer;
-    $self->{'params'} = \%param;
+    my $params = $self->params;
+    $self->{'buffer'} = [];
     $self->{'prepared'} = $self->{'finished'} = 0;
-    $param{'offset'} = $offset || $self->offset || 0;
-    $param{'limit'} = $limit || $self->limit || 100;
+    $params->{'offset'} = $offset if defined $offset;
+    $params->{'limit'} = $limit if defined $limit;
     if (defined $query) {
-        $param{'query'} = $query;
+        $params->{'query'} = $query;
     }
     elsif ($terms) {
-        $param{'query'} = _cql_query($terms);
+        $params->{'query'} = _cql_query($terms);
     }
     else {
         my $pkg = _kind2pkg($kind);
-        $param{'uri'} = $pkg->_uri_search || $pkg->_uri
+        $params->{'uri'} ||= $pkg->_uri_search || $pkg->_uri
             or die "can't determine URI for searching kind $kind";
     }
     $self->{'prepared'} = 1;
-    $self->{'params'} = \%param;
     return $self;
 }
 

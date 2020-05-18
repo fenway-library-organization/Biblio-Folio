@@ -7,108 +7,38 @@ use Biblio::Folio::Site::Searcher;
 
 use vars qw(@ISA);
 
-@ISA = qw(Biblio::Folio::Site::Searcher);
+@ISA = qw(Biblio::Folio::Site::Searcher::ByIdReader);
 
-# XXX PROBLEM PROBLEM PROBLEM
-# This class should have a way to inform its caller when no object with an ID
-# listed in the file exists -- but first, it needs to be reworked so that it
-# can actually detect that condition itself.
 sub new {
-    my $cls = shift;
-    unshift @_, 'file' if @_ % 2;
-    return $cls->SUPER::new(@_);
-}
-
-sub reader { @_ > 1 ? $_[0]{'reader'} = $_[1] : $_[0]{'reader'} }
-sub searcher { @_ > 1 ? $_[0]{'searcher'} = $_[1] : $_[0]{'searcher'} }
-sub id_buffer { @_ > 1 ? $_[0]{'id_buffer'} = $_[1] : $_[0]{'id_buffer'} }
-
-sub uri {
     my $self = shift;
-    my $uri = $self->SUPER::uri(@_);
-    my $searcher = $self->searcher or return $uri;
-    $searcher->uri(@_);
+    if (@_ % 2) {
+        unshift @_, ref $_[0] ? 'fh' : 'file';
+    }
+    $self->SUPER::new(@_);
 }
 
-sub offset {
-    my $self = shift;
-    my $offset = $self->SUPER::offset(@_);
-    my $searcher = $self->searcher or return $offset;
-    $searcher->offset(@_);
-}
-
-sub limit {
-    my $self = shift;
-    my $limit = $self->SUPER::limit(@_);
-    my $searcher = $self->searcher or return $limit;
-    $searcher->limit(@_);
-}
+sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
+sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }
 
 sub init {
     my ($self) = @_;
-    $self->SUPER::init;
-    my $file = $self->{'file'};
-    die 'internal error: a batch ID searcher requires a file to read IDs from'
-        if !defined $file;
-    open my $fh, '<', $file or die "open $file: $!";
-    $self->{'reader'} = sub {
-        my $id = <$fh>;
-        return if !defined $id;
-        chomp $id;
-        return $id;
-    };
-}
-
-sub next {
-    my ($self, $n) = @_;
-    $n ||= 1;
-    my @objects;
-    my $searcher = $self->searcher;
-    while (@objects < $n) {
-        $searcher = $self->next_searcher if !$searcher || $searcher->finished;
-        if (wantarray) {
-            return @objects if !$searcher;
-            my @more_objects = $searcher->next($n - @objects);
-            undef($searcher), next if !@more_objects;
-            push @objects, @more_objects;
-        }
-        elsif (!$searcher) {
-            return if !@objects;
-            return shift @objects;
-        }
-        else {
-            my $obj = $searcher->next;
-            undef $searcher;
-            return $obj if $obj;
-        }
+    my ($file, $fh) = @$self{qw(file fh)};
+    if (!defined $fh) {
+        die 'internal error: a batch ID searcher requires a file to read IDs from'
+            if !defined $file;
+        open my $fh, '<', $file or die "open $file: $!";
+        $self->SUPER::init;
+        $self->{'fh'} = $fh;
     }
-    return @objects;
 }
 
-sub read_more {
+sub read_one {
     my ($self) = @_;
-    my $reader = $self->reader;
-    my $limit = $self->limit;
-    my @ids;
-    while ($limit--) {
-        my $id = $reader->();
-        last if !defined $id;
-        push @ids, $id;
-    }
-    return @ids;
-}
-
-sub next_searcher {
-    my ($self) = @_;
-    my @ids = $self->read_more;
-    if (!@ids) {
-        $self->finished(1);
-        return;
-    }
-    my $site = $self->site;
-    my $searcher = $site->searcher($self->kind, 'id' => [@ids]);
-    $self->searcher($searcher);
-    return $searcher;
-}
+    my $fh = $self->fh;
+    my $id = <$fh>;
+    return if !defined $id;
+    chomp $id;
+    return $id;
+};
 
 1;
