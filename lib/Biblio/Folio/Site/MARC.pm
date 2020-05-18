@@ -82,58 +82,46 @@ sub delete {
     return $self;
 }
 
-sub add_identifiers {
+sub add_metadata {
     my ($self, %arg) = @_;
-    my $instance = $arg{'instance'} || $self->instance;
-    my $source_record = $arg{'source_record'} || $self->source_record;
-    my $i = $instance ? $instance->id : $arg{'instance_id'};
-    my $s = $source_record ? $source_record->id : $arg{'source_record_id'};
-    my %sub = (
-        defined $i ? ('i' => $i) : (),
-        defined $s ? ('s' => $s) : (),
-    );
-    if (!keys %sub && $arg{'strict'}) {
-        die "no instance or source record IDs to insert into MARC record"
-    }
-    my $fields = $self->fields;
-    my ($old999) = grep {
-        $_->[TAG] eq '999' &&
-        $_->[IND1] eq 'f'  &&
-        $_->[IND2] eq 'f'
-    } @$fields;
-    my %set;
-    my @new999 = qw(999 f f);
-    foreach (sort keys %sub) {
-        $set{$_} = 1;
-        push @new999, $_ => $sub{$_};
-    }
-    my $dirty;
-    my $leader;
-    if (keys %set) {
-        my $marcref = $self->marcref;
-        ($leader, $fields) = marcparse($marcref);
-        $dirty = 1;
-        if ($old999) {
-            my $valref = $old999->[VALREF];
-            while ($$valref =~ /\x1f([is])([^\x1d-\x1f]+)/g) {
-                my $val = $sub{$_} or next;
-                delete $set{$1} if $2 eq $val;
+    my ($s, $i, $x, $d) = @arg{qw(source_record_id instance_id suppressed deleted)};
+    die "no instance or source record IDs to insert into MARC record"
+        if !defined $s || !defined $i;
+    my ($leader, $fields) = ($self->leader, $self->fields);
+    my @subs = ( 'i' => $i, 's' => $s );
+    # TODO Don't force marcbuild if not necessary
+    push @subs, 'x' => 'suppressed' if $x;
+    push @subs, 'd' => 'deleted'    if $d;
+    my ($old999) = grep { $_->[TAG] eq '999' && $_->[IND1] eq 'f' && $_->[IND2] eq 'f' } @$fields;
+    if ($old999) {
+        my @oldsubs = @$old999[SUBS..$#$old999];
+        if (@oldsubs == @subs) {
+            foreach (0..$#oldsubs) {
+                my ($old, $new) = ($oldsubs[$_], $subs[$_]);
+                if ($old ne $new) {
+                    undef $old999;
+                    last;
+                }
             }
-            $old999->[DELETE] = $dirty = keys %set;
+        }
+        else {
+            undef $old999;
         }
     }
-    elsif ($arg{'strict'}) {
-        die "no instance or source record IDs to insert into MARC record"
-    }
-    if ($dirty) {
+    if (@subs && !$old999) {
+        my $marcref = $self->marcref;
+        my ($leader, $fields) = marcparse($marcref);
+        $self->leader($leader);
+        $self->fields($fields);
         @$fields = (
             (grep { $_->[TAG] lt '999' && !$_->[DELETE] } @$fields),
-            marcfield(@new999),
+            (grep { $_->[TAG] eq '999' && !$_->[DELETE] && $_->[IND1] ne 'f' && $_->[IND2] ne 'f' } @$fields),
+            marcfield('999', 'f', 'f', @subs),
             (grep { $_->[TAG] gt '999' && !$_->[DELETE] } @$fields),
         );
-        push @$fields, marcfield(@new999);
         $self->dirty(1);
     }
+    return $self;
 }
 
 sub stub {
