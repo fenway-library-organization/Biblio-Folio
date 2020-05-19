@@ -264,6 +264,8 @@ sub _get_attribute_from_dotted {
 
 sub _use_class {
     my ($cls) = @_;
+    my $hash = eval qq{\\%${cls}::};
+    return if keys %$hash;
     my $ok;
     eval qq{
         use $cls;
