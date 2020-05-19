@@ -7,6 +7,7 @@ use warnings;
 
 use Biblio::Folio;
 use Biblio::Folio::Site::MARC;
+use Biblio::Folio::Site::MARC::InstanceMaker;
 use Biblio::Folio::Classes;
 use Biblio::Folio::Util qw(_make_hooks _optional _cql_term _use_class _uuid _unbless);
 
@@ -459,7 +460,7 @@ sub cmd_instance_harvest {
     $with{'holdings'} = 1 if $with{'items'};
     my $t0 = time;
     my $err = 0;
-    my $remaining = $max_count || (1<<31);
+    my $remaining = $max_count || (1<<20);
     my $fetch;
     my $prefix = qq{\{"instances":[\n};
     if (defined $query) {
@@ -1230,16 +1231,28 @@ sub cmd_user_batch_prepare {
     my $argv = $self->argv;
     my $format = $arg{'format'} ||= FORMAT_JSON;
     usage "user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
-        if @$argv != 1
-        || $format ne FORMAT_JSON
-        ;
+        if @$argv != 1;
     my ($file) = @$argv;
+    my $parser = $site->parser_for('user', $file, %arg);
     my $matcher = $site->matcher_for('user', $file, %arg);
+    my $loader = $site->loader_for('user', $file, %arg);
     $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
     my $batch_base = 1;
-    my $loader = $site->loader_for('user', $file, %arg);
-    my $json = $self->json;
+    if ($format eq FORMAT_JSON) {
+        my %hash = (
+            'batch_size' => $arg{'batch_size'},
+            'parser_class' => ref $parser,
+            'matcher_class' => ref $matcher,
+            'loader_class' => ref $loader,
+        );
+        $arg{'begin'} = sub {
+            print $self->json_begin_hash_array_members(\%hash, 'records');
+        };
+        $arg{'end'} = sub {
+            print $self->json_end_hash_array_members;
+        };
+    }
     $arg{'each'} = sub {
         my %param = @_;
         my $batch = $param{'batch'};
@@ -1250,7 +1263,6 @@ sub cmd_user_batch_prepare {
     $arg{'after'} = sub {
         $batch_base += $arg{'batch_size'};
     };
-    my $parser = $site->parser_for('user', $file, %arg);
     $parser->iterate(%arg);
 }
 
@@ -1346,6 +1358,7 @@ sub cmd_marc_to {
 }
 
 sub cmd_marc_to_instance {
+    #@ marc to instance [@SITE] [-m MAPPING_RULES_FILE] [FILE] :: convert MARC21 records to instance data
     my ($self) = @_;
     # MARC records (as raw MARC21) ==> instances (as JSON)
     my ($mapping_file);
@@ -1359,14 +1372,19 @@ sub cmd_marc_to_instance {
     if (defined $mapping_file) {
         $mapping = $self->read_json(oread($mapping_file));
     }
-    else {
-        $mapping = $self->content($site->get('/mapping-rules'));
-    }
+    #else {
+    #    $mapping = $self->content($site->get('/mapping-rules'));
+    #}
+    my $maker = Biblio::Folio::Site::MARC::InstanceMaker->new(
+        'site' => $self->site,
+        defined $mapping ? ('mapping_rules' => $mapping) : (),
+    );
     $self->json_output_loop({}, 'instances', sub {
         my ($marcref) = read_marc_records($fh, 1);
         return if !defined $marcref;
-        return $site->marc2instance($marcref, $mapping);
-    });
+        return $maker->make($marcref);
+        #return $site->marc2instance($marcref, $mapping);
+     });
 }
 
 sub cmd_ref {
@@ -1387,14 +1405,14 @@ sub cmd_ref_get {
         s/\.json$// for @$argv;
     }
     -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
-    my %datafile = Biblio::Folio::Classes->datafiles;
+    my %data_class = Biblio::Folio::Classes->data_classes;
     my %want = map { $_ => 1 } @$argv;
     my $json = $self->json;
-    foreach my $cls (sort keys %datafile) {
-        my $name = $datafile{$cls};
+    foreach my $name (sort keys %data_class) {
+        my $cls = $data_class{$name};
         next if %want && !$want{$name};
         my $file = sprintf("%s/%s.json", $dir, $name);
-        my @objects = $cls->_all;
+        my @objects = $cls->_all($site);
         my $fh = owrite($file);
         print $fh $json->encode(\@objects);
     }
@@ -1514,22 +1532,35 @@ sub sec2dur {
     return join(':', @parts);
 }
 
-sub json_output_loop {
-    my ($self, $hash, $key, $code) = @_;
+sub json_begin_hash_array_members {
+    my ($self, $hash, $key) = @_;
     my $json = $self->json;
     my $prefix = $json->encode($hash);
     my $newhash = $json->encode({$key => []});
     $prefix =~ s/,?\n}\n?\z/,\n<<$newhash>>/;
     $prefix =~ s/\,\n<<\{("[^":]+":\[)\]\s*\}>>/,\n$1/;
+    return $prefix;
+}
+
+sub json_end_hash_array_members {
+    return "\n]\n}\n";
+}
+
+sub json_output_loop {
+    my ($self, $hash, $key, $code) = @_;
+    my $json = $self->json;
+    my $prefix = $self->json_begin_hash_array_members($hash, $key);
+    my $n = 0;
     while (1) {
         my @next = $code->();
         last if !@next;
+        $n++;
         foreach (@next) {
             print $prefix, $json->encode($_);
             $prefix = ',';
         }
     }
-    print "\n]\n}\n";
+    print $self->json_end_hash_array_members if $n;
 }
 
 sub marc_source_record_id {
@@ -1562,22 +1593,25 @@ sub show_prepared_users {
     my $batch_base = $arg{'batch_base'} || 1;
     my $batch_number = ($batch_base - 1) / $batch_size;
     my $match_results = $arg{'match_results'};
+    my $format = $arg{'format'};
+    my $file = $arg{'source'}{'file'};
     my $splitter;
     if ($arg{'split_into'}) {
-        my $fmt = $arg{'split_into'};
-        if ($fmt =~ /%.+%/) {
+        my $dest = $arg{'split_into'};
+        my $ext = $format eq FORMAT_JSON ? '.json' : '.txt';
+        if ($dest =~ /%.+%/) {
         }
-        elsif ($fmt =~ /%/) {
-            $fmt =~ s{(?:\.json)?$}{-%s.json};
+        elsif ($dest =~ /%/) {
+            $dest =~ s{(?:\Q$ext\E)?$}{-%s$ext};
         }
         else {
             # Split into a directory, use default file name pattern
-            $fmt =~ s{/?$}{/%03d-%s.json};
+            $dest =~ s{/?$}{/%03d-%s$ext};
         }
-        my $reverse = ($fmt =~ /%[0-9]*d.*%s/ ? 1 : 0);
+        my $reverse = ($dest =~ /%[0-9]*d.*%s/ ? 1 : 0);
         $splitter = sub {
             my ($name, $n) = @_;
-            sprintf $fmt, $reverse ? ($n, $name) : ($name, $n);
+            sprintf $dest, $reverse ? ($n, $name) : ($name, $n);
         };
     }
     my $n = $batch_base;
@@ -1589,27 +1623,86 @@ sub show_prepared_users {
         my $action = $member->{'action'};
         my $user = $member->{$action};
         my ($old, $via) = (_unbless($member->{'object'}), _unbless($member->{'record'}));
+        my $matches = $member->{'matches'} || [];
+        my $m = @$matches;
 # TODO: if ($arg{'diff'}) { my $diff = _diff3($old, $via, $new); ... }
         if ($splitter) {
+            my %outfile;
             foreach (['old', $old], ['new', $user], ['via', $via], ['changes', $member->{'changes'}]) {
                 my ($name, $obj) = @$_;
                 next if !$obj;
-                my $f = $splitter->($name, $n);
+                my $f = $outfile{$name} = $splitter->($name, $n);
                 die "file exists: $f" if -e $f;
                 open my $fh, '>', $f or die "open $f for writing: $!";
-                print $fh $json->encode($obj);
+                if ($format eq FORMAT_JSON) {
+                    print $fh $json->encode($obj);
+                }
+                elsif ($format eq FORMAT_TEXT) {
+                    if ($name ne 'changes') {
+                        print $fh $self->_user_to_text($obj);
+                    }
+                    else {
+                        my @changes = @{ $obj || [] };
+                        if (!@changes) {
+                            print $fh "no changes\n";
+                        }
+                        else {
+                            print $fh "Changes:\n";
+                            foreach my $change (@changes) {
+                                print $fh '  ', join(' ', @$change), "\n";
+                            }
+                            print $fh "Diff:\n";
+                            my ($oldfile, $newfile) = map { $outfile{$_} } qw(old new);
+                            print $fh qx/diff -u $oldfile $newfile/;
+                        }
+                    }
+                }
                 close $fh;
             }
         }
         else {
-            print $divider;
-            printf "[%5d] %s\n", $n, $action;
-            print $json->encode({
-                'old' => $old,
-                'new' => $user,
-                'via' => $via,
-                'changes' => $member->{'changes'},
-            });
+            if ($format eq FORMAT_JSON) {
+                print $json->encode({
+                    'old' => $old,
+                    'new' => $user,
+                    'via' => $via,
+                    'changes' => $member->{'changes'},
+                });
+            }
+            elsif ($format eq FORMAT_TEXT) {
+                print $divider;
+                printf "user %d : %s \{\n", $n, $action;
+                print $self->_user_to_text($user, 2);
+                printf "  file:             %s\n", $file;
+                printf "    row number: %s\n", $n;
+                printf "    raw data:   %s\n", $member->{'record'}{'_raw'};
+                printf "    matches:    %d\n", $m;
+                my @changes = @{ $member->{'changes'} || [] };
+                if (@changes) {
+                    print "  changes:\n";
+                    foreach (@changes) {
+                        my ($verb, @etc) = @$_;
+                        if ($verb eq 'set') {
+                            printf "    set %s to %s\n", @etc;
+                        }
+                        elsif ($verb eq 'unset') {
+                            printf "    unset %s (was %s)\n", @etc;
+                        }
+                        elsif ($verb eq 'change') {
+                            printf "    change %s from %s to %s\n", @etc;
+                        }
+                        elsif ($verb eq 'keep' || $verb eq 'add') {
+                            printf "    %s %s\n", $verb, @etc;
+                        }
+                        elsif ($verb eq 'protected') {
+                            printf "    keep %s (protected)\n", @etc;
+                        }
+                        else {
+                            printf "    $verb @etc\n";
+                        }
+                    }
+                }
+            }
         }
         $n++;
     }
@@ -1640,9 +1733,9 @@ sub show_matching_users {
             printf "user %d \{\n", $n;
             print $self->_user_to_text($user, 2);
             printf "  file:             %s\n", $file;
-            printf "    row number: %s\n", $n;
-            printf "    raw data:   %s\n", $user->{'_raw'};
-            printf "    matches:    %d\n", $m;
+            printf "    row number:     %s\n", $n;
+            printf "    raw data:       %s\n", $user->{'_raw'};
+            printf "    matches:        %d\n", $m;
             foreach my $i (0..$#$matches) {
                 my $match = $matches->[$i];
                 my ($matched_user, $matched_by) = @$match{qw(object by)};
