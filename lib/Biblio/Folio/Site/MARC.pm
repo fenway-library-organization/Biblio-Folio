@@ -4,17 +4,44 @@ use strict;
 use warnings;
 
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
+use Scalar::Util qw(blessed);
 
-@Biblio::Folio::Site::MARC::ISA = qw(Biblio::Folio::Object);
+sub new {
+    my $cls = shift;
+    if (@_ % 2) {
+        my $r = ref $_[0];
+        if ($r eq 'SCALAR') {
+            unshift @_, 'marcref';
+        }
+        elsif ($r eq '') {
+            my $marc = shift;
+            unshift @_, 'marcref' => \$marc;
+        }
+        else {
+            die 'invalid parameters given to ' .  __PACKAGE__ . '::new';
+        }
+    }
+    my $self = bless { @_ }, $cls;
+    $self->init;
+    return $self;
+}
 
 sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
 sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
 sub marcref { @_ > 1 ? $_[0]{'marcref'} = $_[1] : $_[0]{'marcref'} }
-sub dirty { @_ > 1 ? $_[0]{'dirty'} = $_[1] : $_[0]{'dirty'} }
 sub status { @_ > 1 ? substr($_[0]{'leader'},5,1) = $_[1] : substr($_[0]->parse->{'leader'},5,1) }
 
 sub instance { @_ > 1 ? $_[0]{'instance'} = $_[1] : $_[0]{'instance'} }
 sub source_record { @_ > 1 ? $_[0]{'source_record'} = $_[1] : $_[0]{'source_record'} }
+
+sub is_parsed { @_ > 1 ? $_[0]{'is_parsed'} = $_[1] : $_[0]{'is_parsed'} }
+sub is_dirty { @_ > 1 ? $_[0]{'is_dirty'} = $_[1] : $_[0]{'is_dirty'} }
+
+sub init {
+    my ($self) = @_;
+    $self->{'is_parsed'} = 0;
+    $self->{'is_dirty'} = 0;
+}
 
 sub parse {
     my ($self, $marc) = @_;
@@ -35,7 +62,9 @@ sub parse {
     }
     my ($leader, $fields) = marcparse($marcref);
     $self->{'leader'} = $leader;
-    $self->{'fields'} = [ map { Biblio::Folio::Site::MARC::Field->new($_) } @$fields ];
+    $self->{'fields'} = [ map {
+        Biblio::Folio::Site::MARC::Field->new($self, $_)
+    } @$fields ];
     $self->{'is_parsed'} = 1;
     return $self;
 }
@@ -155,13 +184,86 @@ sub _default_leader {
 
 package Biblio::Folio::Site::MARC::Field;
 
-use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
+use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS SUB_ID SUB_VALREF);
 
 sub new {
-    # $field = Biblio::Folio::Site::MARC::Field->new($record->field(...));
-    my ($cls, $ary) = @_;
-    # Shallow clone of the array ref
-    return bless [ @$ary ], $cls;
+# Control fields:
+#     $field = Biblio::Folio::Site::MARC::Field->new($tag, $value);  
+#     $field = Biblio::Folio::Site::MARC::Field->new(marcfield(...));
+#     $field = Biblio::Folio::Site::MARC::Field->new($record, $tag, $value);  
+#     $field = Biblio::Folio::Site::MARC::Field->new($record, marcfield(...));
+# Data fields:
+#     $field = Biblio::Folio::Site::MARC::Field->new($tag, $ind1, $ind2, @subfields);  
+#     $field = Biblio::Folio::Site::MARC::Field->new(marcfield(...));
+#     $field = Biblio::Folio::Site::MARC::Field->new($record, $tag, $ind1, $ind2, @subfields);  
+#     $field = Biblio::Folio::Site::MARC::Field->new($record, marcfield(...));
+    my $cls = shift;
+    my %self;
+    $self{'record'} = shift if @_ && blessed($_[0]) && $_[0]->isa('Biblio::Folio::Site::MARC');
+    if (@_ == 1) {
+        my $ary = shift;
+        die "not the output of marcfield(...)" if ref($ary) ne 'ARRAY';
+        $self{'content'} = [ @$ary ];  # Shallow copy
+    }
+    elsif (@_ > 1) {
+        my @content;
+        my $tag = $content[TAG] = shift;
+        if ($tag lt '010') {
+            my $val = shift;
+            die "control field $tag with data field elements?"
+                if @_;
+            $content[VALREF] = ref($val) ? $val : \$val;
+        }
+        else {
+            my ($ind1, $ind2, @subs) = @_;
+            my $num_subs = @subs >> 1;
+            warn "data field $tag with no subfields?"
+                if !@subs;
+            my $val = $ind1 . $ind2;
+            $content[VALREF] = \$val;
+            my $subnum = 0;
+            while (@subs > 1) {
+                my ($subid, $subval) = splice @subs, 0, 2;
+                $content[SUBS+$subnum] = [$subid, \$subval];
+                $val .= "\x1f" . $subid . $subval;
+            }
+            die "data field with half-subfield?"
+                if @subs;
+            @content[VALREF, IND1, IND2] = (\$val, $ind1, $ind2);
+        }
+        $self{'content'} = \@content;
+    }
+    else {
+        die "field without a tag?";
+    }
+    return bless \%self, $cls;
+}
+
+sub tag { shift->{'tag'} }
+sub set_tag {
+    my ($self, $new_tag) = @_;
+    my $old_tag = $self->{'tag'};
+    if (($old_tag < '010') xor ($new_tag < '010')) {
+        die "can't change a control field to a data field, or vice-versa";
+    }
+    $self->{'content'}[TAG] = $new_tag;
+    $self->{'is_dirty'} = 1;
+}
+
+sub indicator {
+    my ($self, $i) = @_;
+    my $content = $self->{'content'};
+    return undef if $content->[TAG] lt '010';
+    return $i == 1 ? $content->[IND1]
+         : $i == 2 ? $content->[IND2]
+         : die "invalid indicator number: $i";
+}
+sub set_indicator {
+    my ($self, $i, $v) = @_;
+    die "invalid indicator number: $i"
+        if $i !~ /^[12]$/;
+    $self->{'content'}[IND1+$i-1] = $v;
+    $self->{'is_dirty'} = 1;
 }
 
 sub indicators {
@@ -173,6 +275,15 @@ sub indicators {
     die "not enough indicators" if $num_inds < 2;
     @$self[IND1, IND2] = split //, $inds;
     return $inds;
+}
+
+sub subfield {
+    my ($self, $id) = @_;
+    die if !defined $id;
+    my $content = $self->{'content'};
+    my @subs = map { $_->[SUB_ID] eq $id ? (${ $_->[SUB_VALREF] }) : () } @$content[SUBS..$#$content];
+    return @subs if wantarray;
+    return @subs ? shift @subs : undef;
 }
 
 1;

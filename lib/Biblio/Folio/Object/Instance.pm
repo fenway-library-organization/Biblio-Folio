@@ -23,4 +23,11 @@ sub holdings {
     return @holdings;
 }
 
+sub from_marcref {
+    my ($self, $marcref) = @_;
+    my $marc = Biblio::Folio::Object::MARC->new('marcref' => $marcref)->parse;
+    my $maker = Biblio::Folio::Site::MARC::InstanceMaker->new('site' => $self->site);
+    return $maker->make($marcref);
+}
+
 1;
