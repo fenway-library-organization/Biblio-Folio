@@ -346,7 +346,7 @@ sub location {
 
 sub all {
     my ($self, $kind) = @_;
-    return $self->objects($kind, 'limit' => 1<<31);
+    return $self->objects($kind, 'limit' => 1<<20);
 }
 
 sub cached {
@@ -601,45 +601,44 @@ sub fetch {
                 $content{$_} = $arg{$_} if defined $arg{$_};
             }
             $res = $self->GET($uri, \%content);
-            $code = $res->code;
-            if ($res->is_success) {
-                my $content = $self->json->decode($res->content);
-                my @munge = $arg{'munge'} ? @{ $arg{'munge'} } : ();
-                @return = $pkg->_search_results($content, @munge);
+        }
+        elsif (defined $id) {
+            $uri = sprintf($uri, $id);
+            $res = $self->GET($uri);
+        }
+        else {
+            foreach (qw(offset limit)) {
+                $content{$_} = $arg{$_} if defined $arg{$_};
+            }
+            delete $content{'query'};
+            $uri =~ s{/%s$}{};  # or die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
+            $res = $self->GET($uri, \%content);
+        }
+        $code = $res->code;
+        return if $code eq '404';  # Not Found
+        if ($res->is_success) {
+            my $content = $self->json->decode($res->content);
+            my @dig = grep { defined } (
+                $arg{'dig'} ? @{ $arg{'dig'} }
+                            : $arg{'key'} ? ($arg{'key'}) : ()
+            );
+            if (defined $id) {
+                @return = ($content);
+            }
+            else {
+                @return = $pkg->_search_results($content, @dig);
             }
         }
         else {
-            if (defined $id) {
-                $uri = sprintf($uri, $id);
-                $res = $self->GET($uri);
-            }
-            else {
-                $burst = 1;
-                foreach (qw(offset limit)) {
-                    $content{$_} = $arg{$_} if defined $arg{$_};
-                }
-                delete $content{'query'};
-                $uri =~ s{/%s$}{};  # or die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
-                $res = $self->GET($uri, \%content);
-            }
-            $code = $res->code;
-            if ($res->is_success) {
-                my $content = $self->json->decode($res->content);
-                @return = $burst ? _burst($content, $arg{'key'})
-                                 : (ref($content) eq 'ARRAY' ? @$content : $content);
-            }
+            die $res->status_line, ' : ', $uri;
         }
-        #die "unable to execute API call: $uri"
-        #    if !defined $code;
-        return if $code eq '404';  # Not Found
-        die $res->status_line, ' : ', $uri if !$res->is_success;
     }
     elsif (!@return) {
         die "can't construct or fetch $pkg objects without data or an ID or query";
     }
     my $instantiate = !$arg{'scalar'} && !$arg{'array'};
     return if !@return;
-    return map {
+    @return = map {
         $pkg->new('_site' => $self, '_json' => $self->json, %$_)
     } @return if $instantiate;
     return @return if wantarray;
@@ -670,10 +669,11 @@ sub objects {
     my $pkg = _kind2pkg($kind);
     my $uri = $pkg->_uri_search || $pkg->_uri;
     my $key = delete $arg{'key'};
+    my @dig = defined $key ? ($key) : ();
     my $res = $self->GET($uri, \%arg);
     return if !$res->is_success;
     my $content = $self->json->decode($res->content);
-    my @elems = _burst($content, $arg{'key'});
+    my @elems = $pkg->_search_results($content, @dig);
     return map {
         $pkg->new('_site' => $self, '_json' => $self->json, %$_)
     } @elems;
