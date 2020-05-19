@@ -191,7 +191,7 @@ sub parse {
                     }
                 }
                 if ($middle) {
-                    $meth{'munge'} = [split /\./, $middle];
+                    $meth{'dig'} = [split /\./, $middle];
                     if ($right) {
                         if ($right eq 'scalar') {
                             $meth{'to'} = $scalar;
@@ -221,15 +221,17 @@ sub parse {
             blather "data file base: $name";
             my $kind = $class->{'kind'};
             $class->{'datafile_base'} = $name;
+            # $cls->datafile_base;
             define_methods(
                 'name' => '_datafile_base',
                 'from' => $class,
                 'body' => sprintf(q{return %s;}, quote($name)),
             );
+            # $cls->_all($site);
             define_methods(
                 'name' => '_all',
                 'from' => $class,
-                'body' => sprintf(q{return shift()->site->objects(%s, 'limit' => 1<<31);}, quote($kind)),
+                'body' => sprintf(q{my ($cls, $site) = @_; return $site->objects(%s, 'limit' => 1<<20);}, quote($kind)),
             );
         }
         elsif (/^plural\s*=\s*(.+)$/) {
@@ -276,7 +278,8 @@ sub parse {
 
 sub define_methods {
     my %arg = @_;
-    my ($from, $name, $body) = @arg{qw(from name body)};
+    my ($scope, $from, $name, $body) = @arg{qw(scope from name body)};
+    $scope ||= 'object';
     my $methods = $method{$from->{'class'}} ||= {};
     if ($body) {
         $methods->{$name} = \%arg;
@@ -365,6 +368,7 @@ sub define_methods {
         else {
             $methods->{$m} = {
                 'name' => $m,
+                'scope' => $scope,
                 %$method,
             };
         }
@@ -449,16 +453,27 @@ EOS
             printf qq{sub _code { shift()->{%s} }\n}, $code_prop;
         }
         my $methods = $class->{'methods'} = $method{$cls} || {};
+        $_->{'scope'} ||= 'object' for values %$methods;
+
+        my @class_method_names = sort map { $methods->{$_}{'scope'} eq 'class' ? ($_) : () } keys %$methods;
+        my @object_method_names = sort map { $methods->{$_}{'scope'} eq 'object' ? ($_) : () } keys %$methods;
+        blather 'class methods';
+        foreach my $m (@class_method_names) {
+        }
+        blather 'object methods';
+        foreach my $m (@object_method_names) {
+        }
+
         foreach my $m (sort keys %$methods) {
             blather "method $m";
             my $method = $methods->{$m};
-            my ($prop, $props, $mmeth, $muri, $body, $returns, $munge) = @$method{qw(property properties method uri body returns munge)};
+            my ($scope, $prop, $props, $mmeth, $muri, $body, $returns, $dig) = @$method{qw(scope property properties method uri body returns dig)};
             my $propeval = prop_evaluator($prop || $props);
             my ($rkind, $rcls) = @$returns{qw(kind class)};
             my $sfx = '';
-            if ($munge) {
-                $sfx = sprintf q{, 'munge' => [%s]}, join(', ', map { quote($_) } @$munge);
-                blather "  munge:", join('.', @$munge);
+            if ($dig) {
+                $sfx = sprintf q{, 'dig' => [%s]}, join(', ', map { quote($_) } @$dig);
+                blather "  dig:", join('.', @$dig);
             }
             if (defined $body) {
                 # Arbitrary code
@@ -507,8 +522,8 @@ sub %s {
 EOS
             }
             else {
-                fatal "can't munge a bare property accessor: $cls->$m"
-                    if defined $munge;
+                fatal "can't dig given given a bare property accessor: $cls->$m"
+                    if defined $dig;
                 blather "  return literal: $propeval";
                 blockf <<'EOS', $m, $propeval;
 sub %s {
@@ -523,7 +538,7 @@ EOS
     }
     # Build Biblio::Folio::Classes methods
     class('Classes');
-    my (@all, %datafile);
+    my (@all, %data_class);
     foreach (sort keys %class) {
         my $class = $class{$_};
         my $pkg = $class->{'package'};
@@ -532,7 +547,7 @@ EOS
         my $datafile_base = $class->{'datafile_base'}
             or next;
         blather "data file: $pkg -> $datafile_base";
-        $datafile{$pkg} = $class->{'datafile_base'};
+        $data_class{$class->{'datafile_base'}} = $pkg;
     }
     block <<'EOS';
 # ------------------------------------------------------------------------------
@@ -560,8 +575,8 @@ sub all {
 }
 EOS
     print "\n";
-    printf <<'EOS', join("\n", map { sprintf('        %-44s %s', $_, $datafile{$_}) } sort keys %datafile);
-sub datafiles {
+    printf <<'EOS', join("\n", map { sprintf('        %-32s %s', $_, $data_class{$_}) } sort keys %data_class);
+sub data_classes {
     return qw(
 %s
     );
