@@ -1,0 +1,27 @@
+Biblio::Folio provides the basis for a full-fledged command-line client for the
+FOLIO Library Services Platform (https://www.folio.org/).
+
+It is geared toward organizations that run multiple FOLIO "sites",
+i.e., multiple installations of FOLIO or a single installation with multiple
+(independent) tenants.  At this point, a site is essentially just a tenant, but
+no cross-tenant capabilities have been implemented.
+
+A single reference client (named "folio") is included.
+
+Biblio::Folio uses the FOLIO APIs to implement a wide variety of functionality:
+
+* Search and retrieval of any type of object (instances, source records, users, etc.)
+    * Fetch objects by any searchable field, e.g., retrieve a user by
+      externalSystemId
+    * Iterable batch-based searchers for any type of object
+
+* Object creation and update using POST and PUT requests
+
+* General-purpose matching with (weighted) matchpoints and other matching constraints.
+
+* Batch loading of users.
+
+* Harvesting of instances, holdings records, and items -- output is a sequence
+  of MARC records taken from Source Record Storage, with data from instances,
+  etc., added in.
+
