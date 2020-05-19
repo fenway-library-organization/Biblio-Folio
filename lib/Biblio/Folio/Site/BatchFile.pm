@@ -45,7 +45,7 @@ sub iterate {
     my ($site, $kind, $file, $fh, $only, $batch_size, $limit, $begin, $before, $each, $error, $after, $end) = @arg{qw(site kind file fh only batch_size limit begin before each error after end)};
     die "no callback" if !defined $each;
     $batch_size ||= 1;
-    my $max_errors = $limit ? $limit->{'errors'} : 1<<31;
+    my $max_errors = $limit ? $limit->{'errors'} : 1<<20;
     my $max_consecutive_errors = $limit ? $limit->{'consecutive_errors'} : 100;
     if (!defined $fh) {
         die "no file to iterate over" if !defined $file;
