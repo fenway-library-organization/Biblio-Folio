@@ -3,6 +3,7 @@ package Biblio::Folio::Site::MARC;
 use strict;
 use warnings;
 
+use Biblio::Folio::Util qw(_optional);
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 use Scalar::Util qw(blessed);
 
@@ -63,7 +64,7 @@ sub parse {
     my ($leader, $fields) = marcparse($marcref);
     $self->{'leader'} = $leader;
     $self->{'fields'} = [ map {
-        Biblio::Folio::Site::MARC::Field->new($self, $_)
+        _make_field($self, $_)
     } @$fields ];
     $self->{'is_parsed'} = 1;
     return $self;
@@ -74,10 +75,10 @@ sub field {
     # $field = $marc->field($tag_or_coderef_or_regexp);
     my ($self, $what, $first) = @_;
     $self->parse if !$self->{'is_parsed'};
-    my @fields = grep { !$_->[DELETE] } @{ $self->{'fields'} };
+    my @fields = grep { !$_->{'content'}[DELETE] } @{ $self->{'fields'} };
     my $ref = ref $what;
     if ($ref eq '') {
-        @fields = grep { $_->[TAG] eq $what } @fields;
+        @fields = grep { $_->{'content'}[TAG] eq $what } @fields;
     }
     elsif ($ref eq 'CODE') {
         @fields = grep { $what->() } @fields;
@@ -105,12 +106,6 @@ sub field {
     }
 }
 
-sub delete {
-    my $self = shift;
-    $_->[DELETE] = 1 for @_;
-    return $self;
-}
-
 sub add_metadata {
     my ($self, %arg) = @_;
     my ($s, $i, $x, $d) = @arg{qw(source_record_id instance_id suppressed deleted)};
@@ -119,9 +114,9 @@ sub add_metadata {
     my ($leader, $fields) = ($self->leader, $self->fields);
     my @subs = ( 'i' => $i, 's' => $s );
     # TODO Don't force marcbuild if not necessary
-    push @subs, 'x' => 'suppressed' if $x;
-    push @subs, 'd' => 'deleted'    if $d;
-    my ($old999) = grep { $_->[TAG] eq '999' && $_->[IND1] eq 'f' && $_->[IND2] eq 'f' } @$fields;
+    push @subs, 'z' => 'suppressed' if $x;
+    push @subs, 'z' => 'deleted'    if $d;
+    my ($old999) = grep { $_->{'content'}[TAG] eq '999' && $_->{'content'}[IND1] eq 'f' && $_->{'content'}[IND2] eq 'f' } @$fields;
     if ($old999) {
         my @oldsubs = @$old999[SUBS..$#$old999];
         if (@oldsubs == @subs) {
@@ -143,12 +138,12 @@ sub add_metadata {
         $self->leader($leader);
         $self->fields($fields);
         @$fields = (
-            (grep { $_->[TAG] lt '999' && !$_->[DELETE] } @$fields),
-            (grep { $_->[TAG] eq '999' && !$_->[DELETE] && $_->[IND1] ne 'f' && $_->[IND2] ne 'f' } @$fields),
+            (grep { $_->{'content'}[TAG] lt '999' && !$_->{'content'}[DELETE] } @$fields),
+            (grep { $_->{'content'}[TAG] eq '999' && !$_->{'content'}[DELETE] && $_->{'content'}[IND1] ne 'f' && $_->{'content'}[IND2] ne 'f' } @$fields),
             marcfield('999', 'f', 'f', @subs),
-            (grep { $_->[TAG] gt '999' && !$_->[DELETE] } @$fields),
+            (grep { $_->{'content'}[TAG] gt '999' && !$_->{'content'}[DELETE] } @$fields),
         );
-        $self->dirty(1);
+        $self->is_dirty(1);
     }
     return $self;
 }
@@ -174,12 +169,228 @@ sub stub {
 sub as_marc21 {
     my ($self) = @_;
     my $marcref = $self->marcref;
-    return marcbuild($self->leader, $self->fields) if $self->dirty || !$marcref;
-    return $$marcref;
+    my $dirty = $self->is_dirty;
+    my @fields = map {
+        $dirty = 1 if $_->{'is_dirty'};
+        $_->{'content'}
+    } @{ $self->fields };
+    return $$marcref if $marcref && !$dirty;
+    return marcbuild($self->leader, \@fields);
 }
 
 sub _default_leader {
     return '00000cam a2200000 a 4500';
+}
+
+sub new_field {
+    my $self = shift;
+    return _make_field($self, @_);
+}
+
+sub garnish {
+    my ($self, %arg) = @_;
+    my ($instance, $source_record, $mapping) = @arg{qw(instance source_record mapping)};
+    die 'not yet implemented: $marc->garnish(mapping => {...}, ...)'
+        if $mapping && keys %$mapping;
+    my ($suppressed, $deleted) = @$instance{qw(discoverySuppress deleted)};
+    substr($self->{'leader'}, 5, 1) = 'd' if $deleted;
+    $self->delete_fields(qw(001 003), sub { $_[0]->tag eq '999' && $_[0]->indicators eq 'ff' });
+    $self->add_fields(
+        _make_field($self, '001', $instance->hrid),
+        _make_field($self, '999', 'f', 'f',
+            'i' => $instance->id,
+            _optional('s' => $source_record ? $source_record->id : undef),
+            _optional('z' => $suppressed ? 'suppressed' : undef),
+            _optional('z' => $deleted    ? 'deleted'    : undef),
+        )
+    );
+    return $self;
+}
+
+sub _make_field {
+    unshift @_, 'Biblio::Folio::Site::MARC::Field';
+    goto &Biblio::Folio::Site::MARC::Field::new;
+}
+
+sub add_fields {
+    my $self = shift;
+    my $fields = $self->fields;
+    my @fields;
+    my @add = sort { $a->[0] cmp $b->[0] } map { [$_->{'content'}[TAG], $_] } @_;
+    my @existing_fields = @$fields;
+    while (@existing_fields && @add) {
+        my $existing_tag = $existing_fields[0]{'content'}[TAG];
+        my ($add_tag, $add_field) = @{ $add[0] };
+        if ($add_tag lt $existing_tag) {
+            shift @add;
+            push @fields, $add_field;
+        }
+        else {
+            push @fields, shift @existing_fields;
+        }
+    }
+    push @fields, @existing_fields, map { $_->[1] } @add;
+### foreach my $existing_field (@$fields) {
+###     my $existing_content = $existing_field->{'content'};
+###     my $existing_tag = $existing_content->[TAG];
+###     if (@add && $add[0][0] le $existing_tag) {
+###         my $add = shift @add;
+###         my ($add_tag, $add_field) = @$add;
+###         $add_field->is_deleted(0);
+###         push @fields, $add_field;
+###     }
+###     else {
+###         push @fields, $existing_field;
+###     }
+### }
+### push @fields, map { $_->[1] } @add;
+    @$fields = @fields;
+    $self->is_dirty(1);
+}
+
+sub delete_fields {
+    my $self = shift;
+    my $n = 0;
+    my $ok;
+    eval {
+        my $fields = $self->fields;
+        my @conditions;
+        foreach my $what (@_) {
+            my $r = ref $what;
+            if ($r eq '') {
+                push @conditions, sub { shift()->tag eq $what };
+            }
+            elsif ($r eq 'Regexp') {
+                push @conditions, sub { shift()->tag =~ $what };
+            }
+            elsif ($r eq 'CODE') {
+                push @conditions, $what;
+            }
+            else {
+                die "unknown field specifier type: $r";
+            }
+        }
+        my @fields;
+        foreach my $field (@$fields) {
+            my $content = $field->{'content'};
+            next if $content->[DELETE];
+            foreach my $cond (@conditions) {
+                next if !$cond->($field);
+                $content->[DELETE] = 1;
+                $n++;
+                last;
+            }
+        }
+        $ok = 1;
+    };
+    die "wtf?" if !$ok;
+    return $n;
+}
+
+### sub add_hrid {
+###     my $self = shift;
+###     my ($tag, $sub) = @_
+###     my $hrid = $instance->hrid;
+###     my $fields = $self->fields;
+###     push @$fields, _make_field($self, '901', ' ', ' ', 'h' => $hrid);
+###     $self->is_dirty(1);
+### }
+
+sub add_holdings {
+    my $self = shift;
+    my %arg = @_;
+    my ($holdings, $spell_out_locations, $add_items, $classifier) = @arg{qw(holdings spell_out_locations add_items classifier)};
+    my $num_holdings = 0;
+    my $num_items = 0;
+    my $fields = $self->fields;
+    # XXX Crazy FLO-specific hack -- should be done in a separate, post-processing script (or plugin)
+    my @classifier = _optional('x' => $self->_classifier);
+    my @add;
+    foreach my $holding (@$holdings) {
+        my $location = $holding->location;
+        my $suppressed = $holding->discoverySuppress;
+        my $locstr = $spell_out_locations
+            ? $location->discoveryDisplayName // $location->name
+            : $location->code;
+        my $call_number = $holding->call_number;
+        undef $call_number if defined $call_number && $call_number !~ /\S/;
+        push @add, _make_field($self, 
+            '852', ' ', ' ',
+            'b' => $locstr,
+            _optional('h' => $call_number),
+            _optional('z' => $suppressed ? 'suppressed' : undef),
+            @classifier,  # XXX Crazy hack
+            '0' => $holding->id,
+        );
+        $num_holdings++;
+        if ($add_items) {
+            my @item_fields = _make_item_fields($self, $holding);
+            push @add, @item_fields;
+            $num_items += @item_fields;
+        }
+    }
+    if (@add) {
+        $self->delete_fields('852');
+        $self->add_fields(@add) if @add;
+        $self->is_dirty(1);
+    }
+    return ($num_holdings, $num_items) if wantarray;
+    return $num_holdings;
+}
+
+sub delete_holdings {
+    my ($self) = @_;
+    $self->delete_fields('852');
+    return $self;
+}
+
+sub _classifier {
+    my ($self) = @_;
+    my $fields = $self->fields;
+    my $f33x = _33x_field_subfields($fields);
+    return 'audiobook' if $f33x->{'336'}{'spw'};
+    return 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
+}
+
+sub _33x_field_subfields {
+    my ($fields) = @_;
+    my %f33x = map { $_ => {} } qw(336 337 338);
+    foreach (@$fields) {
+        # XXX Low-level MARC::Loop stuff
+        my $content = $_->{'content'};
+        my $tag = $content->[TAG];
+        my $f = $f33x{$tag} or next;
+        my $valref = $content->[VALREF];
+        next if $$valref !~ /\x1f2rda/;
+        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
+            $f33x{$tag}{$1} = 1;
+        }
+    }
+    return \%f33x;
+}
+
+sub _make_item_fields {
+    my ($self, $holding) = @_;
+    my @items = $holding->items;
+    return if !@items;
+    my $call_number = $holding->call_number;
+    undef $call_number if defined $call_number && $call_number !~ /\S/;
+    my @add;
+    foreach my $item (@items) {
+        my $iloc = $item->location->code;
+        my $vol = $item->volume;
+        # my $year = $item->year_caption;
+        # my $copies = @{ $item->copy_numbers || [] };
+        my $item_call_number = join(' ', grep { defined && length } $call_number, $vol);
+        undef $item_call_number if $item_call_number !~ /\S/;
+        push @add, _make_field($self,
+            '859', ' ', ' ',
+            'b' => $iloc,
+            defined($item_call_number) ? ('h' => $item_call_number) : (),
+            '0' => $item->id,
+        );
+    }
+    return @add;
 }
 
 package Biblio::Folio::Site::MARC::Field;
@@ -199,7 +410,7 @@ sub new {
 #     $field = Biblio::Folio::Site::MARC::Field->new($record, marcfield(...));
     my $cls = shift;
     my %self;
-    $self{'record'} = shift if @_ && blessed($_[0]) && $_[0]->isa('Biblio::Folio::Site::MARC');
+    $self{'record'} = shift if @_ && Scalar::Util::blessed($_[0]) && $_[0]->isa('Biblio::Folio::Site::MARC');
     if (@_ == 1) {
         my $ary = shift;
         die "not the output of marcfield(...)" if ref($ary) ne 'ARRAY';
@@ -216,19 +427,30 @@ sub new {
         }
         else {
             my ($ind1, $ind2, @subs) = @_;
-            my $num_subs = @subs >> 1;
+            my $num_subs = 0;
             warn "data field $tag with no subfields?"
                 if !@subs;
             my $val = $ind1 . $ind2;
             $content[VALREF] = \$val;
             my $subnum = 0;
-            while (@subs > 1) {
-                my ($subid, $subval) = splice @subs, 0, 2;
+            while (@subs) {
+                my ($subid, $subval);
+                if (ref $subs[0]) {
+                    my $sub = shift @subs;
+                    die "subfield not a pair or pair-array?"
+                        if ref $sub ne 'ARRAY';
+                    ($subid, $subval) = @$sub;
+                }
+                elsif (@subs > 1) {
+                    ($subid, $subval) = splice @subs, 0, 2;
+                }
+                else {
+                    die "data field with half-subfield?";
+                }
                 $content[SUBS+$subnum] = [$subid, \$subval];
+                $subnum++;
                 $val .= "\x1f" . $subid . $subval;
             }
-            die "data field with half-subfield?"
-                if @subs;
             @content[VALREF, IND1, IND2] = (\$val, $ind1, $ind2);
         }
         $self{'content'} = \@content;
@@ -239,10 +461,23 @@ sub new {
     return bless \%self, $cls;
 }
 
-sub tag { shift->{'tag'} }
+sub is_deleted { @_ > 1 ? $_[0]{'content'}[DELETE] = $_[1] : $_[0]{'content'}[DELETE] }
+sub is_dirty { @_ > 1 ? $_[0]{'is_dirty'} = $_[1] : $_[0]{'is_dirty'} }
+
+sub value { goto &data }
+
+sub data {
+    my $self = shift;
+    my $content = $self->{'content'};
+    my ($tag, $valref) = @$content[TAG, VALREF];
+    return $$valref if $tag lt '010' || !wantarray;
+    return @$content[SUBS..$#$content];
+}
+
+sub tag { shift->{'content'}[TAG] }
 sub set_tag {
     my ($self, $new_tag) = @_;
-    my $old_tag = $self->{'tag'};
+    my $old_tag = $self->{'content'}[TAG];
     if (($old_tag < '010') xor ($new_tag < '010')) {
         die "can't change a control field to a data field, or vice-versa";
     }
@@ -262,19 +497,37 @@ sub set_indicator {
     my ($self, $i, $v) = @_;
     die "invalid indicator number: $i"
         if $i !~ /^[12]$/;
+    die "undefined indicator $i"
+        if !defined $v;
+    my $n = length $v;
+    die "invalid indicator length: $n"
+        if $n != 1;
     $self->{'content'}[IND1+$i-1] = $v;
     $self->{'is_dirty'} = 1;
 }
 
 sub indicators {
     my $self = shift;
-    return $self->[IND1] . $self->[IND2] if !@_;
-    my $inds = shift;
-    my $num_inds = length $inds;
-    die "too many indicators" if $num_inds > 2;
-    die "not enough indicators" if $num_inds < 2;
-    @$self[IND1, IND2] = split //, $inds;
-    return $inds;
+    my $content = $self->{'content'};
+    if (!@_) {
+        my @inds = @$content[IND1, IND2];
+        return @inds if wantarray;
+        return join('', @inds);
+    }
+    elsif (@_ == 1) {
+        my $inds = shift;
+        my $n = length $inds;
+        die "too many indicators" if $n > 2;
+        die "not enough indicators" if $n < 2;
+        @$content[IND1, IND2] = split //, $inds;
+    }
+    elsif (@_ == 2) {
+        @$content[IND1, IND2] = @_;
+    }
+    $self->{'is_dirty'} = 1;
+    my @inds = @$content[IND1, IND2];
+    return @inds if wantarray;
+    return join('', @inds);
 }
 
 sub subfield {
@@ -284,6 +537,12 @@ sub subfield {
     my @subs = map { $_->[SUB_ID] eq $id ? (${ $_->[SUB_VALREF] }) : () } @$content[SUBS..$#$content];
     return @subs if wantarray;
     return @subs ? shift @subs : undef;
+}
+
+sub subfields {
+    my ($self) = @_;
+    my $content = $self->{'content'};
+    return @$content[SUBS..$#$content];
 }
 
 1;
