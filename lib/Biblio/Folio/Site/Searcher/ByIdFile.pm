@@ -3,7 +3,7 @@ package Biblio::Folio::Site::Searcher::ByIdFile;
 use strict;
 use warnings;
 
-use Biblio::Folio::Site::Searcher;
+use Biblio::Folio::Site::Searcher::ByIdReader;
 
 use vars qw(@ISA);
 
