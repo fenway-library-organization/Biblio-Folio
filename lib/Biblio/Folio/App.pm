@@ -9,7 +9,7 @@ use Biblio::Folio;
 use Biblio::Folio::Site::MARC;
 use Biblio::Folio::Site::MARC::InstanceMaker;
 use Biblio::Folio::Classes;
-use Biblio::Folio::Util qw(_make_hooks _optional _cql_term _use_class _uuid _unbless);
+use Biblio::Folio::Util qw(_make_hooks _optional _cql_term _use_class _uuid _unbless _utc_datetime);
 
 use LWP::UserAgent;
 use HTTP::Headers;
@@ -319,7 +319,7 @@ sub cmd_instance_source_replace {
 
 sub cmd_harvest {
     my ($self) = @_;
-    my ($all, $query, $batch_size, $spell_out_locations, $source_record_db);
+    my ($all, $query, $batch_size, $spell_out_locations, $use_srdb);
     my ($site, %arg) = $self->orient(
         qw(:fetch !offset !order-by),
         qw(:formats !as-text),
@@ -327,41 +327,51 @@ sub cmd_harvest {
         'q|query=s' => \$query,
         'k|batch-size=i' => \$batch_size,
         'L|spell-out-locations' => \$spell_out_locations,
-        'b|source-record-database=s' => \$source_record_db,
+        'b|from-source-record-database' => \$use_srdb,
+        'x|include-suppressed' => 'include_suppressed',
+        'S|skip-file=s' => 'skip_file',
     );
     $batch_size ||= 25;
     my $argv = $self->argv;
-    usage "harvest [-k BATCHSIZE] [-a|-q CQL]"
-        if @$argv && ($query || $all);
+    usage "harvest [-bL] [-k BATCHSIZE] [-a [-x] |-q CQL]"
+        if @$argv && ($query || $all)
+        || $query && $all;
+    my @search = ('instance', '@limit' => $batch_size);
     my $bsearcher;
+    my $srdb = $site->local_source_database if $use_srdb;
     if (defined $query) {
-        $bsearcher = $site->searcher('instance', '@query' => $query, '@limit' => $batch_size);
+        $bsearcher = $site->searcher(@search, '@query' => $query);
     }
     elsif ($all) {
-        $bsearcher = $site->searcher('instance', '@limit' => $batch_size);
+        if ($arg{'include_suppressed'}) {
+            $bsearcher = $site->searcher(@search);
+        }
+        else {
+            $bsearcher = $site->searcher(@search, '@query' => 'discoverySuppress==false');
+        }
+    }
+    elsif (@$argv) {
+        $bsearcher = $site->searcher(@search, '@set' => $argv, '@id_field' => 'instanceId');
+    }
+    elsif ($srdb) {
+        my $last_utc = _utc_datetime($srdb->last_sync || 0);
+        $query = sprintf q{metadata.updatedDate >= "%s"}, $last_utc;
+        $bsearcher = $site->searcher(@search, '@query' => $query);
     }
     else {
-        die "not yet implemented";
+        usage;
     }
-    $site->dont_cache({ map { $_ => 1 } qw(instance source_record holdings_record)});
+    $site->dont_cache(qw(instance source_record holdings_record item));
     my (@bids, %bid2instance, %bid2marc, %bid2holdings);
-    my %num = map { $_ => 0 } qw(instances holdings suppressed nonmarc errors);
+    my %num = map { $_ => 0 } qw(instances holdings suppressed skipped nonmarc errors);
     my $verbose = $self->verbose;
     my $t0 = time;
     my $marc_fetch;
-    if (defined $source_record_db) {
-        die "can't use DBI" if !eval 'use DBI; 1';
-        my $dbh = DBI->connect("dbi:SQLite:dbname=$source_record_db", '', '', {
-            'AutoCommit' => 1,
-            'RaiseError' => 1,
-        });
-        my $sth = $dbh->prepare(q{SELECT marc FROM source_records WHERE instance_id = ?});
+    if ($srdb) {
         $marc_fetch = sub {
             my ($instance, $instance_id) = @_;
-            $sth->execute($instance_id);
-            my ($marc) = $sth->fetchrow_array;
-            die "no such instance: $instance_id\n" if !defined $marc;
-            return Biblio::Folio::Site::MARC->new('marcref' => \$marc);
+            my $marcref = $srdb->marcref($instance_id);
+            return Biblio::Folio::Site::MARC->new('marcref' => $marcref);
         };
     }
     else {
@@ -370,14 +380,33 @@ sub cmd_harvest {
             return $instance->marc_record;
         };
     }
+    my %skip;
+    if ($arg{'skip_file'}) {
+        print STDERR "Reading skip file\n" if $verbose;
+        open my $fh, '<', $arg{'skip_file'} or die "open $arg{'skip_file'}: $!";
+        while (<$fh>) {
+            chomp;
+            $skip{$_} = 1;
+        }
+    }
+    if ($verbose) {
+        printf STDERR "\r%12s elapsed : %6s inst/sec : %8d instances : %8d holdings : %8d suppressed : %8d skipped : %8d non-MARC : %8d errors",
+            '0s',
+            '--',
+            @num{qw(instances holdings suppressed skipped nonmarc errors)};
+    }
     while (1) {
         my $instance = $bsearcher->next;
         if ($instance) {
-            $num{'instances'}++;
-            $num{'suppressed'}++, next if $instance->{'discoverySuppress'};
-            $num{'nonmarc'}++, next if $instance->{'source'} ne 'MARC';
             my $bid = $instance->id;
-            my $marc = eval { $marc_fetch->($instance, $bid)->parse };
+            $num{'instances'}++;
+            $num{'skipped'}++, next if delete $skip{$bid};
+            $num{'nonmarc'}++, next if $instance->{'source'} ne 'MARC';
+            if ($instance->{'discoverySuppress'}) {
+                $num{'suppressed'}++;
+                next if !$arg{'include_suppressed'};
+            }
+            my $marc = eval { $marc_fetch->($instance, $bid) };
             $num{'errors'}++, next if !defined $marc;
             push @bids, $bid;
             $bid2instance{$bid} = $instance;
@@ -385,223 +414,58 @@ sub cmd_harvest {
         }
         my $n = keys %bid2instance;
         if ($n && (!$instance || $n >= $batch_size)) {
-#my $ssearcher = $site->searcher('source_record', 'externalIdsHolder.instanceId' => \@bids, '@limit' => scalar @bids);
-            my $hsearcher = $site->searcher('holdings_record', 'instanceId' => \@bids, '@limit' => scalar @bids);
-            foreach ($hsearcher->all) {
-                push @{ $bid2holdings{$_->{'instanceId'}} ||= [] }, $_;
+# XXX Don't do this -- it's much too slow:
+# my $ssearcher = $site->searcher('source_record', 'externalIdsHolder.instanceId' => \@bids, '@limit' => scalar @bids);
+            my @hsearch = ('holdings_record', '@limit' => scalar @bids, 'instanceId' => \@bids);
+# XXX Don't do this either -- it doesn't work
+# push @hsearch, ('discoverySuppress' => JSON::false) if !$arg{'include_suppressed'};
+            my $hsearcher = $site->searcher(@hsearch);
+            foreach my $holdings_record ($hsearcher->all) {
+                next if $holdings_record->{'discoverySuppress'} && !$arg{'include_suppressed'};
+                push @{ $bid2holdings{$holdings_record->{'instanceId'}} ||= [] }, $holdings_record;
             }
             foreach my $bid (@bids) {
                 my $instance = $bid2instance{$bid};
                 my $holdings = $bid2holdings{$bid};
                 my $marc = $bid2marc{$bid};
                 # Build the MARC record
-                my ($leader, $fields) = ($marc->leader, $marc->fields);
-                @$fields = (
-                    marcfield('001', $bid),
-                    ( grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields ),
-                );
-                my $num_holdings = @{ $holdings || [] };
-                if ($num_holdings) {
-                    add_holdings_to_marc_fields(
-                        'fields' => $fields,
-                        'holdings' => $holdings,
-                        'spell_out_locations' => \$spell_out_locations,
-                    );
-                    $num{'holdings'} += $num_holdings;
-                }
-# XXX This whole hack with $classifier is crazy -- it should be done in a separate, post-processing script (or plugin)
-                my $classifier;
-                my $f33x = _33x_field_subfields($fields);
-                $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
-                $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
-# END crazy hack
-                my $hrid = $instance->hrid;
-                push @$fields, marcfield('901', ' ', ' ', 'h' => $hrid);
-                print marcbuild($leader, $fields);
+                my $ok;
+                eval {
+                    $marc->parse;
+                    $marc->garnish('instance' => $instance);
+                    if (@$holdings) {
+                        $num{'holdings'} += $marc->add_holdings(
+                            'holdings' => $holdings,
+                            'spell_out_locations' => \$spell_out_locations,
+                        );
+                    }
+                    else {
+                        $marc->delete_holdings;
+                    }
+                    print $marc->as_marc21;
+                    $ok = 1;
+                };
+                $num{'errors'}++ if !$ok;
             }
             @bids = %bid2instance = %bid2marc = %bid2holdings = ();
-            if ($verbose) {
-                my $dtime = time - $t0;
-                printf STDERR "\r%12s elapsed : %.2f inst/sec : %8d instances : %8d holdings : %8d suppressed : %8d non-MARC : %8d errors",
-                    sec2dur($dtime),
-                    $dtime ? $num{'instances'} / $dtime : 'Inf',
-                    @num{qw(instances holdings suppressed nonmarc errors)};
-            }
         }
         last if !$instance;
     }
-    print STDERR "\n" if $verbose;
-}
-
-sub cmd_instance_harvest {
-    my ($self) = @_;
-    my (%with, $mod, $id_file);
-    my ($query, $batch_size, $max_err, $spell_out_locations);
-    my ($site, %arg) = $self->orient(
-        qw(:fetch !offset !order-by),
-        qw(:formats !as-text),
-        'h|with-holdings' => \$with{'holdings'},
-        'i|with-items'    => \$with{'items'},
-        'k|batch-size=i' => \$batch_size,
-        'e|max-errors=i' => \$max_err,
-        'p|progress=i' => \$mod,
-        'f|id-file=s' => \$id_file,
-        'q|query=s' => \$query,
-        'L|spell-out-locations' => \$spell_out_locations,
-    );
-    my $max_count = $arg{'limit'};
-    my $argv = $self->argv;
-    usage "instance harvest [-jmhi] [-n MAXNUM] [-k BATCHSIZE] [-e MAXERRS] [-f FILE|-q CQL|ID...]"
-        if ($id_file && $query)
-        || ($id_file && @$argv)
-        || ($query   && @$argv)
-        ;
-    my $format = $arg{'format'} || FORMAT_MARC;
-    $with{'holdings'} = 1 if $with{'items'};
-    my $t0 = time;
-    my $err = 0;
-    my $remaining = $max_count || (1<<20);
-    my $fetch;
-    my $prefix = qq{\{"instances":[\n};
-    if (defined $query) {
-        my $offset = 0;
-        if (!defined $batch_size) {
-            $batch_size = (!defined $max_count || $max_count > 100) ? 100 : $max_count;
-        }
-        $fetch = sub {
-            my $limit = $batch_size > $remaining ? $remaining : $batch_size;
-            my @instances = $site->instance(
-                'query' => $query,
-                'offset' => $offset,
-                'limit' => $limit,
-            );
-            my $n = scalar @instances;
-            $remaining = 0, return if !$n;
-            $remaining -= $n;
-            $offset += $n;
-            return @instances;
-        };
-    }
-    else {
-        my $next;
-        if (@$argv) {
-            $next = sub {
-                return if !@$argv;
-                return shift @$argv;
-            };
-        }
-        else {
-            my $fh = @$argv ? oread(@$argv) : \*STDIN;
-            $next = sub {
-                my $id = <$fh>;
-                return if !defined $id;
-                $id =~ s/\s+.*//;
-                return $id;
-            };
-        }
-        $fetch = sub {
-            while (1) {
-                my $id = $next->();
-                $remaining = 0, return if !defined $id;
-                my (@instance, $ok);
-                eval { @instance = $site->instance($id); $ok = 1 };
-                if (!$ok) {
-                    my ($msg) = split /\n/, $@;
-                    $msg = 'unknown error' if $msg !~ /\S/;
-                    print STDERR "can't fetch instance $id: $msg\n";
-                    $err++;
-                }
-                elsif (@instance) {
-                    $remaining -= @instance;
-                    return @instance;
-                }
-            }
-        };
-    }
-    my %num = qw(instances 0 holdings 0 items 0);
-    my $n = 0;
-    while (1) {
-        my @instances = $fetch->();
-        last if !@instances;
-        foreach my $instance (@instances) {
-            $num{'instances'}++;
-            $n++;
-            my $id = $instance->id;
-            my $hrid = $instance->hrid;
-            if ($format eq FORMAT_MARC) {
-                my $marc;
-                eval {
-                    $marc = $instance->marc_record;
-                    my ($leader, $fields) = ($marc->leader, $marc->fields);
-                    @$fields = (
-                        marcfield('001', $id),
-                        ( grep { $_->[TAG] !~ /^(001|003|852|859|9)/ } @$fields ),
-                    );
-# XXX This whole hack with $classifier is crazy -- it should be done in a separate, post-processing script (or plugin)
-                    my $classifier;
-                    my $f33x = _33x_field_subfields($fields);
-                    $classifier = 'audiobook' if $f33x->{'336'}{'spw'};
-                    $classifier = 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
-# END crazy hack
-                    if ($with{'holdings'}) {
-                        my @holdings = $instance->holdings;
-                        my $num_holdings = @holdings;
-                        if ($num_holdings) {
-                            my $num_items = add_holdings_to_marc_fields(
-                                'fields' => $fields,
-                                'holdings' => \@holdings,
-                                'add_items' => $with{'items'},
-                                'classifier' => $classifier,
-                                'spell_out_locations' => \$spell_out_locations,
-                            );
-                            $num{'holdings'} += $num_holdings;
-                            $num{'items'} += $num_items;
-                            $n += $num_holdings + $num_items;
-                        }
-                    }
-                    push @$fields, marcfield('901', ' ', ' ', 'h' => $hrid);
-                    $marc = marcbuild($leader, $fields);
-                };
-                if (!defined $marc) {
-                    $marc = Biblio::Folio::Site::MARC->stub('instance' => $instance, 'status' => 'd');
-                    print STDERR "not found: $id\n"
-                        if $self->verbose;
-                }
-                print $marc;
-            }
-            elsif ($format eq FORMAT_JSON) {
-                my $json = $self->json;
-                if ($with{'holdings'}) {
-                    my @holdings = $instance->holdings;
-                    $instance->{'holdings'} = \@holdings;
-                    my $num_holdings = @holdings;
-                    if ($with{'items'}) {
-                        foreach my $holding (@holdings) {
-                            my @items = $holding->items;
-                            $holding->{'items'} = \@items;
-                            $num{'items'} += @items;
-                            $n += @items;
-                        }
-                    }
-                    $num{'holdings'} += @holdings;
-                    $n += @holdings;
-                }
-                my $out = $json->encode($instance);
-                $out =~ s/\n+\z//;
-                print $prefix, $out;
-                $prefix = ',';
-            }
-        }
-        if ($self->verbose && defined $query || $mod && ($n % $mod) == 0) {
-            printf STDERR "\r%8d instances : %8d holdings : %8d items",
-                @num{qw(instances holdings items)};
+    continue {
+        if ($verbose && $num{'instances'} % 25 == 0) {
+            my $dtime = time - $t0;
+            printf STDERR "\r%12s elapsed : %3.2f inst/sec : %8d instances : %8d holdings : %8d suppressed : %8d skipped : %8d non-MARC : %8d errors",
+                sec2dur($dtime),
+                $dtime ? $num{'instances'} / $dtime : 0,
+                @num{qw(instances holdings suppressed skipped nonmarc errors)};
         }
     }
-    print "\n]\n}\n" if $format eq FORMAT_JSON;
-    if ($self->verbose && defined $query || $mod) {
-        printf STDERR "\r%8d instances : %8d holdings : %8d items => %.1f seconds\n",
-            @num{qw(instances holdings items)},
-            time - $t0;
+    if ($verbose) {
+        my $dtime = time - $t0;
+        printf STDERR "\r%12s elapsed : %3.2f inst/sec : %8d instances : %8d holdings : %8d suppressed : %8d skipped : %8d non-MARC : %8d errors\n",
+            sec2dur($dtime),
+            $dtime ? $num{'instances'} / $dtime : 0,
+            @num{qw(instances holdings suppressed skipped nonmarc errors)};
     }
 }
 
@@ -777,12 +641,12 @@ sub cmd_source_sync {
     my ($site, %arg) = $self->orient;
     my $argv = $self->argv;
     usage "source sync DBFILE"
-        if @$argv != 1;
+        if @$argv > 1;
     my ($dbfile) = @$argv;
     my $db = $site->local_source_database($dbfile);
     my $t0 = time;
     my $total = 0;
-    printf STDERR "\r%8d source records fetched in %d seconds\n", 0, 0;
+    printf STDERR "\r%8d source records fetched in %d seconds", 0, 0;
     $db->sync('progress' => sub {
         my ($n) = @_;
         $total = $n;
@@ -1408,13 +1272,29 @@ sub cmd_ref_get {
     my %data_class = Biblio::Folio::Classes->data_classes;
     my %want = map { $_ => 1 } @$argv;
     my $json = $self->json;
+    my @names = sort keys %data_class;
+    my $n = scalar @names;
+    printf STDERR "Fetching reference data for $n type%s into $dir...\n", $n == 1 ? '' : 's';
     foreach my $name (sort keys %data_class) {
         my $cls = $data_class{$name};
         next if %want && !$want{$name};
+        if ($name eq 'location-units') {
+            printf STDERR "%5s %s\n", 'skip', $name;
+            next;
+        }
+        printf STDERR "%5s %s", '', $name;
         my $file = sprintf("%s/%s.json", $dir, $name);
-        my @objects = $cls->_all($site);
+        my $uri = eval { $cls->_uri_search }
+            || eval { (my $u = $cls->_uri) =~ s{/%s$}{}; $u }
+            or fatal "\nno URL";
+        my $res = $site->GET($uri);
+        fatal "\nGET $uri failed: " . $res->status_line
+            if !$res->is_success;
+        my $content = $json->decode($res->content);
         my $fh = owrite($file);
-        print $fh $json->encode(\@objects);
+        print $fh $json->encode($content);
+        my ($objects) = grep { ref($_) eq 'ARRAY' } values %$content;
+        printf STDERR "\r%5d %s\n", scalar(@$objects), $name;
     }
 }
 
@@ -1908,78 +1788,10 @@ sub login_if_necessary {
     return 1;
 }
 
-sub add_holdings_to_marc_fields {
-    my %arg = @_;
-    my ($fields, $holdings, $spell_out_locations, $add_items, $classifier) = @arg{qw(fields holdings spell_out_locations add_items classifier)};
-    my $num_items = 0;
-    foreach my $holding (@$holdings) {
-        my $location = $holding->location;
-        my $locstr = $spell_out_locations
-            ? $location->discoveryDisplayName // $location->name
-            : $location->code;
-        my $call_number = $holding->call_number;
-        undef $call_number if defined $call_number && $call_number !~ /\S/;
-        push @$fields, marcfield(
-            '852', ' ', ' ',
-            'b' => $locstr,
-            _optional('h' => $call_number),
-# XXX See "crazy hack" above!
-            _optional('x' => $classifier),
-            '0' => $holding->id,
-        );
-        if ($add_items) {
-            my @items = $holding->items;
-            if (@items) {
-                $num_items += @items;
-                add_items_to_marc_fields(
-                    'fields' => $fields,
-                    'items' => \@items,
-                    'call_number' => $call_number,
-                );
-            }
-        }
-    }
-    return $num_items;
-}
-
-sub add_items_to_marc_fields {
-    my %arg = @_;
-    my ($fields, $items, $call_number) = @arg{qw(fields items call_number)};
-    foreach my $item (@$items) {
-        my $iloc = $item->location->code;
-        my $vol = $item->volume;
-        # my $year = $item->year_caption;
-        # my $copies = @{ $item->copy_numbers || [] };
-        my $item_call_number = join(' ', grep { defined && length } $call_number, $vol);
-        undef $item_call_number if $item_call_number !~ /\S/;
-        push @$fields, marcfield(
-            '859', ' ', ' ',
-            'b' => $iloc,
-            defined($item_call_number) ? ('h' => $item_call_number) : (),
-            '0' => $item->id,
-        );
-    }
-}
-
 sub _indent {
     my $str = shift;
     my $indent = ' ' x (@_ ? pop : 4);
     return join '', map { $indent . $_ . "\n" } split /\n/, $str;
-}
-
-sub _33x_field_subfields {
-    my ($fields) = @_;
-    my %f33x = map { $_ => {} } qw(336 337 338);
-    foreach (@$fields) {
-        my $tag = $_->[TAG];
-        my $f = $f33x{$tag} or next;
-        my $valref = $_->[VALREF];
-        next if $$valref !~ /\x1f2rda/;
-        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
-            $f33x{$tag}{$1} = 1;
-        }
-    }
-    return \%f33x;
 }
 
 sub _marc_delete_stub {
