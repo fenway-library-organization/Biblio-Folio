@@ -447,8 +447,8 @@ sub searcher {
         'uri'        => \%arg,
         'file'       => ['ByIdFile'],
         'set'        => ['ByIdSet'],
-        'id_field'   => ['ByIdFile', 'ByIdSet'],
-        'batch_size' => ['ByIdFile', 'ByIdSet'],
+        'id_field'   => \%param,  # XXX ['ByIdFile', 'ByIdSet'],
+        'batch_size' => \%param,  # XXX ['ByIdFile', 'ByIdSet'],
     );
     # Look for things that aren't search terms
     foreach my $k (keys %term) {
@@ -479,6 +479,7 @@ sub searcher {
         $cls = 'Biblio::Folio::Site::Searcher';
         $arg{'terms'} = \%term if keys %term;
     }
+    _use_class($cls);
     return $cls->new(
         'site' => $self,
         'kind' => $kind,
@@ -499,8 +500,11 @@ sub harvester {
 
 sub local_source_database {
     my ($self, $file) = @_;
-    return Biblio::Folio::Site::LocalSourceDB->new(
-        'file' => $self->file($file),
+    $file = 'var/db/source-records.db'
+        if !defined $file;
+    $file = $self->file($file);
+    return $self->{'local_source_db'}{$file} ||= Biblio::Folio::Site::LocalSourceDB->new(
+        'file' => $file,
         'site' => $self,
     );
 }
