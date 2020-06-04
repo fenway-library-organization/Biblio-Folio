@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Biblio::Folio::Util qw(_utc_datetime);
+use Encode qw(decode encode);
 use DBI;
 
 sub new {
@@ -21,7 +22,7 @@ sub init {
     my ($self) = @_;
     my $file = $self->{'file'};
     my $exists = -e $file;
-
+    $self->{'sth'} = {};
 }
 
 sub dbh {
@@ -36,7 +37,7 @@ sub dbh {
 
 sub sth {
     my ($self, $sql) = @_;
-    my $sth = $self->dbh->prepare($sql);
+    my $sth = $self->{'sth'}{$sql} ||= $self->dbh->prepare($sql);
     return $sth;
 }
 
@@ -75,9 +76,29 @@ EOS
 sub last_sync {
     my ($self) = @_;
     my $sth = $self->sth(q{SELECT max(began) FROM syncs WHERE status = 'ok'});
+    $sth->execute;
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
     return $last || 0;
+}
+
+sub marcref {
+    my $self = shift;
+    my $sth;
+    my $marc;
+    if (@_ == 1) {
+        my ($bid) = @_;
+        $sth = $self->sth(q{SELECT marc FROM source_records WHERE instance_id = ?});
+        $sth->execute($bid);
+        my @row = $sth->fetchrow_array;
+        die "no such instance: $bid\n" if !@row;
+        $marc = eval { decode('UTF-8', $row[0]) };
+        die "instance: MARC data can't be decoded from UTF-8: $bid\n" if !defined $marc;
+        return \$marc;
+    }
+    else {
+        die "\$db->marc(\$instance_id)";
+    }
 }
 
 sub sync {
@@ -87,7 +108,7 @@ sub sync {
     my $exists = -e $file;
     my $progress = $arg{'progress'};
     my $dbh = $self->dbh;
-    $site->dont_cache({ map { $_ => 1 } qw(instance source_record holdings_record)});
+    $site->dont_cache(qw(instance source_record holdings_record));
     my $query = q{recordType==MARC and state=ACTUAL};
     if (!$exists) {
         $self->create;
@@ -123,8 +144,13 @@ EOS
         $n += @source_records;
         $progress->($n) if $progress;
     }
+    my $ended = time;
     $dbh->begin_work;
-	$self->sth('UPDATE syncs SET ended = ?, status = ?, num_records = ?')->execute(time, 'ok', $n);
+	$self->sth(q{
+        UPDATE  syncs
+        SET     ended = ?, status = ?, num_records = ?
+        WHERE   began = ?
+    })->execute($ended, 'ok', $n, $began);
     $dbh->commit;
 }
 
