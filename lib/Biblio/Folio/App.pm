@@ -9,7 +9,10 @@ use Biblio::Folio;
 use Biblio::Folio::Site::MARC;
 use Biblio::Folio::Site::MARC::InstanceMaker;
 use Biblio::Folio::Classes;
-use Biblio::Folio::Util qw(_make_hooks _optional _cql_term _use_class _uuid _unbless _utc_datetime);
+use Biblio::Folio::Util qw(
+    _make_hooks _optional _cql_term _use_class _uuid _unbless _utc_datetime _indentf
+    FORMAT_MARC FORMAT_JSON FORMAT_TEXT
+);
 
 use LWP::UserAgent;
 use HTTP::Headers;
@@ -21,10 +24,6 @@ use MARC::Loop qw(marcparse marcfield marcbuild TAG VALREF DELETE IND1 IND2 SUBS
 use File::Basename qw(dirname basename);
 use Getopt::Long
     qw(GetOptionsFromArray :config posix_default gnu_compat require_order bundling no_ignore_case);
-
-use constant FORMAT_MARC => 'marc';
-use constant FORMAT_JSON => 'json';
-use constant FORMAT_TEXT => 'text';
 
 sub dd;
 sub usage;
@@ -1024,6 +1023,22 @@ sub cmd_user_batch {
     $self->subcmd();
 }
 
+sub cmd_user_batch_pickup {
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient;
+    my $argv = $self->argv;
+    usage "user batch pickup DIR" if @$argv != 1;
+    $site->task('user_batch')->pickup('directory' => $argv->[0], %arg);
+}
+
+sub cmd_user_batch_validate {
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient;
+    my $argv = $self->argv;
+    usage "user batch validate" if !@$argv;
+    $site->task('user_batch')->validate('files' => $argv, %arg);
+}
+
 sub cmd_user_batch_parse {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(
@@ -1032,19 +1047,20 @@ sub cmd_user_batch_parse {
         qw(:formats !as-marc !as-json),
     );
     my $argv = $self->argv;
-    usage "user batch parse [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
-    my ($file) = @$argv;
-    $arg{'site'} = $site;
-    my $parser = $site->parser_for('user', $file, %arg);
-    $parser->iterate(
-        %arg,
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my ($user) = @$batch;
-            $self->print_user(%arg, 'user' => $user);
-        },
-    );
+    usage "user batch parse [-p CLASS] [-L PROFILE] FILE..." if !@$argv;
+    $site->task('user_batch')->parse('files' => $argv, %arg);
+### my ($file) = @$argv;
+### $arg{'site'} = $site;
+### my $parser = $site->parser_for('user', $file, %arg);
+### $parser->iterate(
+###     %arg,
+###     'each' => sub {
+###         my %param = @_;
+###         my $batch = $param{'batch'};
+###         my ($user) = @$batch;
+###         $self->print_user(%arg, 'user' => $user);
+###     },
+### );
 }
 
 sub cmd_user_batch_match {
@@ -1057,28 +1073,14 @@ sub cmd_user_batch_match {
         'y|prepare' => 'prepare',
         qw(:formats !as-marc),
     );
-    my $argv = $self->argv;
+    $arg{'batch_size'} ||= 10;
     my $format = $arg{'format'} ||= FORMAT_JSON;
-    usage "user batch match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
-        if @$argv != 1
+    my $argv = $self->argv;
+    usage "user batch match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE..."
+        if !@$argv
         || $arg{'prepare'} && $format ne FORMAT_JSON
         ;
-    my ($file) = @$argv;
-    my $matcher = $site->matcher_for('user', $file, %arg);
-    $arg{'site'} = $site;
-    $arg{'batch_size'} ||= 10;
-    my $batch_base = 1;
-    $arg{'each'} = sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my $results = $matcher->match(@$batch);
-        $self->show_matching_users(%param, %arg, 'batch_base' => $batch_base, 'results' => $results);
-    };
-    $arg{'after'} = sub {
-        $batch_base += $arg{'batch_size'};
-    };
-    my $parser = $site->parser_for('user', $file, %arg);
-    $parser->iterate(%arg);
+    $site->task('user_batch')->match('files' => $argv, %arg);
 }
 
 sub cmd_user_batch_prepare {
@@ -1092,42 +1094,12 @@ sub cmd_user_batch_prepare {
         'O|only-batches=s' => 'only_batches',
         qw(:formats !as-marc),
     );
-    my $argv = $self->argv;
-    my $format = $arg{'format'} ||= FORMAT_JSON;
-    usage "user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE"
-        if @$argv != 1;
-    my ($file) = @$argv;
-    my $parser = $site->parser_for('user', $file, %arg);
-    my $matcher = $site->matcher_for('user', $file, %arg);
-    my $loader = $site->loader_for('user', $file, %arg);
-    $arg{'site'} = $site;
     $arg{'batch_size'} ||= 10;
-    my $batch_base = 1;
-    if ($format eq FORMAT_JSON) {
-        my %hash = (
-            'batch_size' => $arg{'batch_size'},
-            'parser_class' => ref $parser,
-            'matcher_class' => ref $matcher,
-            'loader_class' => ref $loader,
-        );
-        $arg{'begin'} = sub {
-            print $self->json_begin_hash_array_members(\%hash, 'records');
-        };
-        $arg{'end'} = sub {
-            print $self->json_end_hash_array_members;
-        };
-    }
-    $arg{'each'} = sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my @match_results = $matcher->match(@$batch);
-        my $prepared_batch = $loader->prepare(@match_results);
-        $self->show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
-    };
-    $arg{'after'} = sub {
-        $batch_base += $arg{'batch_size'};
-    };
-    $parser->iterate(%arg);
+    my $format = $arg{'format'} ||= FORMAT_JSON;
+    my $argv = $self->argv;
+    usage "user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE..."
+        if !@$argv;
+    $site->task('user_batch')->prepare('files' => $argv, %arg);
 }
 
 sub cmd_user_batch_load {
@@ -1137,64 +1109,10 @@ sub cmd_user_batch_load {
         'p|parser=s' => 'parser_cls',
         'L|load-profile=s' => 'profile',
     );
-    my $argv = $self->argv;
-    usage "user batch load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE" if @$argv != 1;
-    my ($file) = @$argv;
-    my $matcher = $site->matcher_for('user', $file, %arg);
-    $arg{'site'} = $site;
-    my $loader = $site->loader_for('user', $file, %arg);
     $arg{'batch_size'} ||= 10;
-    my $batch_base = 1;
-    my $parser = $site->parser_for('user', $file, %arg);
-    $parser->iterate(
-        %arg,
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my @match_results = $matcher->match(@$batch);
-            my $prepared_batch = $loader->prepare(@match_results);
-            #my @objects = $loader->prepare(@match_results);
-            if ($self->dryrun) {
-                my @members = @{ $prepared_batch->{'members'} };
-                my $json = $self->json;
-                foreach my $member (@members) {
-                    my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
-                        = @$member{qw(n action record object matches warning rejected matching)};
-                    my @matches = $matches ? @$matches : ();
-                    my $raw = $record->{'_raw'};
-                    my $parsed = $record->{'_parsed'};
-                    $n += $batch_base;
-                    print "--------------------------------------------------------------------------------\n" if $n;
-                    print "Record: $n\n";
-                    print "Action: ", uc $action, "\n";
-                    print "Raw input: $raw\n";
-                    print "Parsed:\n";
-                    print _indent($json->encode($parsed));
-                    print "Matches: ", scalar(@matches), "\n";
-                    my $what = $action eq 'create' ? $record : $object;
-                    if (defined $what) {
-                        print "Object:\n";
-                        print _indent($json->encode($what));
-                        if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
-                            my $m = 0;
-                            foreach my $match (@matches) {
-                                $m++;
-                                # TODO
-                            }
-                        }
-                    }
-                    else {
-                        print "No match to $action\n";
-                    }
-                }
-            }
-            else {
-                my ($ok, $failed) = $loader->load($prepared_batch);
-                $self->show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
-            }
-        },
-        'after' => sub { $batch_base += $arg{'batch_size'} },
-    );
+    my $argv = $self->argv;
+    usage "user batch load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE..." if !@$argv;
+    $site->task('user_batch')->load('file' => $argv, %arg);
 }
 
 sub cmd_address {
@@ -1451,231 +1369,6 @@ sub marc_source_record_id {
         return $1 if $$valref =~ /\x1fs([^\s\x1d-\x1f]+)/;
     }
     return;
-}
-
-sub print_user {
-    my ($self, %arg) = @_;
-    my $user = $arg{'user'};
-    my $n = $arg{'n'};
-    printf "user %d \{\n", $n;
-    printf "  file:         %s\n", $arg{'file'};
-    printf "    row number: %s\n", $n;
-    printf "    raw data:   %s\n", $user->{'_raw'};
-    print $self->_user_to_text($user, 2);
-    print "\}\n";
-}
-
-sub show_prepared_users {
-    my ($self, %arg) = @_;
-    my $json = $self->site->json;
-    my $batch = $arg{'batch'};
-    my $batch_size = $arg{'batch_size'};
-    my $batch_base = $arg{'batch_base'} || 1;
-    my $batch_number = ($batch_base - 1) / $batch_size;
-    my $match_results = $arg{'match_results'};
-    my $format = $arg{'format'};
-    my $file = $arg{'source'}{'file'};
-    my $splitter;
-    if ($arg{'split_into'}) {
-        my $dest = $arg{'split_into'};
-        my $ext = $format eq FORMAT_JSON ? '.json' : '.txt';
-        if ($dest =~ /%.+%/) {
-        }
-        elsif ($dest =~ /%/) {
-            $dest =~ s{(?:\Q$ext\E)?$}{-%s$ext};
-        }
-        else {
-            # Split into a directory, use default file name pattern
-            $dest =~ s{/?$}{/%03d-%s$ext};
-        }
-        my $reverse = ($dest =~ /%[0-9]*d.*%s/ ? 1 : 0);
-        $splitter = sub {
-            my ($name, $n) = @_;
-            sprintf $dest, $reverse ? ($n, $name) : ($name, $n);
-        };
-    }
-    my $n = $batch_base;
-    my $double_divider = scalar('=' x 80) . "\n";
-    my $divider = scalar('-' x 80) . "\n";
-    print $double_divider if !$splitter;
-    print "Batch $batch_number\n";
-    foreach my $member ($batch->members) {
-        my $action = $member->{'action'};
-        my $user = $member->{$action};
-        my ($old, $via) = (_unbless($member->{'object'}), _unbless($member->{'record'}));
-        my $matches = $member->{'matches'} || [];
-        my $m = @$matches;
-# TODO: if ($arg{'diff'}) { my $diff = _diff3($old, $via, $new); ... }
-        if ($splitter) {
-            my %outfile;
-            foreach (['old', $old], ['new', $user], ['via', $via], ['changes', $member->{'changes'}]) {
-                my ($name, $obj) = @$_;
-                next if !$obj;
-                my $f = $outfile{$name} = $splitter->($name, $n);
-                die "file exists: $f" if -e $f;
-                open my $fh, '>', $f or die "open $f for writing: $!";
-                if ($format eq FORMAT_JSON) {
-                    print $fh $json->encode($obj);
-                }
-                elsif ($format eq FORMAT_TEXT) {
-                    if ($name ne 'changes') {
-                        print $fh $self->_user_to_text($obj);
-                    }
-                    else {
-                        my @changes = @{ $obj || [] };
-                        if (!@changes) {
-                            print $fh "no changes\n";
-                        }
-                        else {
-                            print $fh "Changes:\n";
-                            foreach my $change (@changes) {
-                                print $fh '  ', join(' ', @$change), "\n";
-                            }
-                            print $fh "Diff:\n";
-                            my ($oldfile, $newfile) = map { $outfile{$_} } qw(old new);
-                            print $fh qx/diff -u $oldfile $newfile/;
-                        }
-                    }
-                }
-                close $fh;
-            }
-        }
-        else {
-            if ($format eq FORMAT_JSON) {
-                print $json->encode({
-                    'old' => $old,
-                    'new' => $user,
-                    'via' => $via,
-                    'changes' => $member->{'changes'},
-                });
-            }
-            elsif ($format eq FORMAT_TEXT) {
-                print $divider;
-                printf "user %d : %s \{\n", $n, $action;
-                print $self->_user_to_text($user, 2);
-                printf "  file:             %s\n", $file;
-                printf "    row number: %s\n", $n;
-                printf "    raw data:   %s\n", $member->{'record'}{'_raw'};
-                printf "    matches:    %d\n", $m;
-                my @changes = @{ $member->{'changes'} || [] };
-                if (@changes) {
-                    print "  changes:\n";
-                    foreach (@changes) {
-                        my ($verb, @etc) = @$_;
-                        if ($verb eq 'set') {
-                            printf "    set %s to %s\n", @etc;
-                        }
-                        elsif ($verb eq 'unset') {
-                            printf "    unset %s (was %s)\n", @etc;
-                        }
-                        elsif ($verb eq 'change') {
-                            printf "    change %s from %s to %s\n", @etc;
-                        }
-                        elsif ($verb eq 'keep' || $verb eq 'add') {
-                            printf "    %s %s\n", $verb, @etc;
-                        }
-                        elsif ($verb eq 'protected') {
-                            printf "    keep %s (protected)\n", @etc;
-                        }
-                        else {
-                            printf "    $verb @etc\n";
-                        }
-                    }
-                }
-            }
-        }
-        $n++;
-    }
-}
-
-sub show_matching_users {
-    my ($self, %arg) = @_;
-    my ($site, $source, $results, $batch_base, $format) = @arg{qw(site source results batch_base format)};
-    my $file = $source->{'file'};
-    my ($incoming, $matching) = map { $_->{'results'} } @$results{qw(incoming candidates)};
-    foreach my $inc (@$incoming) {
-        my ($user, $n, $matches) = @$inc{qw(record n matches)};
-        $n += $batch_base;
-        my $m = @$matches;
-        my $res = $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
-        if ($format eq FORMAT_JSON) {
-            my $json = $self->json;
-            print "# ------------------------------------------------------------------------------\n"
-                if $n > 1;
-            print $json->encode({
-                'index' => $n,
-                'input' => $user,
-                'matches' => $matches,
-                'result' => $res,
-            });
-        }
-        else {
-            printf "user %d \{\n", $n;
-            print $self->_user_to_text($user, 2);
-            printf "  file:             %s\n", $file;
-            printf "    row number:     %s\n", $n;
-            printf "    raw data:       %s\n", $user->{'_raw'};
-            printf "    matches:        %d\n", $m;
-            foreach my $i (0..$#$matches) {
-                my $match = $matches->[$i];
-                my ($matched_user, $matched_by) = @$match{qw(object by)};
-                my $bystr = join(', ', @$matched_by);
-                printf "  match %d on %s \{\n", $i, $bystr;
-                print $self->_user_to_text($matched_user, 4);
-                print "  \}\n";
-            }
-            print "\}\n";
-        }
-    }
-    1;
-}
-
-sub show_user_load_results {
-    my ($self, %arg) = @_;
-    my $batch = $arg{'batch'};
-    my ($num_ok, $num_failed) = @arg{qw(ok failed)};
-    1;
-}
-
-sub _indentf {
-    my ($lvl, $fmt) = splice @_, 0, 2;
-    return scalar(' ' x $lvl) . sprintf($fmt, map { defined ? $_ : '' } @_);
-}
-
-sub _user_to_text {
-    my ($self, $user, $lvl) = @_;
-    $lvl ||= 0;
-    my $site = $self->site;
-    my $personal = $user->{'personal'} || {};
-    my $addresses = $personal->{'addresses'} || [];
-    my $text = '';
-    $text .= _indentf($lvl, "patronGroup:      %s\n", $site->expand_uuid('group', $user->{'patronGroup'}));
-    $text .= _indentf($lvl, "id:               %s\n", $user->{'id'})               if defined $user->{'id'};
-    $text .= _indentf($lvl, "hrid:             %s\n", $user->{'hrid'})             if defined $user->{'hrid'};
-    $text .= _indentf($lvl, "externalSystemId: %s\n", $user->{'externalSystemId'}) if defined $user->{'externalSystemId'};
-    $text .= _indentf($lvl, "barcode:          %s\n", $user->{'barcode'})          if defined $user->{'barcode'};
-    $text .= _indentf($lvl, "username:         %s\n", $user->{'username'})         if defined $user->{'username'};
-    $text .= _indentf($lvl, "lastName:         %s\n", $personal->{'lastName'} || '[none]');
-    $text .= _indentf($lvl, "firstName:        %s\n", $personal->{'firstName'} || '[none]');
-    $text .= _indentf($lvl, "enrollmentDate:   %s\n", $user->{'enrollmentDate'});
-    $text .= _indentf($lvl, "expirationDate:   %s\n", $user->{'expirationDate'});
-    $text .= _indentf($lvl, "addresses:        %d\n", scalar @$addresses);
-    if (@$addresses) {
-        foreach my $i (0..$#$addresses) {
-            my $addr = $addresses->[$i];
-            my $type = $site->expand_uuid('address_type', $addr->{'addressTypeId'});
-            $text .= _indentf($lvl, "address %d {\n", $i);
-            $text .= _indentf($lvl+2, "type:           %s\n", $type);
-            $text .= _indentf($lvl+2, "primaryAddress: %s\n", $addr->{'primaryAddress'} ? 'true' : 'false');
-            foreach my $k (qw(addressLine1 addressLine2 city region postalCode)) {
-                my $v = $addr->{$k};
-                next if !defined $v || !length $v;
-                $text .= _indentf($lvl+2, "%-15s %s\n", $k.':', $v);
-            }
-            $text .= _indentf($lvl, "}\n");
-        }
-    }
-    return $text;
 }
 
 sub skip_marc_records {
