@@ -33,7 +33,7 @@ sub init {
     };
     $self->{'batch_size'} ||= 1000;
     $self->{'small_batch_size'} ||= 25;
-    $self->{'ldp'} ||= Biblio::LDP->new('root' => $folio->root, 'name' => $site->name);
+    $self->{'ldp'} ||= Biblio::LDP->new('root' => $site->root, 'name' => $site->name);
     $self->{'status'} = NONE;
 }
 
