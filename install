@@ -7,8 +7,13 @@ if [ $1 = '-n' ]; then
 fi
 
 PREFIX=${1:-/usr/local/folio}
+DIRS="bin conf"
+PERLMODDIR=$(awk '/^PERLMODDIR  *=  */ {print $3}' config.mk)
+if [ -n "$PERLMODDIR" ]; then
+    DIRS="${DIRS} ${PERLMODDIR}"
+fi
 
-for dir in bin lib conf; do
+for dir in $DIRS; do
     if [ -e $dir ]; then
         if [ $dryrun = YES ]; then
             echo "mkdir -p $PREFIX/$dir" >&2
