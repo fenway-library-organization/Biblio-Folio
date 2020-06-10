@@ -16,6 +16,7 @@ sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }
 sub record_number { @_ > 1 ? $_[0]{'record_number'} = $_[1] : $_[0]{'record_number'} }
 sub batch_number { @_ > 1 ? $_[0]{'batch_number'} = $_[1] : $_[0]{'batch_number'} }
 sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
+
 sub is_valid { @_ > 1 ? $_[0]{'is_valid'} = $_[1] : $_[0]{'is_valid'} }
 sub errors { @_ > 1 ? $_[0]{'errors'} = $_[1] : $_[0]{'errors'} }
 
@@ -65,9 +66,9 @@ sub iterate {
         @batch = ();
     };
     my $obj;
+    my $num_consecutive_errors = 0;
+    my $num_errors = 0;
     eval {
-        my $num_consecutive_errors = 0;
-        my $num_errors = 0;
         while (1) {
             my $ok;
             eval {
@@ -117,13 +118,18 @@ sub iterate {
             }
         }
         _run_hooks('end' => $end, %params, 'n' => $n) if $n > 0;
-        $success = 1;
     };
-    delete $self->{'fh'};
-    delete $self->{'file'} if !defined $arg{'file'};
-    close $fh or $success = 0;
-    die $@ if !$success;
+    $self->done(%arg);
+    $self->results({
+        'errors' => $num_errors,
+    });
     return $self;
+}
+
+sub done {
+    my ($self, %arg) = @_;
+    close delete $self->{'fh'};
+    delete $self->{'file'} if !defined $arg{'file'};
 }
 
 1;

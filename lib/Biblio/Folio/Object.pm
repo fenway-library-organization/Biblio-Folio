@@ -21,7 +21,10 @@ sub new {
 
 sub DESTROY { }
 
-sub init { }
+sub init {
+    my $self = shift;
+    return $self;
+}
 
 sub _uri_create {
     my ($self, $obj) = @_;

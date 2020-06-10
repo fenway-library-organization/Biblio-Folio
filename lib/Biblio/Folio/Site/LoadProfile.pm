@@ -3,14 +3,14 @@ package Biblio::Folio::Site::LoadProfile;
 use strict;
 use warnings;
 
-@Biblio::Folio::Site::LoadProfile::ISA = qw(Biblio::Folio::Object);
+use base qw(Biblio::Folio::Site::Profile);
 
 use Biblio::Folio::Util qw(
-	_tok2const
-	_cql_value
-	_cql_term
-	_cql_and
-	_cql_or
+    _tok2const
+    _cql_value
+    _cql_term
+    _cql_and
+    _cql_or
     _get_attribute_from_dotted
     $rx_const_token
 );
@@ -19,7 +19,7 @@ use Text::Balanced qw(extract_delimited);
 sub init {
     my ($self) = @_;
     $self->SUPER::init;
-    my $type = $self->{'type'};
+    my $kind = $self->{'kind'};
     my $fields = $self->{'fields'} ||= {};
     foreach my $f (keys %$fields) {
         local $_ = $fields->{$f};
@@ -77,7 +77,7 @@ sub init {
                 die "unparseable field spec: $f = $fields->{$f}";
             }
         }
-        die "contradictory mode for $type: field $f both required and optional: $fields->{$f}"
+        die "contradictory mode for $kind: field $f both required and optional: $fields->{$f}"
             if $field{'is_required'} && $field{'is_optional'};
         $fields->{$f} = \%field;
     }

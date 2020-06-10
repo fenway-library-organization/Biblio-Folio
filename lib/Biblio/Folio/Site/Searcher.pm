@@ -32,6 +32,25 @@ sub new {
     return $self;
 }
 
+sub by {
+    my ($self, %arg) = @_;
+    if ($arg{'file'}) {
+        return Biblio::Folio::Site::Searcher::ByIdFile->new(
+            %$self,
+            %arg,
+        );
+    }
+    elsif ($arg{'set'}) {
+        return Biblio::Folio::Site::Searcher::ByIdset->new(
+            %$self,
+            %arg,
+        );
+    }
+    else {
+        die;
+    }
+}
+
 sub init {
     my ($self) = @_;
     $self->{'buffer'} = [];
@@ -49,11 +68,40 @@ sub buffer { @_ > 1 ? $_[0]{'buffer'} = $_[1] : $_[0]{'buffer'} }
 sub prepared { @_ > 1 ? $_[0]{'prepared'} = $_[1] : $_[0]{'prepared'} }
 sub finished { @_ > 1 ? $_[0]{'finished'} = $_[1] : $_[0]{'finished'} }
 
-sub params { @_ > 1 ? $_[0]{'params'} = $_[1] : $_[0]{'params'} }
-sub offset { @_ > 1 ? $_[0]{'params'}{'offset'} = $_[1] : $_[0]{'params'}{'offset'} }
-sub limit { @_ > 1 ? $_[0]{'params'}{'limit'} = $_[1] : $_[0]{'params'}{'limit'} }
-sub query { @_ > 1 ? $_[0]{'params'}{'query'} = $_[1] : $_[0]{'params'}{'query'} }
-sub uri { @_ > 1 ? $_[0]{'params'}{'uri'} = $_[1] : $_[0]{'params'}{'uri'} }
+sub params {
+    my $self = shift;
+    return $self->{'params'} if !@_;
+    $self->{'params'} = shift;
+    return $self;
+}
+
+sub offset {
+    my $self = shift;
+    return $self->{'params'}{'offset'} if !@_;
+    $self->{'params'}{'offset'} = shift;
+    return $self;
+}
+
+sub limit {
+    my $self = shift;
+    return $self->{'params'}{'limit'} if !@_;
+    $self->{'params'}{'limit'} = shift;
+    return $self;
+}
+
+sub query {
+    my $self = shift;
+    return $self->{'params'}{'query'} if !@_;
+    $self->{'params'}{'query'} = shift;
+    return $self;
+}
+
+sub uri {
+    my $self = shift;
+    return $self->{'params'}{'uri'} if !@_;
+    $self->{'params'}{'uri'} = shift;
+    return $self;
+}
 
 sub next {
     my ($self, $n) = @_;

@@ -21,7 +21,7 @@ sub _formatter_as_text {
             $self->_format_property('personal.firstName'),
             ['file',      $self->{'_file'}],
             ['rowNumber', $self->{'_n'}],
-            ['rawData',   $self->{'_raw'}],
+            # ['rawData',   $self->{'_raw'}],
             ['matches',   [$self->{'_matches'}], $matches_formatter],
         );
     };

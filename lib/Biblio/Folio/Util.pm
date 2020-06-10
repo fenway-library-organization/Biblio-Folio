@@ -6,23 +6,26 @@ use warnings;
 require Exporter;
 our @ISA = qw(Exporter);
 our @EXPORT_OK = qw(
+    FORMAT_MARC
+    FORMAT_JSON
+    FORMAT_TEXT
     _rx_const_token
-	_tok2const
-	_trim
-	_camel
-	_uncamel
-	_2pkg
-	_kind2pkg
-	_pkg2kind
-	_optional
+    _tok2const
+    _trim
+    _camel
+    _uncamel
+    _2pkg
+    _kind2pkg
+    _pkg2kind
+    _optional
     _cql_query
-	_cql_value
-	_cql_term
-	_cql_and
-	_cql_or
-	_read_config
-	_make_hooks
-	_run_hooks
+    _cql_value
+    _cql_term
+    _cql_and
+    _cql_or
+    _read_config
+    _make_hooks
+    _run_hooks
     _get_attribute_from_dotted
     _use_class
     _req
@@ -37,33 +40,51 @@ our @EXPORT_OK = qw(
     _unbless
     _unique
     _int_set_str_to_hash
+    _indentf
+    _mkdirs
+    _json_file
+    _json_encode
+    _json_decode
+    _json_read
+    _json_write
     $rx_const_token
 );
+
+use constant FORMAT_MARC => 'marc';
+use constant FORMAT_JSON => 'json';
+use constant FORMAT_TEXT => 'text';
 
 use JSON;
 use Data::UUID;
 use Data::Dumper;
 use Scalar::Util qw(blessed);
 use POSIX qw(strftime);
+use File::Basename qw(dirname basename);
 
 use constant DEBUGGING => $ENV{'DD'};
 
 use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.000+0000';
+use constant COMPACT_UTC_FORMAT => '%Y%m%dT%H%M%SZ';
 
-use constant CQL_NULL => 'null';
+use constant TRUE => JSON::true;
+use constant FALSE => JSON::false;
+use constant NULL => JSON::null;
+
 use constant CQL_TRUE => 'true';
 use constant CQL_FALSE => 'false';
+use constant CQL_NULL => 'null';
 
 use vars qw($rx_const_token);
 
+my $json = JSON->new->pretty->canonical->convert_blessed;
 my $dumper = Data::Dumper->new([])->Terse(1)->Indent(0)->Sortkeys(1)->Sparseseen(1);
 my $uuidgen = Data::UUID->new;
 my %tok2const = (
-    CQL_NULL() => JSON::null,
-    CQL_TRUE() => JSON::true,
-    CQL_FALSE() => JSON::false,
+    CQL_TRUE() => TRUE,
+    CQL_FALSE() => FALSE,
+    CQL_NULL() => NULL,
 );
-$rx_const_token = qr/null|true|false/;
+$rx_const_token = qr/true|false|null/;
 
 sub _tok2const {
     my ($tok) = @_;
@@ -99,13 +120,14 @@ sub _read_config {
 }
 
 sub _make_hooks {
+    # my %hooks = _make_hooks('foo' => \&foo, 'bar' => \&bar, 'foo' => \&other_foo);
+    # my %hooks = _make_hooks('foo' => [\&foo, \&other_foo], 'bar' => \&bar, 'foo' => \&yet_other_foo);
     my %arg;
-    my %salient = map { $_ => 1 } qw(begin before each after end);
     while (@_ > 1) {
         my ($k, $v) = splice @_, 0, 2;
         my $oldv = $arg{$k};
         my $oldvref = ref $oldv;
-        if ($oldvref eq '' || !$salient{$k}) {
+        if (!defined $oldv) {
             $arg{$k} = $v;
         }
         elsif ($oldvref eq 'ARRAY') {
@@ -133,9 +155,9 @@ sub _make_hooks {
 
 sub _run_hooks {
     my $phase = shift;
-    my $hooks = shift
-        or return;
+    my $hooks = shift or return;
     my $r = ref $hooks;
+    $hooks = $hooks->{$phase} if $r eq 'HASH';
     if ($r eq 'CODE') {
         $hooks->('phase' => $phase, @_);
     }
@@ -173,12 +195,48 @@ sub _2pkg {
 }
 
 sub _kind2pkg {
+    my $kind = shift;
+    my $base_kind = @_ ? shift : 'object';
+    $base_kind ||= 'object';
+    my @parts = qw(biblio folio);
+    if ($base_kind eq 'object') {
+        # _kind2pkg('foo_bar') => 'Biblio::Folio::Object::FooBar'
+        # _kind2pkg('foo_bar', 'object') => 'Biblio::Folio::Object::FooBar'
+        push @parts, 'object' if $kind ne 'object'; 
+    }
+    elsif ($base_kind eq 'site') {
+        # _kind2pkg('task', 'site') => 'Biblio::Folio::Site::Task'
+        push @parts, 'site' if $kind ne 'site';
+    }
+    else {
+        # _kind2pkg('foo_bar', 'task') => 'Biblio::Folio::Site::Task::FooBar'
+        push @parts, 'site', $base_kind;
+    }
+    return join('::', map { ucfirst _camel($_) } @parts, $kind); 
+}
+
+sub _old_kind2pkg {
+    my ($kind, $base_kind) = @_;
+    $base_kind = 'object' if !defined $base_kind;
+    my $base_pkg = 'Biblio::Folio::' . ucfirst _camel($base_kind);
+    return $base_pkg if $base_kind eq $kind;
+    return $base_pkg . '::' . ucfirst _camel($kind);
+}
+
+sub _older_kind2pkg {
     my ($kind) = @_;
     return 'Biblio::Folio::Object' if $kind eq 'object';
     return 'Biblio::Folio::Object::' . ucfirst _camel($kind);
 }
 
 sub _pkg2kind {
+    my ($pkg, $base_pkg) = @_;
+    $base_pkg = 'Biblio::Folio::Object' if !defined $base_pkg;
+    $pkg =~ s/^${base_pkg}:://;
+    return lcfirst _uncamel($pkg);
+}
+
+sub _old_pkg2kind {
     my ($pkg) = @_;
     $pkg =~ s/^Biblio::Folio::Object:://;
     return lcfirst _uncamel($pkg);
@@ -290,7 +348,10 @@ sub _opt {
 
 sub _str2hash {
     my ($str) = @_;
-    my %hash = map { s/^\s+//; /^[^#]/ ? (split /\s+/) : () } split /\n/, $str;
+    my %hash = map {
+        s/^\s+//;
+        /^[^#]/ ? (split /\s+/) : ()
+    } split /\n/, $str;
     return %hash if wantarray;
     return \%hash;
 }
@@ -349,6 +410,8 @@ sub _as_array {
 sub _utc_datetime {
     my ($t, $format) = @_;
     $format ||= FOLIO_UTC_FORMAT;
+    $format = COMPACT_UTC_FORMAT if $format eq 'compact';
+    return strftime($format, gmtime) if !defined $t;
     if ($t =~ m{^[0-9]+$}) {
         # Seconds since the Unix epoch
         return strftime($format, gmtime $t);
@@ -467,6 +530,73 @@ sub _int_set_str_to_hash {
     }
     die "not a valid list of ranges: $str" if $err;
     return %hash;
+}
+
+sub _indentf {
+    my ($lvl, $fmt) = splice @_, 0, 2;
+    return scalar(' ' x $lvl) . sprintf($fmt, map { defined ? $_ : '' } @_);
+}
+
+sub _move_to_dir {
+    my $dest = pop;
+    die "_move_to_dir(...,\$dest): not a directory: $dest"
+        if !-d $dest;
+    my ($ok, @moved) = (1);
+    my %result = ('ok' => 1, 'moved' => [], 'errors' => {});
+    foreach my $f (@_) {
+        my $fnew = $dest . '/' . basename($f);
+        if (rename($f, $fnew)) {
+            push @moved, $fnew;
+        }
+        else {
+            die "rename $f $fnew: $!" if !defined wantarray;
+            $ok = $result{'ok'} = 0;
+            $result{'errors'}{$f} = $!;
+        }
+    }
+    return wantarray ? ($ok, @moved) : \%result;
+}
+
+sub _mkdirs {
+    foreach my $d (@_) {
+        -d $d or mkdir($d) or die "mkdir $d: $!";
+    }
+}
+
+sub _json_file {
+    my ($f) = @_;
+    $f =~ s/(?:\.json)?$/.json/;
+    return $f;
+}
+
+sub _json_encode {
+    return $json->encode(@_);
+}
+
+sub _json_decode {
+    return $json->decode(@_);
+}
+
+sub _json_read {
+    my $f = _json_file(shift);
+    open my $fh, '<', $f
+        or die "open $f for reading: $!";
+    local $/;
+    my $str = <$fh>;
+    close $fh or die "close $f: $!";
+    my $content = $json->decode($str);
+    return $content if defined $content;
+    my ($default) = @_;
+    die "no content in file: $f" if !defined $default;
+    return $default;
+}
+
+sub _json_write {
+    my $f = _json_file(shift);
+    my $str = $json->encode(@_);
+    open my $fh, '>', $f or die "open $f for writing: $!";
+    print $fh $str;
+    close $fh or die "close $f: $!";
 }
 
 1;

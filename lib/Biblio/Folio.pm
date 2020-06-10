@@ -12,7 +12,7 @@ my $default_root ='/usr/local/folio';
 sub new {
     my $cls = shift;
     my $self = bless {
-        'root' => $default_root,
+        'root' => $ENV{'FOLIO_ROOT'} ||= $default_root,
         @_,
     }, $cls;
     $self->init;
@@ -35,6 +35,11 @@ sub init {
     }
     $self->{'json'} ||= JSON->new->pretty->canonical->convert_blessed;
     # $self->init_classes_and_properties;
+}
+
+sub site_names {
+    my ($self) = @_;
+    my $list = $self->file('site.list');
 }
 
 sub file {

@@ -8,16 +8,22 @@ use Digest;
 use DBI;
 use Text::Balanced qw(extract_delimited);
 use LWP::UserAgent;
+use POSIX qw(strftime);
 
 use Biblio::Folio::Class;
 use Biblio::Folio::Object;
-use Biblio::Folio::Util qw(_read_config _2pkg _pkg2kind _kind2pkg _optional _use_class _cql_query _cql_term _cql_or);
 use Biblio::Folio::Site::Searcher;
-use Biblio::Folio::Site::Stash;
-use Biblio::Folio::Site::LoadProfile;
+use Biblio::Folio::Site::LocalDB;
+use Biblio::Folio::Site::LocalDB::SourceRecords;
+use Biblio::Folio::Site::Profile;
 use Biblio::Folio::Site::Matcher;
 use Biblio::Folio::Site::BatchLoader;
-use Biblio::Folio::Site::LocalSourceDB;
+use Biblio::Folio::Util qw(
+    _json_encode _json_decode _json_read _json_write
+    _read_config _optional _uuid _utc_datetime _mkdirs
+    _2pkg _pkg2kind _kind2pkg _use_class
+    _cql_query _cql_term _cql_or
+);
 
 # Tracing: states
 use constant qw(ON       ON     );
@@ -57,7 +63,6 @@ sub init {
     my $folio = $self->folio;
     $self->{'root'} = $folio->root . "/site/$name";
     $self->{'dont_cache'} ||= {};
-    #$self->{'json'} ||= JSON->new->pretty->canonical->convert_blessed;
     $self->_trace(START);
     $self->_read_config_files;
     $self->_read_map_files;
@@ -90,39 +95,49 @@ sub user_id { @_ > 1 ? $_[0]{'state'}{'user_id'} = $_[1] : $_[0]{'state'}{'user_
 
 # Record load profiles
 
-# my $profiles = $site->load_profiles;
-sub load_profiles {
-    my ($self, $type) = @_;
-    my $profiles = $self->{'load_profile'}{$type};
+# my $profiles = $site->profiles;
+sub profiles {
+    my ($self, $kind) = @_;
+    my $profiles = $self->{'profile'}{$kind};
     if (!$profiles) {
         $profiles = {};
-        my @files = $self->file("profile/$type/*.profile");
+        my @files = $self->file("profile/$kind/*.profile");
         foreach my $file (@files) {
             (my $name = $file) =~ s{^.+/|\.profile$}{}g;
             my $profile = _read_config($file);
-            $profiles->{$name} = Biblio::Folio::Site::LoadProfile->new(
+            my $pkg = $profile->{'profile'}{'class'} || 'Biblio::Folio::Site::Profile';
+            _use_class($pkg);
+            $profiles->{$name} = $pkg->new(
+                'kind' => $kind,
                 'name' => $name,
-                'type' => $type,
                 %$profile,
             );
         }
-        $self->{'load_profile'}{$type} = $profiles;
+        $self->{'profile'}{$kind} = $profiles;
     }
     return $profiles;
 }
 
-# my $profile = $site->load_profile('user');
-# my $profile = $site->load_profile('user', 'default');
-sub load_profile {
+# my $profile = $site->profile('user');
+# my $profile = $site->profile('user', 'default');
+# my $profile = $site->profile('user', $profile_object);
+sub profile {
     my ($self, $kind, $name) = @_;
+    return $name if ref $name;
     $name = 'default' if !defined $name;
-    return $self->load_profiles($kind)->{$name}
+    return $self->profiles($kind)->{$name}
         || die "no such profile for $kind: $name";
 }
 
 sub compile_profile {
     my ($self, $profile) = @_;
     1;  # TODO
+}
+
+sub path {
+    my ($self, $path) = @_;
+    return $path if $path =~ m{^/};
+    return $self->{'root'} . '/' . $path;
 }
 
 sub file {
@@ -232,67 +247,25 @@ sub expand_uuid {
 sub state {
     my $self = shift;
     my $state_file = $self->file('var/state.json');
-    my $state =  $self->{'state'};
     if (@_ == 0) {
+        my $state =  $self->{'state'};
         return $state if defined $state;
-        open my $fh, '<', $state_file
-            or die "open $state_file for reading: $!";
-        local $/;
-        my $str = <$fh>;
-        close $fh or die "close $state_file: $!";
-        return $self->{'state'} = $self->json->decode($str);
+        return $self->{'state'} = _json_read($state_file);
     }
     elsif (@_ == 1) {
-        $state = shift;
-        my $str = $self->json->encode($state);
-        open my $fh, '>', $state_file
-            or die "open $state_file for writing: $!";
-        print $fh $str;
-        close $fh or die "close $state_file: $!";
+        _json_write($state_file, shift);
     }
 }
 
-sub _stash {
-    my ($self, $name) = @_;
-    my $stashes = $self->{'_stash'};
-    return $stashes->{$name}
-        if exists $stashes->{$name};
-    my $dbh = $self->_stashes_dbh;
-    return $stashes->{$name} = Biblio::Folio::Site::Stash->new(
-        'name' => $name,
-        'site' => $self,
-        'dbh' => $dbh,
-    );
-}
-
-sub _stashes_dbh {
-    my ($self) = @_;
-    my $dbfile = $self->file("var/stash/main.db");
-    return $self->{'_dbh'}
-        ||= DBI->connect("dbi:SQLite:dbname=$dbfile", '', '');
-}
-
-sub stash {
+sub local_db {
     my $self = shift;
     my $name = shift;
-    my $table = shift;
-    my $stash = $self->_stash($name);
-    if (@_ == 0) {
-        return;
-    }
-    elsif (@_ > 1 && ref($_[0]) eq '') {
-        # @values = $site->stash($name, $table, @columns);
-        die "not yet implemented";
-    }
-    elsif (ref $_[0]) {
-        # $site->stash($name, $table, \%hash);
-        my %hash = %{ shift() };
-        my $id = delete $hash{'id'};
-        $stash->put($table, shift());
-    }
-    else {
-        die "bad call";
-    }
+    my $file = $self->path("var/db/$name.db");
+    return $self->{'_db'}{$name} ||= Biblio::Folio::Site::LocalDB->new(
+        'site' => $self,
+        'name' => $name,
+        'file' => $file,
+    );
 }
 
 sub login {
@@ -337,6 +310,16 @@ sub authenticate {
 sub instance {
     my $self = shift;
     return $self->object('instance', @_);
+}
+
+sub mapping_rules {
+    my ($self) = @_;
+    return $self->{'mapping_rules'} if $self->{'mapping_rules'};
+    my $res = $self->GET('/mapping-rules');
+    if ($res->is_success) {
+        return $self->{'mapping_rules'} = $self->json->decode($res->content);
+    }
+    die "GET /mapping-rules: " . $res->status_line;
 }
 
 sub location {
@@ -493,7 +476,7 @@ sub harvester {
     my $pkg = __PACKAGE__ . '::Harvester::' . ucfirst _camel($name);
     _use_class($pkg);
     return $pkg->new(
-        '_site' => $self,
+        'site' => $self,
         %arg,
     );
 }
@@ -503,7 +486,7 @@ sub local_source_database {
     $file = 'var/db/source-records.db'
         if !defined $file;
     $file = $self->file($file);
-    return $self->{'local_source_db'}{$file} ||= Biblio::Folio::Site::LocalSourceDB->new(
+    return $self->{'local_source_db'}{$file} ||= Biblio::Folio::Site::LocalDB::SourceRecords->new(
         'file' => $file,
         'site' => $self,
     );
@@ -659,7 +642,7 @@ sub create {
     return if !$res->is_success;
     my $json = $self->json;
     my $content = eval {
-        $json->decode($res->content);
+        _json_decode($res->content);
     };
     if (!$content) {
         return if $res->code ne '201';
@@ -1084,7 +1067,7 @@ sub _make_marc2instance {
             1;
         }
         $instance{'id'} ||= $folio->uuid;
-        return $json->encode(\%instance);
+        return _json_encode(\%instance);
     };
 }
 
@@ -1094,9 +1077,35 @@ sub formatter {
     return $pkg->formatter(%arg);
 }
 
+sub class_for {
+    my ($self, $kind, $actor, $profile) = @_;
+    # $site->class_for('user_batch', 'sorter');
+    # $site->class_for('user_batch', 'sorter', 'default');
+    $profile = $self->profile($kind, $profile);
+    my $pkg = $profile->{$actor}{'class'}
+        or die "no class for $kind $actor: profile $profile->{'name'}";
+    return $pkg;
+}
+
+sub sorter_for {
+    my ($self, $kind, %arg) = @_;
+    my $profile = $self->profile($kind, $arg{'profile'});
+    my %sorter = %{ $profile->{'sorter'} || {} };
+    my $sorter_cls = delete $sorter{'class'} || $self->class_for($kind, 'sorter', $profile);
+    $sorter_cls = 'Biblio::FolioX::' . $sorter_cls if $sorter_cls =~ s/^[+](::)?//;
+    _use_class($sorter_cls);
+    return $sorter_cls->new(
+        %sorter,
+        'site' => $self,
+        'profile' => $profile,
+        'kind' => $kind,
+    );
+}
+
 sub parser_for {
-    my ($self, $kind, $file, %arg) = @_;
-    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my ($self, $kind, %arg) = @_;
+    my $file = $arg{'file'};
+    my $profile = $self->profile($kind, $arg{'profile'});
     my %parser = %{ $profile->{'parser'} || {} };
     my $parser_cls = delete $parser{'class'} || 'Biblio::FolioX::Util::JSONParser';
     $parser_cls = 'Biblio::FolioX::' . $parser_cls if $parser_cls =~ s/^[+](::)?//;
@@ -1111,8 +1120,9 @@ sub parser_for {
 }
 
 sub matcher_for {
-    my ($self, $kind, $file, %arg) = @_;
-    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my ($self, $kind, %arg) = @_;
+    my $file = $arg{'file'};
+    my $profile = $self->profile($kind, $arg{'profile'});
     my %matcher = %{ $profile->{'matcher'} || {} };
     my $matcher_cls = delete $matcher{'class'} || 'Biblio::Folio::Site::Matcher';
     $matcher_cls = 'Biblio::FolioX::' . $matcher_cls if $matcher_cls =~ s/^[+](::)?//;
@@ -1127,8 +1137,9 @@ sub matcher_for {
 }
 
 sub loader_for {
-    my ($self, $kind, $file, %arg) = @_;
-    my $profile = $self->load_profile($kind, $arg{'profile'});
+    my ($self, $kind, %arg) = @_;
+    my $file = $arg{'file'};
+    my $profile = $self->profile($kind, $arg{'profile'});
     my %loader = %{ $profile->{'loader'} || {} };
     my $loader_cls = delete $loader{'class'} || 'Biblio::Folio::Site::BatchLoader';
     $loader_cls = 'Biblio::FolioX::' . $loader_cls if $loader_cls =~ s/^[+](::)?//;
@@ -1139,6 +1150,25 @@ sub loader_for {
         'profile' => $profile,
         'kind' => $kind,
         'file' => $file,
+    );
+}
+
+sub task {
+    my ($self, $kind, %arg) = @_;
+    my $pkg = _kind2pkg($kind, 'task');
+    _use_class($pkg);
+    my $now = time;
+    my $ym = strftime('%Y-%m', localtime $now);
+    my $id = sprintf '%s.%s.%s', _utc_datetime($now, 'compact'), $kind, _uuid();
+    my @dirs = map { $self->path($_) } ('var/task', "var/task/running", "var/task/$ym", "var/task/running/$id", "var/task/$ym/$id", "var/task/$ym/$id/\@setup");
+    my $root = $dirs[-2];
+    _mkdirs(@dirs);
+    pop @dirs;
+    return $pkg->new(
+        %arg,
+        'root' => $root,
+        'state' => 'setup',
+        'site' => $self,
     );
 }
 
