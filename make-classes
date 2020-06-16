@@ -293,6 +293,7 @@ sub define_methods {
     my $foreign = $arg{'foreign'};
     my ($to_cls, $to_pl, $to_pkg, $to_kind) = @$to{qw(class plural package kind)};
     if ($custom) {
+        #$arg{'returns'} = $to if defined $to_cls;
         $define{$name} = \%arg;
     }
     else {
