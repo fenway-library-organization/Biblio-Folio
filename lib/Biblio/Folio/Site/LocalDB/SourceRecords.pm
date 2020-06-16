@@ -49,18 +49,35 @@ sub last_sync {
     return $last || 0;
 }
 
+sub fetch {
+    my ($self, $instance_id) = @_;
+    my $sth = $self->sth(q{SELECT * FROM source_records WHERE instance_id = ?});
+    $sth->execute($instance_id);
+    my $row = $sth->fetchrow_hashref;
+    die "no such instance: $instance_id\n" if !$row;
+    my $marc = $row->{'marc'};
+    #_utf8_on($marc);  # XXX
+    # my $marc = decode('UTF-8', $row->{'marc'});  # eval { encoded('UTF-8', $row->{'marc'}) };
+    # die "instance: MARC data can't be encoded as UTF-8: $instance_id\n" if !defined $marc;
+    #substr($marc, 0, 5) = sprintf('%05d', length $marc);
+    $row->{'marcref'} = \$marc;
+    return $row;
+}
+
 sub marcref {
     my $self = shift;
     my $sth;
     my $marc;
     if (@_ == 1) {
-        my ($bid) = @_;
+        my ($instance_id) = @_;
         $sth = $self->sth(q{SELECT marc FROM source_records WHERE instance_id = ?});
-        $sth->execute($bid);
+        $sth->execute($instance_id);
         my @row = $sth->fetchrow_array;
-        die "no such instance: $bid\n" if !@row;
-        $marc = eval { decode('UTF-8', $row[0]) };
-        die "instance: MARC data can't be decoded from UTF-8: $bid\n" if !defined $marc;
+        die "no such instance: $instance_id\n" if !@row;
+        $marc = $row[0];  # eval { encode('UTF-8', $row[0]) };
+        #_utf8_on($marc);  # XXX
+        # substr($marc, 0, 5) = sprintf('%05d', length $marc);
+        # die "instance: MARC data can't be encoded as UTF-8: $instance_id\n" if !defined $marc;
         return \$marc;
     }
     else {
@@ -88,23 +105,23 @@ sub sync {
     }
     my $searcher = $site->searcher('source_record', '@query' => $query, '@limit' => 1000);
     my $n = 0;
-	my $began = time;
-	$self->sth('INSERT INTO syncs (began, num_records) VALUES (?, 0)')->execute($began);
-	my $sth_ins = $self->sth(<<'EOS');
+    my $began = time;
+    $self->sth('INSERT INTO syncs (began, num_records) VALUES (?, 0)')->execute($began);
+    my $sth_ins = $self->sth(<<'EOS');
 INSERT OR REPLACE INTO source_records (instance_id, marc, last_updated, sync_id, deleted, suppress)
 VALUES (?, ?, ?, ?, ?, ?)
 EOS
     while (my @source_records = $searcher->next) {
         $dbh->begin_work;
         foreach my $source_record (@source_records) {
-			next if $source_record->{'errorRecord'};
-         	my $instance_id = $source_record->{'externalIdsHolder'}{'instanceId'}
+            next if $source_record->{'errorRecord'};
+            my $instance_id = $source_record->{'externalIdsHolder'}{'instanceId'}
                 or next;
             my $marc = $source_record->{'rawRecord'}{'content'};
-			my $last_updated = $source_record->{'metadata'}{'updatedDate'};
-			my $deleted = $source_record->{'deleted'} ? 1 : 0;
-			my $suppress = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
-			$sth_ins->execute($instance_id, $marc, $last_updated, $began, $deleted, $suppress);
+            my $last_updated = $source_record->{'metadata'}{'updatedDate'};
+            my $deleted = $source_record->{'deleted'} ? 1 : 0;
+            my $suppress = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
+            $sth_ins->execute($instance_id, $marc, $last_updated, $began, $deleted, $suppress);
             1;
         }
         $dbh->commit;
@@ -113,7 +130,7 @@ EOS
     }
     my $ended = time;
     $dbh->begin_work;
-	$self->sth(q{
+    $self->sth(q{
         UPDATE  syncs
         SET     ended = ?, status = ?, num_records = ?
         WHERE   began = ?

@@ -61,6 +61,14 @@ sub parse {
         $marcref = $self->{'marcref'}
             or die "nothing to parse: $self";
     }
+    #if (!is_utf8($$marcref)) {
+    #    $$marcref = decode('UTF-8', $$marcref);
+    #}
+    #my $lenstr = substr($$marcref, 0, 5);
+    #if ($lenstr + 0 != length $$marcref) {
+    #    substr($$marcref, 0, 5) = sprintf '%05d', length $$marcref;  # XXX
+    #    $self->{'is_dirty'} = 1;
+    #}
     my ($leader, $fields) = marcparse($marcref);
     $self->{'leader'} = $leader;
     $self->{'fields'} = [ map {
@@ -162,7 +170,7 @@ sub stub {
         die "invalid status: $status" if $status !~ /^[a-z]$/;
         substr($leader, 5, 1) = $status;
     }
-    my @fields = $instance ? (marcfield('001', $instance->id)) : ();
+    my @fields = $instance ? (marcfield('001', $instance->hrid)) : ();
     return marcbuild($leader, \@fields);
 }
 
@@ -192,14 +200,21 @@ sub garnish {
     my ($instance, $source_record, $mapping) = @arg{qw(instance source_record mapping)};
     die 'not yet implemented: $marc->garnish(mapping => {...}, ...)'
         if $mapping && keys %$mapping;
-    my ($suppressed, $deleted) = @$instance{qw(discoverySuppress deleted)};
+    my ($id, $hrid, $sid, $suppressed, $deleted);
+    if (defined $instance) {
+        ($id, $hrid, $suppressed, $deleted) = @$instance{qw(id hrid discoverySuppress deleted)};
+        $sid = $source_record->id if $source_record;
+    }
+    else {
+        ($id, $hrid, $sid, $suppressed, $deleted) = @arg{qw(instance_id instance_hrid source_record_id suppressed deleted)};
+    }
     substr($self->{'leader'}, 5, 1) = 'd' if $deleted;
     $self->delete_fields(qw(001 003), sub { $_[0]->tag eq '999' && $_[0]->indicators eq 'ff' });
     $self->add_fields(
-        _make_field($self, '001', $instance->hrid),
+        _make_field($self, '001', $hrid),
         _make_field($self, '999', 'f', 'f',
-            'i' => $instance->id,
-            _optional('s' => $source_record ? $source_record->id : undef),
+            'i' => $id,
+            _optional('s' => $sid),
             _optional('z' => $suppressed ? 'suppressed' : undef),
             _optional('z' => $deleted    ? 'deleted'    : undef),
         )

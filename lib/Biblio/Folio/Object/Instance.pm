@@ -7,6 +7,11 @@ use Biblio::Folio::Site::MARC;
 
 # sub _obj_uri { '/instance-storage/instances/%s' }
 
+sub source_record {
+    my ($self) = @_;
+    return $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/formattedRecords/%s?identifier=INSTANCE');
+}
+
 sub marcref {
     my ($self, $what) = @_;
     my $r = ref $what;
@@ -68,7 +73,7 @@ sub export_marc {
     my $marc = Biblio::Folio::Site::MARC->new('marcref' => $marcref);
     $marc->parse;
     $marc->garnish('instance' => $self);
-    if (@$holdings) {
+    if ($holdings && @$holdings) {
         $marc->add_holdings(
             'holdings' => $holdings,
             'spell_out_locations' => $arg{'spell_out_locations'},
