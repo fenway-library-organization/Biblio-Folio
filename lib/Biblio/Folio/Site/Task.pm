@@ -106,10 +106,10 @@ sub worker {
     my $pkg = $site->class_for($kind, $actor, $profile);
     _use_class($pkg);
     return $self->{'workers'}{$actor} = $pkg->new(
+        %arg,
         'site' => $self->site,
         'profile' => $self->profile,
         'kind' => $kind,
-        %arg,
     );
 }
 

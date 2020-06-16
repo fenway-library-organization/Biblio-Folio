@@ -18,6 +18,7 @@ sub batch_number { @_ > 1 ? $_[0]{'batch_number'} = $_[1] : $_[0]{'batch_number'
 sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
 
 sub is_valid { @_ > 1 ? $_[0]{'is_valid'} = $_[1] : $_[0]{'is_valid'} }
+sub results { @_ > 1 ? $_[0]{'results'} = $_[1] : $_[0]{'results'} }
 sub errors { @_ > 1 ? $_[0]{'errors'} = $_[1] : $_[0]{'errors'} }
 
 sub init {
@@ -43,8 +44,11 @@ sub iterate {
     local $_;
     unshift @_, 'file' if @_ % 2;
     my %arg = (%$self, @_);
-    my ($site, $kind, $file, $fh, $only, $batch_size, $limit, $begin, $before, $each, $error, $after, $end) = @arg{qw(site kind file fh only batch_size limit begin before each error after end)};
-    die "no callback" if !defined $each;
+    my $hooks = $arg{'hooks'};
+    my $only = $arg{'only'};  # The only batch(es) to iterate over
+    my ($site, $kind, $file, $fh, $batch_size, $limit) = @arg{qw(site kind file fh batch_size limit)};
+    my ($begin, $before, $each, $error, $after, $end) = @$hooks{qw(begin before each error after end)};
+    # die "no callback" if !defined $each;
     $batch_size ||= 1;
     my $max_errors = $limit ? $limit->{'errors'} : 1<<20;
     my $max_consecutive_errors = $limit ? $limit->{'consecutive_errors'} : 100;
@@ -53,24 +57,23 @@ sub iterate {
         $fh = $self->{'fh'} = $self->_open($file);
     }
     $only = _int_set_str_to_hash($only) if defined $only;
-    my $batch_num = 0;
-    my @batch;
-    my $success = 0;
-    my $n = 0;
-    my %params = ('source' => $self, 'batch' => \@batch, map { $_ => $arg{$_} } qw(file format limit offset profile site kind));
-    my $proc = sub {
-        _run_hooks('begin'  => $begin,  %params, 'batch_num' => $batch_num, 'n' => $n, @_) if $n == 1;
-        _run_hooks('before' => $before, %params, 'batch_num' => $batch_num, 'n' => $n, @_);
-        _run_hooks('each'   => $each,   %params, 'batch_num' => $batch_num, 'n' => $n, @_);
-        _run_hooks('after'  => $after,  %params, 'batch_num' => $batch_num, 'n' => $n, @_);
-        @batch = ();
-    };
-    my $obj;
+    my $batch_num = 0;   # Batch number (1..)
+    my $n = 0;  # Record number within the batch (1..)
     my $num_consecutive_errors = 0;
     my $num_errors = 0;
+    my @batch;
+    my $success = 0;
+    my %params = ('source' => $self, 'batch' => \@batch, map { $_ => $arg{$_} } qw(file format limit offset profile site kind));
+    my $proc = sub {
+        _run_hooks('begin'  => $begin,  %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $n == 1;
+        _run_hooks('before' => $before, %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $before;
+        _run_hooks('each'   => $each,   %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $each;
+        _run_hooks('after'  => $after,  %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $after;
+        @batch = ();
+    };
     eval {
         while (1) {
-            my $ok;
+            my ($obj, $ok);
             eval {
                 $obj = $self->next($fh);
                 ($ok, $num_consecutive_errors) = (1, 0);
@@ -96,7 +99,7 @@ sub iterate {
                 $num_consecutive_errors++;
                 my $die = 1;
                 eval {
-                    _run_hooks('error' => $error, %params, 'n' => $n);
+                    _run_hooks('error' => $error, %params, 'n' => $n, 'num_errors' => $num_errors);
                     $die = 0;
                 };
                 if ($die) {
@@ -117,7 +120,7 @@ sub iterate {
                 $proc->();
             }
         }
-        _run_hooks('end' => $end, %params, 'n' => $n) if $n > 0;
+        _run_hooks('end' => $end, %params, 'n' => $n, 'num_errors' => $num_errors) if $n > 0;
     };
     $self->done(%arg);
     $self->results({
