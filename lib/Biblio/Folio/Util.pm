@@ -336,7 +336,8 @@ sub _use_class {
 
 sub _req {
     my ($k, $v) = @_;
-    die if !defined $v;
+    die "required field $k not present"
+        if !defined $v;
     return ($k => $v);
 }
 

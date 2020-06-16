@@ -40,6 +40,10 @@ sub init {
 sub site_names {
     my ($self) = @_;
     my $list = $self->file('site.list');
+    open my $fh, '<', $list or die "open $list: $!";
+    my @names = grep { /^\s*[^\n#]/ } <$fh>;
+    chomp @names;
+    return @names;
 }
 
 sub file {

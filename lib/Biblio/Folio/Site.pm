@@ -261,7 +261,7 @@ sub local_db {
     my $self = shift;
     my $name = shift;
     my $file = $self->path("var/db/$name.db");
-    return $self->{'_db'}{$name} ||= Biblio::Folio::Site::LocalDB->new(
+    return $self->{'local_db'}{$name} ||= Biblio::Folio::Site::LocalDB->new(
         'site' => $self,
         'name' => $name,
         'file' => $file,
@@ -422,7 +422,7 @@ sub searcher {
     #
     die "unrecognized argument" if @_ % 2;
     my ($self, $kind, %term) = @_;
-    my (%param, %arg, %cls2arg);
+    my (%param, %arg, %obj, %cls2arg);
     my %atsy = (
         'query'      => \%param,
         'offset'     => \%param,
@@ -430,8 +430,8 @@ sub searcher {
         'uri'        => \%arg,
         'file'       => ['ByIdFile'],
         'set'        => ['ByIdSet'],
-        'id_field'   => \%param,  # XXX ['ByIdFile', 'ByIdSet'],
-        'batch_size' => \%param,  # XXX ['ByIdFile', 'ByIdSet'],
+        'id_field'   => \%arg,  # XXX ['ByIdFile', 'ByIdSet'],
+        'batch_size' => \%arg,  # XXX ['ByIdFile', 'ByIdSet'],
     );
     # Look for things that aren't search terms
     foreach my $k (keys %term) {
@@ -490,6 +490,8 @@ sub local_source_database {
         'file' => $file,
         'site' => $self,
     );
+### my ($self) = @_;
+### return $self->local_db('source-records');
 }
 
 sub object {

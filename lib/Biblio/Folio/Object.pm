@@ -3,10 +3,11 @@ package Biblio::Folio::Object;
 use strict;
 use warnings;
 
+use Biblio::Folio::Util qw(_camel _unbless);
+use String::ShellQuote qw(shell_quote);
+
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
-
-use Biblio::Folio::Util qw(_camel _unbless);
 
 our $AUTOLOAD;
 
@@ -135,9 +136,14 @@ sub property {
 }
 
 sub AUTOLOAD {
-    die if @_ > 1;
     my ($self) = @_;
     (my $called_as = $AUTOLOAD) =~ s/.*:://;
+    if (@_ > 1) {
+        my $pkg = ref $self;
+        my ($caller_pkg, $caller_file, $caller_line, $caller_sub) = caller(1);
+        my $params = join(', ', map { ref($_) ? $_ : shell_quote($_) } @_[1..$#_]);
+        die "${pkg}::${called_as}($params) called on $self from ${caller_pkg}::${caller_sub} at $caller_file line $caller_line";
+    }
     # NOTE:
     #   ($key, $val) = (key under which the returned value is stored, the returned value)
     #       ('title', '...')

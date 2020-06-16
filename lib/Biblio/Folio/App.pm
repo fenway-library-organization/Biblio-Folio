@@ -83,7 +83,7 @@ sub cmd_status {
     my ($self) = @_;
     my $site = $self->orient;
     my $state = $site->state;
-	print $self->json->encode($state);
+    print $self->json->encode($state);
 }
 
 sub cmd_login {
@@ -123,6 +123,27 @@ EOS
     }
 }
 
+sub cmd_config {
+    my ($self) = @_;
+    my ($site, %arg) = $self->orient;
+    my %config;
+    if ($site) {
+        %config = %{ $site->config, %$site };
+        $config{'endpoint'}{'password'} =~ tr/./*/;
+        delete $config{$_} for grep { ref($_) !~ /^(HASH|ARRAY)?$/ } keys %config;
+    }
+    my $argv = $self->argv;
+    if (!@$argv) {
+        print YAML::XS::Dump(\%config);
+    }
+    elsif (@$argv > 1) {
+        usage;
+    }
+    else {
+        print YAML::XS::Dump($config{$argv->[0]});
+    }
+}
+
 sub cmd_get {
     my ($self) = @_;
     my $site = $self->orient;
@@ -148,7 +169,7 @@ sub cmd_get {
 
 sub cmd_search {
     my ($self) = @_;
-    my ($site, %arg) = $self->orient(':fetch');
+    my ($site, %arg) = $self->orient(':search');
     my $argv = $self->argv;
     usage "search [-m OFFSET] [-z LIMIT] [-o ORDERBY] URI CQL" if @$argv != 2;
     my ($uri, $query) = @$argv;
@@ -256,7 +277,7 @@ sub cmd_instance_get {
 
 sub cmd_instance_search {
     my ($self) = @_;
-    my $site = $self->orient;
+    my $site = $self->orient(':search');
     my $argv = $self->argv;
     usage "instance search CQL" if @$argv != 1;
     my ($cql) = @$argv;
@@ -320,7 +341,7 @@ sub cmd_harvest {
     my ($self) = @_;
     my ($all, $query, $batch_size, $spell_out_locations, $use_srdb);
     my ($site, %arg) = $self->orient(
-        qw(:fetch !offset !order-by),
+        qw(:search !offset !order-by),
         qw(:formats !as-text),
         'a|all' => \$all,
         'q|query=s' => \$query,
@@ -576,7 +597,7 @@ sub cmd_source_search {
     my ($self) = @_;
     my $deleted;
     my ($site, %arg) = $self->orient(
-        qw(:fetch),
+        qw(:search),
         qw(:formats !as-text),
         'd|deleted' => \$deleted,
     );
@@ -991,7 +1012,7 @@ sub cmd_group_get {
 
 sub cmd_user_search {
     my ($self) = @_;
-    my ($site, %arg) = $self->orient(':fetch');
+    my ($site, %arg) = $self->orient(':search');
     my $argv = $self->argv;
     usage "user search CQL" if @$argv != 1;
     my ($query) = @$argv;
@@ -1560,7 +1581,7 @@ sub orient {
             'v|verbose' => \$self->{'verbose'},
             'n|dry-run' => \$self->{'dryrun'},
         },
-        'fetch' => {
+        'search' => {
             'm|offset=s' => \$arg{'offset'},
             'z|limit=i' => \$arg{'limit'},
             'o|order-by=s' => \$arg{'order_by'},
@@ -1630,16 +1651,18 @@ sub orient {
         $self->site($site);
     }
     my $cmd = $self->command;
-    if ($cmd ne 'login') {
+    if ($site && $cmd ne 'login') {
         $self->login_if_necessary($site);
         # print STDERR "Reusing login for $site_name\n"
         #     if !login_if_necessary($site);
     }
     if (wantarray) {
+        # list context
         $DB::single = 1;
         return ($site, %arg);
     }
     else {
+        # scalar or void context
         $self->usage if grep { defined $arg{$_} } keys %arg;
         $DB::single = 1;
         return $site;
