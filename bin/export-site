@@ -1,0 +1,597 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use lib '/usr/local/folio/lib';
+
+use Biblio::Folio;
+use Biblio::Folio::Util qw(_utc_datetime);
+use Biblio::LDP;
+
+use Time::HiRes qw(time);
+use JSON;
+use Encode qw(decode encode);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+# Phases
+use constant BEGINNING => 0;
+use constant RUNNING   => 1;
+use constant ENDING    => 2;
+
+sub usage;
+sub fatal;
+sub unindent;
+
+my $root = '/usr/local/folio';
+
+my ($all, $id_file, $skip_file, $time_file, $time_ref, $query);
+my ($spell_out_locations, $use_ldp, $use_srdb, $sync_srdb, $include_suppressed, $out_file, $err_file, $comment, $verbose, $dryrun);
+my $offset;
+my $small_batch_size = 25;
+my $large_batch_size = 1000;
+GetOptions(
+    'a|all' => \$all,
+    'q|query=s' => \$query,
+    'l|use-ldp' => \$use_ldp,
+    'i|id-file=s' => \$id_file,
+    'o|output-file=s' => \$out_file,
+    'e|errors-file=s' => \$err_file,
+    't|time-file=s' => \$time_file,
+    'r|time=s' => \$time_ref,
+    'k|batch-size=i' => \$small_batch_size,
+    'M|maximum-instance-count=i' => \$large_batch_size,
+    'L|spell-out-locations' => \$spell_out_locations,
+    'b|use-local-source-db' => \$use_srdb,
+    'x|include-suppressed' => \$include_suppressed,
+    'S|skip-file=s' => \$skip_file,
+    'y|sync-local-source-db' => sub { $sync_srdb = $use_srdb = 1 },
+    'm|comment=s' => \$comment,
+    'v|verbose' => \$verbose,
+    'n|dry-run' => \$dryrun,
+);
+
+usage if @ARGV != 1;
+my $site_name = shift;
+$site_name =~ s/^[@]//;
+
+my ($cancelled, $failed);
+
+$SIG{'TERM'} = $SIG{'INT'} = $SIG{'QUIT'} = sub { $cancelled = 1 };
+
+my %skip;
+if (defined $skip_file) {
+    print STDERR "Reading skip file...";
+    open my $fh, '<', $skip_file or fatal "open $skip_file: $!";
+    while (<$fh>) {
+        chomp;
+        $skip{$_} = 1;
+    }
+    printf STDERR "done (%d records)\n", scalar(keys %skip);
+}
+
+# TODO
+### fatal "harvesting without using the local source record DB is not yet implemented"
+###     if !$use_srdb;
+### fatal "harvesting without using LDP is not yet implemented"
+###     if !$use_ldp;
+
+my $folio = Biblio::Folio->new('root' => $root);
+my $site = $folio->site($site_name);
+my ($local_source_db, $exports_db, $ldp);
+
+my $json = JSON->new;
+
+my $t0 = my $tstart = time;
+if ($sync_srdb) {
+    print STDERR "Refreshing local source record DB\n";
+    sync_local_source_db();
+    printf STDERR "Refresh finished in %d second(s)\n", time - $tstart;
+    $tstart = time;
+}
+
+$site->dont_cache(qw(instance source_record holdings_record item));
+
+my ($out_fh, $err_fh);
+my %counter = map { $_ => 0 } qw(batch seen instance error nonmarc suppressed holdings skip);
+my %id2error;
+
+if (!defined $out_file || $out_file eq '-' || $out_file eq '/dev/stdout') {
+    $out_fh = \*STDOUT;
+}
+else {
+    open $out_fh, '>', $out_file
+        or fatal "open $out_file for writing: $!";
+}
+
+if ($all) {
+    harvest_all();
+}
+elsif ($query) {
+    harvest_by_query($query);
+}
+elsif ($id_file) {
+    harvest_by_file($id_file);
+}
+elsif ($time_file) {
+    harvest_by_time_file($time_file);
+}
+elsif ($time_ref) {
+    harvest_by_time($time_ref);
+}
+else {
+    harvest_incremental();
+}
+printf STDERR "All done: total elapsed time %s\n", sec2dur(time - $tstart);
+
+# --- Main functions
+
+sub harvest_all {
+    print STDERR "Performing query...";
+    my $sql = q{SELECT id, source, data FROM inventory_instances ORDER BY id};
+    $sql .= qq{ OFFSET $offset} if defined $offset;
+    $sql .= qq{ LIMIT   $large_batch_size} if defined $large_batch_size;
+    my $sth = ldp()->query($sql);
+    printf STDERR "done in %.1f seconds\n", time - $tstart;
+    print STDERR "Timer reset (ignore time required for query)\n";
+    $tstart = time;
+    run('all', sub {
+        _harvest_from_ldp_using_executed_sth($sth);
+    });
+}
+
+sub harvest_incremental {
+    my $last_export = last_export();
+    if ($use_ldp) {
+        my $ldp = ldp();
+        my $sql = ldp_incremental_sql();
+        my $sth = $ldp->query($sql, $ldp->timestamp($last_export));
+        run('incremental', sub {
+            _harvest_from_ldp_using_executed_sth($sth);
+        });
+    }
+    elsif ($use_srdb) {
+        my $utc_last_export = _utc_datetime($last_export);
+        my $searcher = $site->searcher('instance')->query("metadata.updatedDate > $utc_last_export")->limit($large_batch_size);
+        run('incremental', sub {
+            _harvest_using_instance_searcher($searcher);
+        });
+    }
+    else {
+        die "not implemented";
+        #my $harvester = $site->harvester('instances_with_holdings');
+        #$harvester->harvest('since' => $last_export);
+    }
+}
+
+sub harvest_by_query {
+    my ($query) = @_;
+    if ($use_srdb) {
+        my $searcher = $site->searcher('instance')->query($query)->limit($large_batch_size);
+        run('special', sub {
+            _harvest_using_instance_searcher($searcher);
+        });
+    }
+    else {
+        die "not implemented";
+    }
+}
+
+sub harvest_by_file {
+    my ($f) = @_;
+    my $searcher = $site->searcher('instance')->by('file' => $f)->limit($small_batch_size);
+    run('special', sub {
+        _harvest_using_instance_searcher($searcher);
+    });
+}
+
+# --- Supporting functions
+
+sub run {
+    my ($type, $sub) = @_;
+    my $exports_db;
+    my $began = int($t0);
+    if (!$dryrun) {
+        $exports_db = exports_db();
+        my $sth = $exports_db->sth(q{
+            INSERT  INTO bib_exports
+                    (type, began, status, comment, num_records)
+            VALUES  (?, ?, 'running', ?, 0);
+        });
+        $sth->execute($type, $began, $comment);
+    }
+    show_progress(BEGINNING);
+    my $ok;
+    eval {
+        $DB::single = 1;
+        $sub->();
+        $ok = 1;
+    };
+    $DB::single = 1;
+    my $status = $ok ? 'finished' : $cancelled ? 'cancelled' : 'failed';
+    $failed = ($status eq 'failed');
+    show_progress(ENDING);
+    my $ended = int(time);
+    my $num_records = $counter{'instance'} - $counter{'nonmarc'};
+    if (!$dryrun) {
+        my $sth = $exports_db->sth(q{
+            UPDATE  bib_exports
+            SET     status = ?,
+                    ended = ?,
+                    num_records = ?
+            WHERE   began = ?
+        });
+        $sth->execute($status, $ended, $num_records, $began);
+    }
+}
+
+sub _harvest_from_ldp_using_executed_sth {
+    my ($sth) = @_;
+    my $batch = batch();
+    while (!$cancelled) {
+        my ($id, $source, $data) = $sth->fetchrow_array;
+        if (defined $id) {
+            $counter{'seen'}++;
+            if (!defined $data) {
+                # LDP doesn't have the instance data, for some reason
+                $counter{'error'}++;
+            }
+            elsif ($skip{$id}) {
+                $counter{'skip'}++;
+            }
+            else {
+                $counter{'instance'}++;
+                add_to_batch($batch, 'id' => $id, 'source' => $source, 'dataref' => \$data);
+            }
+        }
+        if ($batch->{'size'} == $small_batch_size || !defined $id) {
+            process_batch($batch);
+            last if !defined $id;
+            $batch = batch();
+        }
+    }
+    continue {
+        show_progress();
+    }
+}
+
+sub _harvest_using_instance_searcher {
+    my ($searcher) = @_;
+    my $batch = batch();
+    while (!$cancelled) {
+        my $instance = $searcher->next;
+        if ($instance) {
+            my %record = ('instance' => $instance);
+            $counter{'instance'}++;
+            $counter{'seen'}++;
+            add_to_batch($batch, 'id' => $instance->id, 'source_record' => $instance->source_record, 'instance' => $instance);
+        }
+        if ($batch->{'size'} == $small_batch_size || !defined $instance) {
+            process_batch($batch);
+            last if !defined $instance;
+            $batch = batch();
+        }
+    }
+    continue {
+        show_progress();
+    }
+}
+
+### sub old_harvest_by_file {
+###     my ($f) = @_;
+###     my $sql = q{
+###         SELECT  id, source, data
+###         FROM    inventory_instances
+###         WHERE   id IN (%s)
+###     };
+###     open my $fh, '<', $f or fatal "open $f: $!";
+###     my @ids;
+###     my %n2sth;
+###     while (!$cancelled) {
+###         my ($id, $source, $data);
+###         $id = <$fh>;
+###         if (defined $id) {
+###             $counter{'instance'}++;
+###             $counter{'seen'}++;
+###             push @ids, $id;
+###             next if @ids < $small_batch_size;
+###         }
+###         my $n = @ids
+###             or last;
+###         my $batch = batch();
+###         my $sth = $n2sth{$n} ||= ldp()->query(sprintf $sql, join(',', '?' x $n));
+###         $sth->execute(@ids);
+###         my $results = $sth->fetchall_hashref('id');
+###         while (($id, $source, $data) = $sth->fetchrow_array) {
+###             add_to_batch($batch, 'id' => $id, 'source' => $source, 'dataref' => \$data);
+###         }
+###         process_batch($batch);
+###     }
+###     continue {
+###         show_progress();
+###     }
+### }
+
+sub local_source_db {
+    return $local_source_db ||= $site->local_source_database;
+    # XXX Not yet: return $local_source_db ||= $site->local_db('source-records');
+}
+
+sub exports_db {
+    return $exports_db ||= $site->local_db('exports');
+}
+
+sub ldp {
+    return $ldp ||= Biblio::LDP->new(
+        'root' => $root . '/site/' . $site_name,
+        'name' => $site_name,
+    );
+}
+
+sub instance {
+    my ($record) = @_;
+    my ($id, $source) = @$record{qw(id source)};
+    if ($source !~ /^MARC/i) {
+        $record->{'nonmarc'} = 1;
+        $counter{'nonmarc'}++;
+        return undef;
+    }
+    my $instance = $record->{'instance'};
+    if (!defined $instance) {
+        my $dataref = $record->{'dataref'};
+        if (!$dataref) {
+            return error($record, 'no data reference!?');
+        }
+        $instance = eval { $site->instance($json->decode($$dataref)) };
+        if (!defined $instance) {
+            my ($msg) = split /\n/, $@;
+            return error($record, $msg);
+        }
+    }
+    elsif ($instance->{'discoverySuppress'}) {
+        $record->{'suppressed'} = 1;
+        $counter{'suppressed'}++;
+        undef $instance if !$include_suppressed;
+    }
+    elsif ($instance->{'deleted'}) {
+        $record->{'deleted'} = 1;
+        $counter{'deleted'}++;
+        undef $instance if !$include_suppressed;
+    }
+    return $record->{'instance'} = $instance;
+}
+
+sub batch {
+    return {
+        'number' => ++$counter{'batch'},
+        'size' => 0,
+        'records' => [],
+        'record_number_base' => $counter{'instance'},
+    };
+}
+
+sub next_batch {
+    my ($batch) = @_;
+    $batch->{'number'}++;
+    $batch->{'size'} = 0;
+    $batch->{'records'} = [];
+    $batch->{'record_number_base'} = $counter{'instance'};
+}
+
+sub add_to_batch {
+    my ($batch, %record) = @_;
+    my $n = ++$batch->{'size'};
+    my $source_record = $record{'source_record'};
+    if ($source_record) {
+        $record{'source'} ||= $source_record->{'recordType'};
+        $record{'source_record_id'} ||= $source_record->{'id'};
+        if (!defined $record{'marcref'}) {
+            my $raw = $source_record->{'rawRecord'};
+            if (defined $raw) {
+                my $marc = $raw->{'content'};
+                # my $marc = eval { encode('UTF-8', $raw->{'content'}) };
+                $record{'marcref'} = \$marc;
+            }
+        };
+    }
+    push @{ $batch->{'records'} }, {
+        %record,
+        'number_in_batch' => $n,
+        'number' => $batch->{'record_number_base'} + $n,
+    };
+}
+
+sub show_progress {
+    my ($phase) = @_;
+    $phase ||= RUNNING;
+    my $seen = $counter{'seen'};
+    my $ending = ($phase == ENDING);
+    if ($ending || $seen % 100 == 0) {
+        # $b-- if !$ending && $b;  # We're still in the middle of the batch
+        my $tdiff = int(time - $tstart);
+        my $dur = sec2dur($tdiff);
+        my $rate = $tdiff ? $counter{'instance'} / $tdiff : 0;
+        my $status = $cancelled ? 'Cancelled'
+                   : $failed    ? 'Failed'
+                   : $ending    ? 'Finished'
+                   :              'Exporting'
+                   ;
+        printf STDERR "\r%-9.9s : %4d batch : %7d instance : %7d skipped : %7d holdings : %4d error : %4d suppressed : %4d non-MARC : %s elapsed : %5.1f/sec",
+            $status, @counter{qw(batch instance skip holdings error suppressed nonmarc)}, $dur, $rate;
+        print STDERR "\n" if $ending;
+    }
+}
+
+sub sec2dur {
+    my $S = shift;
+    my ($H, $M) = (0, 0);
+    if ($S > 3600) {
+        $H = int($S / 3600);
+        $S -= $H * 3600;
+    }
+    if ($S > 60) {
+        $M = int($S / 60);
+        $S -= $M * 60;
+    }
+    return sprintf '%02d:%02d:%02d', $H, $M, $S;
+}
+
+sub process_batch {
+    my ($batch) = @_;
+    my ($batch_number, $size, $records) = @$batch{qw(number size records)};
+    my @ids;
+    my %id2instance;
+    my @instances;
+    foreach my $record (@$records) {
+        my $instance = instance($record) or next;
+        my $marcref = marcref($record) or next;
+        my $id = $instance->id;
+        $id2instance{$id} = $instance;
+        $instance->{'_marcref'} = $marcref;
+        push @ids, $id;
+    }
+    if (@ids) {
+        my $searcher = $site->searcher('holdings_record', 'instanceId' => \@ids)->limit(scalar @ids);  # , '@limit' => scalar(@ids));
+        foreach my $holdings_record ($searcher->all) {
+            my $instance_id = $holdings_record->instance_id;
+            my $instance = $id2instance{$instance_id};
+            push @{ $instance->{'_holdings'} ||= [] }, $holdings_record;
+            $counter{'holdings'}++;
+        }
+    }
+    my $n = 0;
+    my $record;
+    foreach $record (@$records) {
+        $n++;
+        my $instance = $record->{'instance'};
+        if ($instance) {
+            my $id = $instance->id;
+            my $marc = eval { $instance->export_marc('spell_out_locations' => 1, 'with_locations' => 1) };
+            if (!defined $marc) {
+                error($record, 'could not export MARC record');
+                next;
+            }
+            my $marc21 = eval { $marc->as_marc21 };
+            if (!defined $marc21) {
+                error($record, 'could not build MARC record');
+                next;
+            }
+            print $out_fh $marc21;
+        }
+        elsif ($record->{'suppressed'}) {
+        }
+        elsif ($record->{'nonmarc'}) {
+        }
+        else {
+            error($record, 'unknown reason for undefined instance');
+        }
+    }
+    continue {
+        report_error($record) if error($record);
+    }
+}
+
+sub marcref {
+    my ($record) = @_;
+    return $record->{'marcref'}
+        if defined $record->{'marcref'};
+    my $id = $record->{'id'};
+    my $marcref = eval { local_source_db()->marcref($id) }
+        or return error($record, 'no source record in local DB');
+    return $marcref;
+}
+
+sub error {
+    my $record = shift;
+    return $record->{'error'} if !@_;
+    my $msg = shift;
+    $record->{'error'} = [$counter{'instance'}, $counter{'batch'}, $record->{'id'}, $msg];
+    $counter{'error'}++;
+    return undef;
+}
+
+sub sync_local_source_db {
+    my $num_synced = 0;
+    printf STDERR "\r%8d source records synced", $num_synced;
+    local_source_db()->sync('progress' => sub {
+        ($num_synced) = @_;
+        printf STDERR "\r%8d source records synced", $num_synced
+            if $num_synced % 100 == 0;
+    });
+    printf STDERR "\r%8d source records synced\n", $num_synced;
+}
+
+sub unindent {
+    my @lines = split /\n/, shift;
+    while (@lines) {
+        shift @lines, next if $lines[0] !~ /\S/;
+        pop   @lines, next if $lines[-1] !~ /\S/;
+        last;
+    }
+    my $n = min_indent(@lines);
+    substr($_, 0, $n) = '' for @lines;
+    return join('', map { $_ . "\n" } @lines);
+}
+
+sub min_indent {
+    my $minn = 2<<16;
+    foreach (@_) {
+        m{^(\s+)} or return 0;
+        my $n = length $1;
+        $minn = $n if $n < $minn;
+    }
+    return $minn;
+}
+
+sub report_error {
+    my ($record) = @_;
+    my $err = $record->{'error'};
+    if (defined $err_file) {
+        if (!defined $err_fh) {
+            if ($err_file eq '-' || $err_file eq '/dev/stderr') {
+                $err_fh = \*STDERR;
+            }
+            else {
+                open $err_fh, '>', $err_file or fatal "open $err_file for writing: $!";
+            }
+            print $err_fh join("\t", qw(record_number batch_number instance_id error)), "\n";
+        }
+        print $err_fh join("\t", @$err), "\n";
+    }
+}
+
+sub last_export {
+    my $sth = exports_db()->sth(q{
+        SELECT  max(began)
+        FROM    bib_exports
+        WHERE   status = 'finished'
+    });
+    $sth->execute;
+    my ($began) = $sth->fetchrow_array;
+    return $began || 0;
+}
+
+sub ldp_incremental_sql {
+    q{
+        SELECT  id, source, data
+        FROM    inventory_instances
+        WHERE   id IN (
+                SELECT  id            AS bid
+                FROM    history.inventory_instances
+                WHERE   updated >= $1
+            UNION
+                SELECT  h.instance_id AS bid
+                FROM    inventory_holdings h
+                            INNER JOIN history.inventory_holdings hh ON h.id = hh.id
+                WHERE   hh.updated >= $1
+            UNION
+                SELECT  h.instance_id AS bid
+                FROM    inventory_items i
+                            INNER JOIN history.inventory_items hi ON i.id = hi.id
+                            INNER JOIN inventory_holdings h ON i.holdings_record_id = h.id
+                WHERE   hi.updated >= $1
+        )
+    };
+}
+
