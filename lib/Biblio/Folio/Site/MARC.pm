@@ -314,12 +314,10 @@ sub delete_fields {
 sub add_holdings {
     my $self = shift;
     my %arg = @_;
-    my ($holdings, $spell_out_locations, $add_items, $classifier) = @arg{qw(holdings spell_out_locations add_items classifier)};
+    my ($holdings, $spell_out_locations, $add_items) = @arg{qw(holdings spell_out_locations add_items)};
     my $num_holdings = 0;
     my $num_items = 0;
     my $fields = $self->fields;
-    # XXX Crazy FLO-specific hack -- should be done in a separate, post-processing script (or plugin)
-    my @classifier = _optional('x' => $self->_classifier);
     my @add;
     foreach my $holding (@$holdings) {
         my $location = $holding->location;
@@ -334,7 +332,6 @@ sub add_holdings {
             'b' => $locstr,
             _optional('h' => $call_number),
             _optional('z' => $suppressed ? 'suppressed' : undef),
-            @classifier,  # XXX Crazy hack
             '0' => $holding->id,
         );
         $num_holdings++;
@@ -357,31 +354,6 @@ sub delete_holdings {
     my ($self) = @_;
     $self->delete_fields('852');
     return $self;
-}
-
-sub _classifier {
-    my ($self) = @_;
-    my $fields = $self->fields;
-    my $f33x = _33x_field_subfields($fields);
-    return 'audiobook' if $f33x->{'336'}{'spw'};
-    return 'ebook' if $f33x->{'336'}{'txt'} && $f33x->{'338'}{'cr'};
-}
-
-sub _33x_field_subfields {
-    my ($fields) = @_;
-    my %f33x = map { $_ => {} } qw(336 337 338);
-    foreach (@$fields) {
-        # XXX Low-level MARC::Loop stuff
-        my $content = $_->{'content'};
-        my $tag = $content->[TAG];
-        my $f = $f33x{$tag} or next;
-        my $valref = $content->[VALREF];
-        next if $$valref !~ /\x1f2rda/;
-        if ($$valref =~ /\x1fb([^\x1d-\x1f]+)/) {
-            $f33x{$tag}{$1} = 1;
-        }
-    }
-    return \%f33x;
 }
 
 sub _make_item_fields {
