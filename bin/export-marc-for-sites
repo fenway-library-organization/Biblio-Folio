@@ -1,0 +1,272 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Cwd qw(getcwd);
+use POSIX qw(strftime);
+use String::ShellQuote;
+use Text::ParseWords;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+# Modes
+use constant FULL => 'full';
+use constant INCREMENTAL => 'incremental';
+use constant FULL_OR_INCREMENTAL => '*';
+use constant SPECIAL => 'special';
+
+my $prog = $0;
+
+my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
+
+sub blather;
+sub usage;
+sub fatal;
+
+my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
+my $mode = INCREMENTAL;
+my ($query, $file, $dryrun, $verbose, $dest, $skipfile);
+GetOptions(
+    # Export mode
+    'a|all' => sub { $mode = FULL },
+    'q|query=s' => sub { $query = $_[1]; $mode = SPECIAL },
+    'f|file=s' => sub { $file = $_[1]; $mode = SPECIAL },
+    # Other options
+    'n|dry-run' => \$dryrun,
+    'v|verbose' => \$verbose,
+    'd|destination=s' => \$dest,
+    's|skip-file=s' => \$skipfile,
+) or usage;
+if (defined $query || defined $file) {
+    usage if @ARGV != 1;
+}
+elsif (!@ARGV) {
+    @ARGV = all_sites();
+}
+
+$verbose = 1 if $dryrun;
+
+s/^\@// for @ARGV;  # Allow @SITE as well as SITE
+
+my $t0 = time;
+my $now = strftime('%Y%m%dT%H%M%SZ', gmtime $t0);
+my $cwd = getcwd;
+
+my %outboxes;
+
+# Read outboxes first, just in case they're misconfigured
+foreach my $site (@ARGV) {
+    $outboxes{$site} = site_outboxes($site);
+}
+
+# Now run the exports
+foreach my $site (@ARGV) {
+    my @bin = map { "$_/bin" } "$cwd/site/$site", $cwd, site_dir($site);
+    local $ENV{'PATH'} = join(':', @bin, $ENV{'PATH'});
+    my @files = export_site($site);
+    distribute_files($site, @files);
+}
+my $tn = time;
+
+1;
+
+# --- Support functions
+
+sub export_command_base {
+    my @cmd = ('export-marc');
+    if ($mode eq FULL) {
+        push @cmd, '-a';
+    }
+    elsif (defined $query) {
+        push @cmd, '-q', $query;
+    }
+    elsif (defined $file) {
+        push @cmd, '-f', $file;
+    }
+    push @cmd, '-v' if $verbose;
+    push @cmd, '-n' if $dryrun;
+    push @cmd, '-S' => $skipfile if defined $skipfile;
+    push @cmd, '-y';  # Sync local source record DB
+    push @cmd, '-L';  # Use fully spelled-out location names
+    return @cmd;
+}
+
+sub export_site {
+    my ($site) = @_;
+    my $outroot = site_exports_dir($site);
+    my ($tmpdir,  $outdir ) = map { defined $dest ? "$dest/export-$now-$site" : "$outroot/$_/$now" } qw(tmp new);
+    my ($tmpbase, $outbase) = map { "$_/$now" } $tmpdir, $outdir;
+    my ($tmpmarc, $outmarc) = map { "$_.mrc.gz" } $tmpbase, $outbase;
+    my ($tmperr,  $outerr ) = map { "$_.err" } $tmpbase, $outbase;
+    blather "----------------------------------------------------------------------------";
+    blather "Site: $site";
+    xmkdir($tmpdir, $outdir);
+    my @cmd = (
+        export_command_base(),
+        '-e' => $tmperr,
+        $site
+    );
+    my $cmd = join(' ',
+        (map { shell_quote($_) } @cmd),
+        qw(| postproc | gzip >),
+        $tmpmarc
+    );
+    if ($dryrun) {
+        blather <<"EOS" if !defined $dest;
+Temporary files:
+  tmpdir  = $tmpdir
+  tmpmarc = $tmpmarc
+  tmperr  = $tmperr
+EOS
+        blather <<"EOS";
+Output files:
+  outdir  = $outdir
+  outmarc = $outmarc
+  outerr  = $outerr
+EOS
+    }
+    xsystem($cmd);
+    if ($tmpdir ne $outdir) {
+        xrename($tmpdir, $outdir);
+    }
+    return $dryrun ? ($tmpmarc, $tmperr) : glob("$outdir/*");
+}
+
+sub distribute_files {
+    my ($site, @files) = @_;
+    foreach my $m ($mode, FULL_OR_INCREMENTAL) {
+        foreach my $outbox (@{ $outboxes{$site}{$m} }) {
+            my ($odir, $ocmd) = @$outbox{qw(directory command)};
+            blather "Distributing to outbox $odir" if $verbose;
+            if (defined $ocmd) {
+                xsystem(@$ocmd, $mode, @files);
+                    # or fatal join(' ', shell_quote(@$ocmd, $mode, @files)) . ": $!";
+            }
+            elsif (-x "$odir/bin/process" && -f _) {
+                xsystem("$odir/bin/process", '-t' => "$odir/tmp", '-d' => "$odir/dest", '-m' => $mode, @files);
+                    # or fatal "$odir/bin/process @files: $!";
+            }
+            else {
+                foreach my $f (@files) {
+                    (my $name = $f) =~ s{.+/}{};
+                    xlink($f, "$odir/$name");
+                }
+            }
+        }
+    }
+}
+
+sub xlink {
+    my ($from, $to) = @_;
+    blather "Command:\n  ln $from $to";
+    return if $dryrun;
+    link $from, $to or fatal $!;
+}
+
+sub xrename {
+    my ($from, $to) = @_;
+    blather "Command:\n  mv $from $to";
+    return if $dryrun;
+    rename $from, $to or fatal $!;
+}
+
+sub xsystem {
+    my ($cmd, @args) = @_;
+    my $cmdstr = join(' ', $cmd, map { shell_quote($_) } @args);;
+    blather "Command:\n  $cmdstr";
+    if ($dryrun) {
+        1;
+    }
+    else {
+        my $err = @args ? system($cmd, @args) : system($cmd);
+        if ($err != 0) {
+            fatal $! if $err == -1;
+            $err = $? >> 8;
+            my $sig = $? & 255;
+            my $msg = $sig ? "signal $sig received" : "exit status $err";
+            blather "Export failed: $msg";
+            exit($err || 2);
+        }
+    }
+}
+
+sub all_sites {
+    my @site_export_dirs = sort glob(site_exports_dir('*'));
+    my (%site, %skip);
+    # If a site is reference by a symlink, don't export it twice!
+    foreach my $site_export_dir (@site_export_dirs) {
+        $site_export_dir =~ m{^($root/site/([^/]+))/} or fatal "wtf?";
+        my ($site_dir, $site) = ($1, $2);
+        next if $skip{$site};
+        $site{$site} = 1;
+        if (-l $site_dir) {
+            my $full_name_for_site = readlink($site_dir);
+            if (defined $full_name_for_site) {
+                delete $site{$full_name_for_site};
+                $skip{$full_name_for_site} = 1;
+            }
+            else {
+                print STDERR "$prog: warning: broken site symlink: $site_dir -> $full_name_for_site\n";
+            }
+        }
+    }
+    return sort keys %site;
+}
+
+sub site_dir {
+    my ($site) = @_;
+    return "$root/site/$site";
+}
+
+sub site_var {
+    my ($site) = @_;
+    return site_dir($site) . '/var';
+}
+
+sub site_exports_dir {
+    my ($site) = @_;
+    return site_var($site) . '/bib/exports';
+}
+
+sub site_outboxes {
+    my ($site) = @_;
+    my $expdir = site_exports_dir($site);
+    my $listfile = "$expdir/outboxes.list";
+    my %boxes;
+    open my $fh, '<', $listfile or fatal "open $listfile: $!";
+    while (<$fh>) {
+        next if /^\s*(?:#.*)?$/;  # Skip blank lines and comments
+        chomp;
+        my ($m, $dir, $cmd) = split /\s+/, $_, 3;
+        fatal "unconfigured outbox for site $site: $_"
+            if !defined $dir;
+        $m =~ s/^incr$/INCREMENTAL()/e;
+        fatal "unknown mode in outbox: $_"
+            if !$ok_mode{$m};
+        my $outbox = {
+            'mode' => $m,
+            'directory' => "$expdir/outboxes/$dir",
+            defined $cmd ? ('command' => [shellwords($cmd)]) : (),
+        };
+        push @{ $boxes{$m} ||= [] }, $outbox;
+    }
+    return \%boxes;
+}
+
+sub blather {
+    return if !$verbose;
+    my ($msg) = @_;
+    $msg =~ s{(?<=[^\x0d])\n\z}{};
+    print STDERR $msg, "\n";
+}
+
+sub xmkdir {
+    foreach my $dir (@_) {
+        next if -d $dir;
+        blather "Command:\n  mkdir $dir";
+        next if $dryrun;
+        mkdir $dir or fatal "mkdir $dir: $!";
+    }
+}
+
