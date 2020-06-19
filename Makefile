@@ -24,6 +24,6 @@ diff:
 	diff -ur bin /usr/local/folio/bin || true
 
 check:
-	@for f in bin/folio $(shell find lib -name \*.pm); do perl -Ilib -I$(PREFIX)/lib -c $$f; done
+	@for f in $(shell find bin -maxdepth 1 -type f -executable) $(shell find lib -name \*.pm); do perl -Ilib -I$(PREFIX)/lib -c $$f; done
 
 .PHONY: build install classes diff check
