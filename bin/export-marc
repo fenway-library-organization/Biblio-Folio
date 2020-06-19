@@ -28,6 +28,8 @@ sub usage;
 sub fatal;
 sub unindent;
 
+my $prog = $0;
+
 my $root = '/usr/local/folio';
 my %config = (
     'mode' => 'incremental',
@@ -64,7 +66,9 @@ GetOptions(
     'v|verbose' => \$verbose,
     'n|dry-run' => \$dryrun,
 );
-undef $out_file if $out_file eq '-' || $out_file eq '/dev/stdout';
+if (defined $out_file) {
+    undef $out_file if $out_file eq '-' || $out_file eq '/dev/stdout';
+}
 
 usage if @ARGV != 1;
 my $site_name = shift;
@@ -117,7 +121,7 @@ if (defined $postproc) {
     $postproc = shell_quote(shellwords($postproc));
     $postproc .= " > $out_file" if defined $out_file;
     open $out_fh, "|$postproc"
-        or fatal "exec $postproc: $!":
+        or fatal "exec $postproc: $!";
 }
 elsif (defined $out_file) {
     open $out_fh, '>', $out_file
@@ -156,12 +160,12 @@ if (!close $out_fh) {
         my $err = $!
             ? "error closing pipe ($!)"
             : "exit status $?";
-        fatal "command failed: $err: $postproc";
+        fatal "post-processing failed: $err: $postproc";
     }
     else {
         fatal defined($out_file)
-            ? "close output file $out_file: $!";
-            : "close standard output";
+            ? "close output file $out_file: $!"
+            : "close standard output: $!";
     }
 }
 exit 2 if $cancelled;

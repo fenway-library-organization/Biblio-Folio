@@ -45,7 +45,10 @@ elsif (!@ARGV) {
     @ARGV = all_sites();
 }
 
-$verbose = 1 if $dryrun;
+if ($dryrun) {
+    $verbose = 1;
+    print STDERR "Dry run -- no changes will be made\n";
+}
 
 s/^\@// for @ARGV;  # Allow @SITE as well as SITE
 
