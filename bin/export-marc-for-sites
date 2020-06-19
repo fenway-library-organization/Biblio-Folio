@@ -16,29 +16,32 @@ use constant INCREMENTAL => 'incremental';
 use constant FULL_OR_INCREMENTAL => '*';
 use constant SPECIAL => 'special';
 
-my $prog = $0;
-
-my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
-
 sub blather;
 sub usage;
 sub fatal;
 
+my $prog = $0;
+
+my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
+
 my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
 my $mode = INCREMENTAL;
-my ($query, $file, $dryrun, $verbose, $dest, $skipfile);
+my ($query, $id_file, $dest, $skipfile, $dryrun, $verbose, $test);
 GetOptions(
     # Export mode
-    'a|all' => sub { $mode = FULL },
+    'f|all' => sub { $mode = FULL },
     'q|query=s' => sub { $query = $_[1]; $mode = SPECIAL },
-    'f|file=s' => sub { $file = $_[1]; $mode = SPECIAL },
-    # Other options
-    'n|dry-run' => \$dryrun,
+    'i|id-file=s' => sub { $id_file = $_[1]; $mode = SPECIAL },
+    # Options shared by export-marc
+    't|test' => \$test,
     'v|verbose' => \$verbose,
-    'd|destination=s' => \$dest,
+    'n|dry-run' => \$dryrun,
     's|skip-file=s' => \$skipfile,
+    # Other options
+    'd|destination=s' => \$dest,
+    ### 'o|outbox=s' => \@outboxes,
 ) or usage;
-if (defined $query || defined $file) {
+if (defined $query || defined $id_file) {
     usage if @ARGV != 1;
 }
 elsif (!@ARGV) {
@@ -72,24 +75,23 @@ foreach my $site (@ARGV) {
 }
 my $tn = time;
 
-1;
-
 # --- Support functions
 
 sub export_command_base {
     my @cmd = ('export-marc');
     if ($mode eq FULL) {
-        push @cmd, '-a';
+        push @cmd, '-f';
     }
     elsif (defined $query) {
         push @cmd, '-q', $query;
     }
-    elsif (defined $file) {
-        push @cmd, '-f', $file;
+    elsif (defined $id_file) {
+        push @cmd, '-i', $id_file;
     }
+    push @cmd, '-t' if $test;
     push @cmd, '-v' if $verbose;
     push @cmd, '-n' if $dryrun;
-    push @cmd, '-S' => $skipfile if defined $skipfile;
+    push @cmd, '-s' => $skipfile if defined $skipfile;
     push @cmd, '-y';  # Sync local source record DB
     push @cmd, '-L';  # Use fully spelled-out location names
     return @cmd;
@@ -139,7 +141,7 @@ EOS
 sub distribute_files {
     my ($site, @files) = @_;
     foreach my $m ($mode, FULL_OR_INCREMENTAL) {
-        foreach my $outbox (@{ $outboxes{$site}{$m} }) {
+        foreach my $outbox (@{ $outboxes{$site}{$m} || [] }) {
             my ($odir, $ocmd) = @$outbox{qw(directory command)};
             blather "Distributing to outbox $odir" if $verbose;
             if (defined $ocmd) {

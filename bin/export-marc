@@ -15,6 +15,14 @@ use Encode qw(decode encode);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
+# Modes
+use constant FULL        => 'full';
+use constant INCREMENTAL => 'incremental';
+use constant SPECIAL     => 'special';
+
+# Other types (for recording in exports.db)
+use constant TEST        => 'test';
+
 # Phases
 use constant BEGINNING => 'beginning';
 use constant INSTANCES => 'instances';
@@ -24,51 +32,60 @@ use constant FINISHED  => 'finished';
 use constant CANCELLED => 'cancelled';
 use constant FAILED    => 'failed';
 
+sub blather;
 sub usage;
 sub fatal;
-sub unindent;
 
 my $prog = $0;
 
-my $root = '/usr/local/folio';
+my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
 my %config = (
-    'mode' => 'incremental',
+    'mode' => INCREMENTAL,
     'small_batch_size' => 25,
     'large_batch_size' => 1000,
 );
 
-my ($all, $id_file, $skip_file, $time_file, $time_ref, $query, $postproc);
-my ($spell_out_locations, $use_ldp, $use_srdb, $sync_srdb, $include_suppressed, $include_deleted, $out_file, $err_file, $comment, $verbose, $dryrun);
+my ($full, $id_file, $skip_file, $query, $postproc);
+my ($spell_out_locations, $use_ldp, $use_srdb, $sync_srdb, $out_file, $comment, $verbose, $dryrun, $test);
 my $offset;
 my $small_batch_size = 25;
 my $large_batch_size = 1000;
+my ($include_suppressed, $include_deleted) = (1, 1);
+my $err_file;
 GetOptions(
     # Modes (default is incremental)
-    'a|all' => \$all,
+    'f|full' => \$full,
     'q|query=s' => \$query,
-    'f|id-file=s' => \$id_file,
+    'i|id-file=s' => \$id_file,
+    # Options shared by export-marc-for-sites
+    't|test' => \$test,
+    'v|verbose' => \$verbose,
+    'n|dry-run' => \$dryrun,
+    's|skip-file=s' => \$skip_file,
     # Everything else
     'p|post-process-command=s' => \$postproc,
-    'S|skip-file=s' => \$skip_file,
     'l|use-ldp' => \$use_ldp,
     'b|use-local-source-db' => \$use_srdb,
     'y|sync-local-source-db' => sub { $sync_srdb = $use_srdb = 1 },
-    'x|include-suppressed' => \$include_suppressed,
-    'd|include-deleted' => \$include_deleted,
+    'X|exclude-suppressed' => sub { $include_suppressed = 0 },
+    'D|exclude-deleted' => sub { $include_deleted = 0 },
     'o|output-file=s' => \$out_file,
     'e|errors-file=s' => \$err_file,
-    't|time-file=s' => \$time_file,
-    'r|time=s' => \$time_ref,
     'k|batch-size=i' => \$small_batch_size,
     'M|maximum-instance-count=i' => \$large_batch_size,
     'L|spell-out-locations' => \$spell_out_locations,
     'm|comment=s' => \$comment,
-    'v|verbose' => \$verbose,
-    'n|dry-run' => \$dryrun,
-);
+) or usage;
+
 if (defined $out_file) {
     undef $out_file if $out_file eq '-' || $out_file eq '/dev/stdout';
 }
+if (!defined $err_file) {
+    usage "Option -v requires option -e FILE when standard error is not a terminal"
+        if $verbose && !-t STDERR;
+}
+usage "Full exports (option -f) require LDP (option -l)"
+    if $full && !$use_ldp;
 
 usage if @ARGV != 1;
 my $site_name = shift;
@@ -82,7 +99,7 @@ $SIG{'TERM'} = $SIG{'INT'} = $SIG{'QUIT'} = sub { $cancelled = 1 };
 
 my %skip;
 if (defined $skip_file) {
-    print STDERR "Reading skip file...";
+    blather "Reading skip file...";
     open my $fh, '<', $skip_file or fatal "open $skip_file: $!";
     while (<$fh>) {
         chomp;
@@ -105,7 +122,7 @@ my $json = JSON->new;
 
 my $t0 = my $tstart = time;
 if ($sync_srdb) {
-    print STDERR "Refreshing local source record DB\n";
+    blather "Refreshing local source record DB\n";
     sync_local_source_db();
     printf STDERR "Refresh finished in %d second(s)\n", time - $tstart;
     $tstart = time;
@@ -131,23 +148,14 @@ else {
     $out_fh = \*STDOUT;
 }
 
-if ($all) {
-    usage if !$use_ldp;
-    harvest_all();
+if ($full) {
+    harvest_full();
 }
 elsif ($query) {
     harvest_by_query($query);
 }
 elsif ($id_file) {
     harvest_by_file($id_file);
-}
-elsif ($time_file) {
-    die "not yet implemented";
-    harvest_by_time_file($time_file);
-}
-elsif ($time_ref) {
-    die "not yet implemented";
-    harvest_by_time($time_ref);
 }
 else {
     harvest_incremental();
@@ -173,16 +181,16 @@ exit 3 if $failed;
 
 # --- Main functions
 
-sub harvest_all {
-    print STDERR "Performing query...";
+sub harvest_full {
+    blather "Performing query...";
     my $sql = q{SELECT id, source, data FROM inventory_instances ORDER BY id};
     $sql .= qq{ OFFSET $offset} if defined $offset;
     $sql .= qq{ LIMIT   $large_batch_size} if defined $large_batch_size;
     my $sth = ldp()->query($sql);
     printf STDERR "done in %.1f seconds\n", time - $tstart;
-    print STDERR "Timer reset (ignore time required for query)\n";
+    blather "Timer reset (ignore time required for query)\n";
     $tstart = time;
-    run('all', sub {
+    run(FULL, sub {
         _harvest_from_ldp_using_executed_sth($sth);
     });
 }
@@ -193,7 +201,7 @@ sub harvest_incremental {
         my $ldp = ldp();
         my $sql = ldp_incremental_sql();
         my $sth = $ldp->query($sql, $ldp->timestamp($last_export));
-        run('incremental', sub {
+        run(INCREMENTAL, sub {
             _harvest_from_ldp_using_executed_sth($sth);
         });
     }
@@ -203,14 +211,14 @@ sub harvest_incremental {
         my $instances_searcher = $site->searcher('instance')->query($cql)->limit($large_batch_size);
         my $holdings_searcher = $site->searcher('holdings_record')->query($cql)->limit($small_batch_size);
         #my $items_searcher = $site->searcher('item')->query($cql)->limit($small_batch_size);
-        run('incremental', sub {
-            print STDERR "Export new, updated, and deleted instances\n";
+        run(INCREMENTAL, sub {
+            blather "Export new, updated, and deleted instances\n";
             $phase = INSTANCES;
             _harvest_using_instance_searcher($instances_searcher);
-            print STDERR "\nExport new, updated, and deleted holdings records\n";
+            blather "\nExport new, updated, and deleted holdings records\n";
             $phase = HOLDINGS;
             _harvest_using_holdings_searcher($holdings_searcher);
-            #print STDERR "\nExport new, updated, and deleted items\n";
+            #blather "\nExport new, updated, and deleted items\n";
             #$phase = ITEMS;
             #_harvest_using_item_searcher($items_searcher);
         });
@@ -226,7 +234,7 @@ sub harvest_by_query {
     my ($query) = @_;
     if ($use_srdb) {
         my $searcher = $site->searcher('instance')->query($query)->limit($large_batch_size);
-        run('special', sub {
+        run(SPECIAL, sub {
             _harvest_using_instance_searcher($searcher);
         });
     }
@@ -238,7 +246,7 @@ sub harvest_by_query {
 sub harvest_by_file {
     my ($f) = @_;
     my $searcher = $site->searcher('instance')->by('file' => $f)->limit($small_batch_size);
-    run('special', sub {
+    run(SPECIAL, sub {
         _harvest_using_instance_searcher($searcher);
     });
 }
@@ -246,7 +254,8 @@ sub harvest_by_file {
 # --- Supporting functions
 
 sub run {
-    my ($type, $sub) = @_;
+    my ($mode, $sub) = @_;
+    $mode = TEST if $test;
     my $exports_db;
     my $began = int($t0);
     if (!$dryrun) {
@@ -256,7 +265,7 @@ sub run {
                     (type, began, status, comment, num_records)
             VALUES  (?, ?, 'running', ?, 0);
         });
-        $sth->execute($type, $began, $comment);
+        $sth->execute($mode, $began, $comment);
     }
     my $ok;
     eval {
@@ -521,7 +530,7 @@ sub show_progress {
         my $rate = $tdiff ? $counter{'instance'} / $tdiff : 0;
         printf STDERR "\r   %-9.9s : %4d batch : %7d instance : %7d skipped : %7d holdings : %4d error : %4d suppressed : %4d deleted : %4d non-MARC : %s elapsed : %5.1f/sec",
             lc $phase, @counter{qw(batch instance skip holdings error suppressed deleted nonmarc)}, $dur, $rate;
-        print STDERR "\n" if $ending;
+        blather "\n" if $ending;
     }
 }
 
@@ -626,53 +635,29 @@ sub sync_local_source_db {
     printf STDERR "\r%8d source records synced\n", $num_synced;
 }
 
-sub unindent {
-    my @lines = split /\n/, shift;
-    while (@lines) {
-        shift @lines, next if $lines[0] !~ /\S/;
-        pop   @lines, next if $lines[-1] !~ /\S/;
-        last;
-    }
-    my $n = min_indent(@lines);
-    substr($_, 0, $n) = '' for @lines;
-    return join('', map { $_ . "\n" } @lines);
-}
-
-sub min_indent {
-    my $minn = 2<<16;
-    foreach (@_) {
-        m{^(\s+)} or return 0;
-        my $n = length $1;
-        $minn = $n if $n < $minn;
-    }
-    return $minn;
-}
-
 sub report_error {
     my ($record) = @_;
     my $err = $record->{'error'};
-    if (defined $err_file) {
-        if (!defined $err_fh) {
-            if ($err_file eq '-' || $err_file eq '/dev/stderr') {
-                $err_fh = \*STDERR;
-            }
-            else {
-                open $err_fh, '>', $err_file or fatal "open $err_file for writing: $!";
-            }
-            print $err_fh join("\t", qw(phase record_number batch_number instance_id error)), "\n";
+    if (!defined $err_fh) {
+        if ($err_file eq '-' || $err_file eq '/dev/stderr') {
+            $err_fh = \*STDERR;
         }
-        print $err_fh join("\t", @$err), "\n";
+        else {
+            open $err_fh, '>', $err_file or fatal "open $err_file for writing: $!";
+        }
+        print $err_fh join("\t", qw(phase record_number batch_number instance_id error)), "\n";
     }
+    print $err_fh join("\t", @$err), "\n";
 }
 
 sub last_export {
     my $sth = exports_db()->sth(q{
         SELECT  max(began)
         FROM    bib_exports
-        WHERE   type IN ('full', 'incremental')
+        WHERE   type IN (?, ?)
         AND     status = 'finished'
     });
-    $sth->execute;
+    $sth->execute(FULL, INCREMENTAL);
     my ($began) = $sth->fetchrow_array;
     return $began || 0;
 }
@@ -702,21 +687,26 @@ sub ldp_incremental_sql {
     };
 }
 
+sub blather {
+    print STDERR @_ if $verbose;
+}
+
 sub usage {
+    print STDERR "$prog: @_\n" if @_;
     print STDERR <<"EOS";
 usage: $prog [OPTION...] [SITE...]\n";
 export type (default is an incremental export):
-  -a              perform a full export
+  -f              perform a full export
   -q QUERY        export by query (single site only)
-  -f FILE         export by query (single site only)
+  -i FILE         export by file of instance IDs (single site only)
 options:
   -p COMMAND      run output through post-processing command [1]
-  -S SKIPFILE     exclude instances by ID (i.e., UUID)
+  -s SKIPFILE     exclude instances by ID (i.e., UUID)
   -l              use LDP to decide what to export
   -b              fetch source records from local DB
   -y              sync local source DB before exporting
-  -x              include suppressed instances and holdings records [2]
-  -d              include deleted instances and holdings records [3]
+  -X              exclude suppressed instances and holdings records [2]
+  -D              exclude deleted instances and holdings records [3]
   -o              output file
   -e              errors file [4]
   -t FILE         export changes since last-modified time of FILE (mtime)
@@ -731,13 +721,21 @@ options:
 notes:
   [1] COMMAND may include arguments and/or special shell syntax (redirects,
       pipes, etc.).
-  [2] Suppressed instances will be indicated by the code "d" in the record
-      status in the leader (i.e., byte 5); suppressed holdings records will
-      have an additional subfield \$z containing the code "suppressed" in their
-      852 field.
-  [3] Any deleted objects that are encountered (doubtful) will be indicated
-      as for suppressed instances and holdings records, except that holdings
-      records will have "deleted" in 852 \$z instead of "suppressed".
+  [2] Unless this option is given, suppressed instances will be included, and
+      will be indicated by the code "d" in the record status in the leader
+      (i.e., byte 5); suppressed holdings records will have an additional
+      subfield \$z containing the code "suppressed" in their 852 field.
+  [3] Unless this option is given, any deleted objects that are encountered
+      (doubtful) will be included, and will be indicated as for suppressed
+      instances and holdings records, except that holdings records will have
+      "deleted" in 852 \$z instead of "suppressed".
+  [4] If this option is not given, errors will be silently discarded.
 EOS
     exit 1;
 }
+
+sub fatal {
+    print STDERR "$prog: @_\n";
+    exit 2;
+}
+
