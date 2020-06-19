@@ -3,7 +3,7 @@ package Biblio::Folio::Site::Searcher;
 use strict;
 use warnings;
 
-use Biblio::Folio::Util qw(_kind2pkg _cql_query);
+use Biblio::Folio::Util qw(_kind2pkg _cql_query _use_class);
 
 # my $searcher = Biblio::Folio::Site::Searcher->new(
 #     'kind' => $kind,    # E.g., 'user' or 'source_record'
@@ -25,6 +25,8 @@ use Biblio::Folio::Util qw(_kind2pkg _cql_query);
 #     my ($obj) = @_;
 # });
 
+my %have_used;
+
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
@@ -34,21 +36,21 @@ sub new {
 
 sub by {
     my ($self, %arg) = @_;
+    my $pkg;
     if ($arg{'file'}) {
-        return Biblio::Folio::Site::Searcher::ByIdFile->new(
-            %$self,
-            %arg,
-        );
+        $pkg = 'Biblio::Folio::Site::Searcher::ByIdFile';
     }
     elsif ($arg{'set'}) {
-        return Biblio::Folio::Site::Searcher::ByIdset->new(
-            %$self,
-            %arg,
-        );
+        $pkg = 'Biblio::Folio::Site::Searcher::ByIdSet';
     }
     else {
         die;
     }
+    _use_class($pkg) if !$have_used{$pkg}++;
+    return $pkg->new(
+        %$self,
+        %arg,
+    );
 }
 
 sub init {
