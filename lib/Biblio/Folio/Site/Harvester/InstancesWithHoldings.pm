@@ -43,11 +43,11 @@ sub ldp {
     return $self->{'ldp'} ||= Biblio::LDP->new('root' => $site->root, 'name' => $site->name);
 }
 
-sub local_source_db {
+sub local_instances_db {
     my $self = shift;
-    return $self->{'local_source_db'} = shift if @_;
+    return $self->{'local_instances_db'} = shift if @_;
     my $site = $self->site;
-    return $self->{'local_source_db'} ||= $site->local_source_database;
+    return $self->{'local_instances_db'} ||= $site->local_instances_database;
 }
 
 sub query { @_ > 1 ? $_[0]{'query'} = $_[1] : $_[0]{'query'} }
@@ -135,11 +135,11 @@ sub gather {
         my $batch_size = $arg{'batch_size'} || $self->batch_size;
         my $n = 0;
         while (1) {
-            if ($arg{'local_source_db'}) {
-                my $lsrdb = $self->local_source_db;
+            if ($arg{'local_instances_db'}) {
+                my $lidb = $self->local_instances_db;
                 my $num_synced = 0;
                 printf STDERR "\r%8d source record(s) synced", $num_synced;
-                $lsrdb->sync('progress' => sub {
+                $lidb->sync('progress' => sub {
                     ($num_synced) = @_;
                     printf STDERR "\r%8d source record(s) synced", $num_synced
                         if $num_synced % 100 == 0;
@@ -179,9 +179,9 @@ sub gather_source_records {
         my $size = $self->small_batch_size;
         $size = @$iqueue if @$iqueue < $size;
         my @batch = splice @$iqueue, 0, $size;
-        my $lsrdb = local_source_db();
+        my $lidb = local_instances_db();
         foreach my $iid (@batch) {
-            my $sr = $lsrdb->fetch($iid);
+            my $sr = $lidb->fetch($iid);
             if ($sr) {
                 $records->{$iid} = {
                     #'source_record' => $source_record,
