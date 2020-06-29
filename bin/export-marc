@@ -218,6 +218,7 @@ sub export_deletes {
 
 sub export_incremental {
     my $last_export = last_export();
+    blather "Incremental export: changes since $last_export";
 ### if ($use_ldp) {
 ###     my $ldp = ldp();
 ###     my $sql = ldp_incremental_sql();
@@ -356,6 +357,7 @@ sub _export_from_ldp_using_executed_sth {
         show_progress();
     }
 }
+
 sub _export_deleted_instances {
     my ($phase, $msg) = @_;
     my $isth = ldp()->query(ldp_deleted_instances_sql());  # XXX Don't include unless necessary: , $ldp->timestamp($last_export));
@@ -450,7 +452,7 @@ sub _export_instances {
 sub _export_holdings {
     my ($phase, $searcher, $msg) = @_;
     my $batch = batch();
-    show_progress(HOLDINGS);
+    show_progress(HOLDINGS, $msg);
     my %need_instance;
     while (!$cancelled) {
         my $holdings_record = $searcher->next or last;
@@ -486,7 +488,7 @@ sub _export_holdings {
 ###     my $hsearcher = $site->searcher('holdings_record')
 ###         ->by('set' => [keys %need_holdings])
 ###         ->limit($small_batch_size);
-###     _export_holdings(HOLDINGS, $hsearcher);
+###     _export_holdings(HOLDINGS, $hsearcher, 'Export holdings with modified items');
 ### }
 
 ### sub old_export_by_file {

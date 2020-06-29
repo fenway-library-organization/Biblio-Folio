@@ -50,7 +50,7 @@ elsif (!@ARGV) {
 
 if ($dryrun) {
     $verbose = 1;
-    print STDERR "Dry run -- no changes will be made\n";
+    blather "Dry run -- no changes will be made";
 }
 
 s/^\@// for @ARGV;  # Allow @SITE as well as SITE
@@ -70,8 +70,14 @@ foreach my $site (@ARGV) {
 foreach my $site (@ARGV) {
     my @bin = map { "$_/bin" } "$cwd/site/$site", $cwd, site_dir($site);
     local $ENV{'PATH'} = join(':', @bin, $ENV{'PATH'});
-    my @files = export_site($site);
-    distribute_files($site, @files);
+    my ($dir, @files) = export_site($site);
+    distribute_files($site, @files) if @files;
+    if (-d $dir) {
+        my $arch = site_exports_dir($site) . '/archive';
+        xmkdir($arch);
+        (my $name = $dir) =~ s{.+/}{};
+        rename $dir, "$arch/$name";
+    }
 }
 my $tn = time;
 
@@ -106,7 +112,7 @@ sub export_site {
     my ($tmperr,  $outerr ) = map { "$_.err" } $tmpbase, $outbase;
     blather "----------------------------------------------------------------------------";
     blather "Site: $site";
-    xmkdir($tmpdir, $outdir);
+    xmkdir($outroot, "$outroot/tmp", "$outroot/new", $tmpdir, $outdir);
     my @cmd = (
         export_command_base(),
         '-e' => $tmperr,
@@ -135,7 +141,7 @@ EOS
     if ($tmpdir ne $outdir) {
         xrename($tmpdir, $outdir);
     }
-    return $dryrun ? ($tmpmarc, $tmperr) : glob("$outdir/*");
+    return $dryrun ? ($tmpdir, $tmpmarc, $tmperr) : ($outdir, glob("$outdir/*"));
 }
 
 sub distribute_files {
@@ -143,7 +149,7 @@ sub distribute_files {
     foreach my $m ($mode, FULL_OR_INCREMENTAL) {
         foreach my $outbox (@{ $outboxes{$site}{$m} || [] }) {
             my ($odir, $ocmd) = @$outbox{qw(directory command)};
-            blather "Distributing to outbox $odir" if $verbose;
+            blather "Distributing to outbox $odir";
             if (defined $ocmd) {
                 xsystem(@$ocmd, $mode, @files);
                     # or fatal join(' ', shell_quote(@$ocmd, $mode, @files)) . ": $!";
@@ -199,7 +205,7 @@ sub xsystem {
 sub all_sites {
     my @site_export_dirs = sort glob(site_exports_dir('*'));
     my (%site, %skip);
-    # If a site is reference by a symlink, don't export it twice!
+    # If a site is referenced by a symlink, don't export it twice!
     foreach my $site_export_dir (@site_export_dirs) {
         $site_export_dir =~ m{^($root/site/([^/]+))/} or fatal "wtf?";
         my ($site_dir, $site) = ($1, $2);
@@ -212,7 +218,7 @@ sub all_sites {
                 $skip{$full_name_for_site} = 1;
             }
             else {
-                print STDERR "$prog: warning: broken site symlink: $site_dir -> $full_name_for_site\n";
+                blather "$prog: warning: broken site symlink: $site_dir -> $full_name_for_site";
             }
         }
     }
