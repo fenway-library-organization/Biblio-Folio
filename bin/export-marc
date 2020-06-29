@@ -39,6 +39,7 @@ use constant CANCELLED => 'cancelled';
 use constant FAILED    => 'failed';
 
 sub blather;
+sub blatherf;
 sub usage;
 sub fatal;
 
@@ -116,7 +117,7 @@ if (defined $skip_file) {
         chomp;
         $skip{$_} = 1;
     }
-    printf STDERR "done (%d records)\n", scalar(keys %skip);
+    blatherf "done (%d records)\n", scalar(keys %skip);
 }
 
 # TODO
@@ -135,7 +136,7 @@ my $t0 = my $tstart = time;
 if ($sync_lidb) {
     blather "Refreshing local instances DB\n";
     sync_local_instances_db();
-    printf STDERR "Refresh finished in %d second(s)\n", time - $tstart;
+    blatherf "Refresh finished in %d second(s)\n", time - $tstart;
     $tstart = time;
 }
 
@@ -168,9 +169,11 @@ elsif ($deletes) {
 else {
     export_incremental();
 }
-printf STDERR "Elapsed time: %s\n", sec2dur(time - $tstart);
-print "Cancelled\n" if $cancelled;
-print "Failed\n" if $failed;
+
+blather "\n";
+blatherf "Elapsed time: %s\n", sec2dur(time - $tstart);
+blather "Cancelled\n" if $cancelled;
+blather "Failed\n" if $failed;
 if (!close STDOUT) {
     if (defined $postproc) {
         my $err = $!
@@ -195,7 +198,7 @@ sub export_full {
     $sql .= qq{ OFFSET $offset} if defined $offset;
     $sql .= qq{ LIMIT   $large_batch_size} if defined $large_batch_size;
     my $sth = ldp()->query($sql);
-    printf STDERR "done in %.1f seconds\n", time - $tstart;
+    blatherf "done in %.1f seconds\n", time - $tstart;
     blather "Timer reset (ignore time required for query)\n";
     $tstart = time;
     run(FULL, sub {
@@ -630,7 +633,7 @@ sub show_progress {
             blather "\n" if $prev_phase ne NONE;
             blather $msg, "\n" if defined $msg;
         }
-        printf STDERR "\r   %-9.9s : %4d batch : %7d instance : %7d skipped : %7d holdings : %4d error : %4d suppressed : %4d deleted : %4d non-MARC : %s elapsed : %5.1f/sec",
+        blatherf "\r   %-9.9s : %4d batch : %7d instance : %7d skipped : %7d holdings : %4d error : %4d suppressed : %4d deleted : %4d non-MARC : %s elapsed : %5.1f/sec",
             lc $phase, @counter{qw(batch instance skip holdings error suppressed deleted nonmarc)}, $dur, $rate;
         blather "\n" if $ending;
     }
@@ -881,6 +884,10 @@ sub ldp_incremental_sql {
         */
         )
     };
+}
+
+sub blatherf {
+    print STDERR sprintf(@_) if $verbose;
 }
 
 sub blather {

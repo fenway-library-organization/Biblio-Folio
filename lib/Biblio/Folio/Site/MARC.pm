@@ -27,6 +27,36 @@ sub new {
     return $self;
 }
 
+sub stub {
+    # Construct a stub suitable for use to delete records from discovery
+    my ($proto, %arg) = @_;
+    my ($leader, $status, $instance) = @arg{qw(leader status instance)};
+    # There's really no need to set $cls -- we could just call $proto->new
+    # below and the result would be exactly the same -- but it helps make it
+    # clearer what's going on
+    my $cls;
+    if (ref $proto) {
+        # Called on an object of this class
+        my $self = $proto;  # Just for clarity
+        $leader ||= $self->leader;
+        $instance ||= $self->instance;
+        $cls = ref $proto;
+    }
+    else {
+        # Called as a class method
+        $leader ||= _default_leader();
+        $cls = $proto;
+    }
+    if (defined $status) {
+        die "invalid status: $status" if $status !~ /^[a-z]$/;
+        substr($leader, 5, 1) = $status;
+    }
+    my $hrid = $instance ? $instance->hrid : undef;
+    my @fields = defined $hrid ? (marcfield('001', $hrid)) : ();
+    my $marc = marcbuild($leader, \@fields);
+    return $cls->new(\$marc);
+}
+
 sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
 sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
 sub marcref { @_ > 1 ? $_[0]{'marcref'} = $_[1] : $_[0]{'marcref'} }
@@ -154,24 +184,6 @@ sub add_metadata {
         $self->is_dirty(1);
     }
     return $self;
-}
-
-sub stub {
-    my ($self, %arg) = @_;
-    my ($leader, $status, $instance) = @arg{qw(leader status instance)};
-    if (ref $self) {
-        $leader ||= $self->leader;
-        $instance ||= $self->instance;
-    }
-    else {
-        $leader ||= _default_leader();
-    }
-    if (defined $status) {
-        die "invalid status: $status" if $status !~ /^[a-z]$/;
-        substr($leader, 5, 1) = $status;
-    }
-    my @fields = $instance ? (marcfield('001', $instance->hrid)) : ();
-    return marcbuild($leader, \@fields);
 }
 
 sub as_marc21 {

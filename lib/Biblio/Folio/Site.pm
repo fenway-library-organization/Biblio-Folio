@@ -14,7 +14,7 @@ use Biblio::Folio::Class;
 use Biblio::Folio::Object;
 use Biblio::Folio::Site::Searcher;
 use Biblio::Folio::Site::LocalDB;
-use Biblio::Folio::Site::LocalDB::SourceRecords;
+use Biblio::Folio::Site::LocalDB::Instances;
 use Biblio::Folio::Site::Profile;
 use Biblio::Folio::Site::Matcher;
 use Biblio::Folio::Site::BatchLoader;
@@ -481,17 +481,17 @@ sub harvester {
     );
 }
 
-sub local_source_database {
+sub local_instances_database {
     my ($self, $file) = @_;
-    $file = 'var/db/source-records.db'
+    $file = 'var/db/instances.db'
         if !defined $file;
     $file = $self->file($file);
-    return $self->{'local_source_db'}{$file} ||= Biblio::Folio::Site::LocalDB::SourceRecords->new(
+    return $self->{'local_instances_db'}{$file} ||= Biblio::Folio::Site::LocalDB::Instances->new(
         'file' => $file,
         'site' => $self,
     );
 ### my ($self) = @_;
-### return $self->local_db('source-records');
+### return $self->local_db('instances');
 }
 
 sub object {

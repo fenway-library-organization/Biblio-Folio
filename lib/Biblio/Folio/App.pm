@@ -339,7 +339,7 @@ sub cmd_instance_source_replace {
 
 sub cmd_harvest {
     my ($self) = @_;
-    my ($all, $query, $batch_size, $spell_out_locations, $use_srdb);
+    my ($all, $query, $batch_size, $spell_out_locations, $use_lidb);
     my ($site, %arg) = $self->orient(
         qw(:search !offset !order-by),
         qw(:formats !as-text),
@@ -347,7 +347,7 @@ sub cmd_harvest {
         'q|query=s' => \$query,
         'k|batch-size=i' => \$batch_size,
         'L|spell-out-locations' => \$spell_out_locations,
-        'b|from-source-record-database' => \$use_srdb,
+        'b|from-instances-database' => \$use_lidb,
         'x|include-suppressed' => 'include_suppressed',
         'S|skip-file=s' => 'skip_file',
     );
@@ -358,7 +358,7 @@ sub cmd_harvest {
         || $query && $all;
     my @search = ('instance', '@limit' => $batch_size);
     my $bsearcher;
-    my $srdb = $site->local_source_database if $use_srdb;
+    my $lidb = $site->local_instances_database if $use_lidb;
     if (defined $query) {
         $bsearcher = $site->searcher(@search, '@query' => $query);
     }
@@ -373,8 +373,8 @@ sub cmd_harvest {
     elsif (@$argv) {
         $bsearcher = $site->searcher(@search, '@set' => $argv, '@id_field' => 'instanceId');
     }
-    elsif ($srdb) {
-        my $last_utc = _utc_datetime($srdb->last_sync || 0);
+    elsif ($lidb) {
+        my $last_utc = _utc_datetime($lidb->last_sync || 0);
         $query = sprintf q{metadata.updatedDate >= "%s"}, $last_utc;
         $bsearcher = $site->searcher(@search, '@query' => $query);
     }
@@ -387,10 +387,10 @@ sub cmd_harvest {
     my $verbose = $self->verbose;
     my $t0 = time;
     my $marc_fetch;
-    if ($srdb) {
+    if ($lidb) {
         $marc_fetch = sub {
             my ($instance, $instance_id) = @_;
-            my $marcref = $srdb->marcref($instance_id);
+            my $marcref = $lidb->marcref($instance_id);
             return Biblio::Folio::Site::MARC->new('marcref' => $marcref);
         };
     }
@@ -663,16 +663,16 @@ sub cmd_source_sync {
     usage "source sync DBFILE"
         if @$argv > 1;
     my ($dbfile) = @$argv;
-    my $db = $site->local_source_database($dbfile);
+    my $db = $site->local_instances_database($dbfile);
     my $t0 = time;
     my $total = 0;
-    printf STDERR "\r%8d source records fetched in %d seconds", 0, 0;
+    printf STDERR "\r%8d records fetched in %d seconds", 0, 0;
     $db->sync('progress' => sub {
         my ($n) = @_;
         $total = $n;
-        printf STDERR "\r%8d source records fetched in %d seconds", $n, time - $t0;
+        printf STDERR "\r%8d records fetched in %d seconds", $n, time - $t0;
     });
-    printf STDERR "\r%8d source records fetched in %d seconds\n", $total, time - $t0;
+    printf STDERR "\r%8d records fetched in %d seconds\n", $total, time - $t0;
 }
 
 sub cmd_source_harvest {
@@ -683,7 +683,7 @@ sub cmd_source_harvest {
         'i|instance-id-file=s' => 'instance_id_file',
         'q|query=s' => 'query',
         'k|batch-size=i' => 'batch_size',
-        'b|source-record-database=s' => 'source_record_db',
+        'b|from-instances-database=s' => 'instances_db',
     );
     my $argv = $self->argv;
     usage "source harvest [-a|-i FILE|-q CQL] [-b DBFILE]"
@@ -1054,9 +1054,11 @@ sub cmd_user_batch_pickup {
 
 sub cmd_user_batch_validate {
     my ($self) = @_;
-    my ($site, %arg) = $self->orient;
+    my ($site, %arg) = $self->orient(
+        'L|load-profile=s' => 'profile',
+    );
     my $argv = $self->argv;
-    usage "user batch validate" if !@$argv;
+    usage "user batch validate FILE..." if !@$argv;
     $site->task('user_batch')->validate('files' => $argv, %arg);
 }
 
