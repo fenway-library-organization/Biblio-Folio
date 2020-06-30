@@ -193,25 +193,34 @@ sub update {
             next if $source_record->{'errorRecord'};
             my $source_type = $source_record->{'recordType'};
             my $source = $source_record->{'rawRecord'}{'content'};
+            my $instance_hrid = $instance_id;  # XXX Hack
+            if ($source_type eq 'MARC') {
+                my $hrid;
+                eval {
+                    my $marc = Biblio::Folio::Site::MARC->new(\$source);
+                    $hrid = $marc->field('001')->value;
+                };
+                $instance_hrid = $hrid if defined $hrid;
+            }
             my $last_modified = $source_record->{'metadata'}{'updatedDate'};
             my $deleted = $source_record->{'deleted'} ? 1 : 0;
             my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
             $sth_ins ||= $self->sth(q{
-                INSERT OR REPLACE INTO instances (id, source_type, source, last_modified, update_id, deleted, suppressed)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             });
-            $sth_ins->execute($instance_id, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
+            $sth_ins->execute($instance_id, $instance_hrid, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
             1;
         }
         $dbh->commit;
         $n += @source_records;
         $progress->($n) if $progress;
     }
-    # Add hrids for new instances
+    # Add hrids for new instances (hrid set to instance ID, which is 36 bytes long)
     my $sth_nulls = $self->sth(q{
         SELECT  id
         FROM    instances
-        WHERE   hrid IS NULL
+        WHERE   length(hrid) = 36
     });
     my $sth_upd;
     $sth_nulls->execute;
