@@ -20,7 +20,7 @@ sub blather;
 sub usage;
 sub fatal;
 
-my $prog = $0;
+(my $prog = $0) =~ s{.*/}{};
 
 my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
 
@@ -265,13 +265,6 @@ sub site_outboxes {
     return \%boxes;
 }
 
-sub blather {
-    return if !$verbose;
-    my ($msg) = @_;
-    $msg =~ s{(?<=[^\x0d])\n\z}{};
-    print STDERR $msg, "\n";
-}
-
 sub xmkdir {
     foreach my $dir (@_) {
         next if -d $dir;
@@ -281,3 +274,19 @@ sub xmkdir {
     }
 }
 
+sub blather {
+    return if !$verbose;
+    my ($msg) = @_;
+    $msg =~ s{(?<=[^\x0d])\n\z}{};
+    print STDERR $msg, "\n";
+}
+
+sub usage {
+    print STDERR "usage: $prog [-tvn] [-s SKIPFILE] [-d DESTDIR] [-f | -q CQL | -i IDFILE]\n";
+    exit 1;
+}
+
+sub fatal {
+    print STDERR "$prog: @_\n";
+    exit 2;
+}

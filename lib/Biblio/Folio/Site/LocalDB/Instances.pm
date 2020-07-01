@@ -6,6 +6,7 @@ use warnings;
 use base qw(Biblio::Folio::Site::LocalDB);
 
 use Biblio::Folio::Util qw(_utc_datetime);
+use Biblio::Folio::Site::MARC;
 #use Encode qw(decode encode);
 
 sub create {
@@ -59,6 +60,7 @@ CREATE TABLE updates (
 );
 /* Indexes on instances */
 CREATE INDEX instances_hrid_index              ON instances (hrid);
+CREATE INDEX instances_hrid_length_index       ON instances (length(hrid));
 CREATE INDEX instances_source_type_index       ON instances (source_type);
 CREATE INDEX instances_last_modified_index     ON instances (last_modified);
 CREATE INDEX instances_suppressed_index        ON instances (suppressed);

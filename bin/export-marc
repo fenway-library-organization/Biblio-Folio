@@ -235,7 +235,7 @@ sub export_incremental {
     # my $last_deletes = last_export(DELETES);
     my $ldp = ldp();
     my $isth = $ldp->query(ldp_deleted_instances_sql());         # XXX Don't include unless necessary: , $ldp->timestamp($last_deletes));
-    my $need_instance = _identify_deleted_holdings_records('Identify deleted holdings');
+    my $need_instance = _identify_deleted_holdings_records('Identify deleted holdings', $last_export);
     my $dhisearcher = $site->searcher('instance')
         ->by('set' => [keys %$need_instance])
         ->limit($small_batch_size);
@@ -386,10 +386,10 @@ sub _export_deleted_instances {
 }
 
 sub _identify_deleted_holdings_records {
-    my ($msg) = @_;
+    my ($msg, $last_export) = @_;
     my $batch = batch();
     show_progress(DELETED_HOLDINGS, $msg);
-    my $sth = $ldp->query(ldp_deleted_holdings_records_sql());  # XXX Don't include unless necessary: , $ldp->timestamp($last_export));
+    my $sth = $ldp->query(ldp_deleted_holdings_records_sql(), $ldp->timestamp($last_export));
     my %need_instance;
     my @hids;
     while (!$cancelled) {
@@ -830,9 +830,7 @@ sub ldp_deleted_holdings_records_sql {
                 public.inventory_holdings ph
         ON      hh.id = ph.id
         WHERE   ph.id IS NULL
-        /* XXX Don't include this unless it's truly needed
         AND     hh.updated >= ?
-        */
     };
 }
 
