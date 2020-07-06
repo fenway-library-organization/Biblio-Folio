@@ -53,7 +53,8 @@ my %config = (
 );
 
 my ($full, $query, $id_file, $deletes);
-my ($skip_file, $postproc, $spell_out_locations, $sync_lidb, $out_file, $comment, $verbose, $dryrun, $test);
+my ($skip_file, $postproc);
+my ($config_file, $spell_out_locations, $copy_links_to_bib, $sync_lidb, $out_file, $comment, $verbose, $dryrun, $test);
 my $offset;
 my $use_ldp = 1;
 my $use_lidb = 1;
@@ -73,6 +74,7 @@ GetOptions(
     'n|dry-run' => \$dryrun,
     's|skip-file=s' => \$skip_file,
     # Everything else
+    'c|config-file=s' => \$config_file,
     'p|post-process-command=s' => \$postproc,
     'l|use-ldp' => \$use_ldp,
     'b|use-local-instances-db' => \$use_lidb,
@@ -84,6 +86,7 @@ GetOptions(
     'k|batch-size=i' => \$small_batch_size,
     'M|maximum-instance-count=i' => \$large_batch_size,
     'L|spell-out-locations' => \$spell_out_locations,
+    '8|copy-links-to-bib' => \$copy_links_to_bib,
     'm|comment=s' => \$comment,
 ) or usage;
 
@@ -720,7 +723,13 @@ sub process_batch {
         my $instance = $record->{'instance'};
         if ($instance) {
             my $iid = $instance->id;
-            my $marc = eval { $instance->export_marc('spell_out_locations' => 1, 'with_locations' => 1) };
+            my $marc = eval {
+                $instance->export_marc(
+                    'spell_out_locations' => 1,
+                    'with_locations' => 1,
+                    'copy_electronic_access' => $copy_links_to_bib,
+                )
+            };
             if (!defined $marc) {
                 error($record, 'could not export MARC record');
                 next;

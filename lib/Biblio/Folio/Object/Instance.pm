@@ -77,6 +77,7 @@ sub export_marc {
         $marc->add_holdings(
             'holdings' => $holdings,
             'spell_out_locations' => $arg{'spell_out_locations'},
+            'copy_electronic_access' => $arg{'copy_electronic_access'},
         );
     }
     else {

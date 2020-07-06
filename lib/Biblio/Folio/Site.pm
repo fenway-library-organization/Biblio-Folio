@@ -188,7 +188,7 @@ sub _read_map_files {
             (my $base = $file) =~ s{\.[^.]+$}{};
             $base =~ m{([^/]+)(?:\.[^/.]+)?$}
                 or die "invalid UUID map file name: $file";
-            my $name = $1;
+            my $kind = $1;
             open my $fh, '<', $file
                 or die "open $file: $!";
             while (<$fh>) {
@@ -196,16 +196,16 @@ sub _read_map_files {
                 chomp;
                 if (/^(.+)=(.+)$/) {
                     my ($alias, $key) = map { trim($_) } ($1, $2);
-                    my $val = $uuidmap{$name}{$key};
-                    $uuidmap{$name}{$alias} = $val
+                    my $val = $uuidmap{$kind}{$key};
+                    $uuidmap{$kind}{$alias} = $val
                         or die "alias to undefined UUID in $file: $_";
-                    $uuidunmap{$name}{$val} ||= $alias;
+                    $uuidunmap{$kind}{$val} ||= $alias;
                 }
                 elsif (/^([^:]+)(?:\s+:\s+(.+))?$/) {
                     my ($key, $val) = ($1, $2);
                     $val = $key if !defined $val;
-                    $uuidmap{$name}{$val} = $key;
-                    $uuidunmap{$name}{$key} ||= $val;
+                    $uuidmap{$kind}{$val} = $key;
+                    $uuidunmap{$kind}{$key} ||= $val;
                 }
             }
         }
@@ -214,16 +214,14 @@ sub _read_map_files {
     $self->{'uuidunmap'} = \%uuidunmap;
 }
 
-sub _read_cache {
-    my ($self) = @_;
-    my %cache;
-    # TODO
-    $self->cache(\%cache);
+sub decode_uuid {
+    my ($self, $kind, $uuid) = @_;
+    return $self->{'uuidunmap'}{$kind}{$uuid};
 }
 
-sub decode_uuid {
-    my ($self, $name, $uuid) = @_;
-    return $self->{'uuidunmap'}{$name}{$uuid};
+sub encode_uuid {
+    my ($self, $kind, $uuid, $obj) = @_;
+    return $self->{'uuidunmap'}{$kind}{$uuid} = $obj;
 }
 
 sub expand_uuid {
@@ -242,6 +240,13 @@ sub expand_uuid {
         return "$uuid <$val>";
     }
     return "$uuid <$obj>";
+}
+
+sub _read_cache {
+    my ($self) = @_;
+    my %cache;
+    # TODO
+    $self->cache(\%cache);
 }
 
 sub state {

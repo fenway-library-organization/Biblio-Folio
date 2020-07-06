@@ -326,7 +326,7 @@ sub delete_fields {
 sub add_holdings {
     my $self = shift;
     my %arg = @_;
-    my ($holdings, $spell_out_locations, $add_items) = @arg{qw(holdings spell_out_locations add_items)};
+    my ($holdings, $spell_out_locations, $copy_electronic_access, $add_items) = @arg{qw(holdings spell_out_locations copy_electronic_access add_items)};
     my $num_holdings = 0;
     my $num_items = 0;
     my $fields = $self->fields;
@@ -346,6 +346,36 @@ sub add_holdings {
             _optional('z' => $suppressed ? 'suppressed' : undef),
             '0' => $holding->id,
         );
+        if ($copy_electronic_access) {
+            my @elec = @{ $holding->electronicAccess || [] };
+            if (@elec) {
+                # Copy links from holdings to bib (unless they're already there)
+                my %uri_in_bib = map {
+                    my $u = $_->subfield('u');
+                    defined $u ? ($u => 1) : ()
+                } $self->field('856');
+                foreach my $elec (@elec) {
+                    # {
+                    #     "linkText" : "Access E-Book",
+                    #     "publicNote" : "",
+                    #     "relationshipId" : "f5d0068e-6272-458e-8a81-b85e7b9a14aa",
+                    #     "uri" : "https://ezproxy.simmons.edu/login?url=http://search.ebscohost.com/login.aspx?direct=true&scope=site&db=nlebk&db=nlabk&AN=6436",
+                    # }
+                    my $uri = $elec->{'uri'};
+                    next if !defined $uri || $uri_in_bib{$uri};
+                    my $rel = $elec->{'relationshipId'};  # TODO Don't just ignore this!
+                    my ($link_text, $public_note) = @$elec{qw(linkText publicNote)};
+                    undef $public_note if defined $public_note && $public_note !~ /\S/;  # Disregard blank notes 
+                    push @add, _make_field($self,
+                        '856', '4', '0',  # XXX Hard-coded indicators
+                        'u' => $uri,
+                        _optional('y' => $link_text),
+                        _optional('z' => $public_note),
+                    );
+                    $uri_in_bib{$uri} = 1;
+                }
+            }
+        }
         $num_holdings++;
         if ($add_items) {
             my @item_fields = _make_item_fields($self, $holding);
@@ -355,7 +385,7 @@ sub add_holdings {
     }
     if (@add) {
         $self->delete_fields('852');
-        $self->add_fields(@add) if @add;
+        $self->add_fields(@add);
         $self->is_dirty(1);
     }
     return ($num_holdings, $num_items) if wantarray;
