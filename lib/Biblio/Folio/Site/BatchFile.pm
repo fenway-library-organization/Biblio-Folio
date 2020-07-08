@@ -98,8 +98,9 @@ sub iterate {
                 $num_errors++;
                 $num_consecutive_errors++;
                 my $die = 1;
+                my ($err) = split /\n/, $@;
                 eval {
-                    _run_hooks('error' => $error, %params, 'n' => $n, 'num_errors' => $num_errors);
+                    _run_hooks('error' => $error, %params, 'n' => $n, 'error' => $err, 'num_errors' => $num_errors);
                     $die = 0;
                 };
                 if ($die) {
