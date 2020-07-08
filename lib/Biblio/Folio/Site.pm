@@ -265,11 +265,13 @@ sub state {
 sub local_db {
     my $self = shift;
     my $name = shift;
+    my %arg = @_;
     my $file = $self->path("var/db/$name.db");
     return $self->{'local_db'}{$name} ||= Biblio::Folio::Site::LocalDB->new(
         'site' => $self,
         'name' => $name,
         'file' => $file,
+        %arg,
     );
 }
 

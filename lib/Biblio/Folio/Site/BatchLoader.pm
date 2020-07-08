@@ -150,7 +150,6 @@ sub prepare_one {
 sub _prepare_create {
     my ($self, $member) = @_;
 # _uuid($member->{'object'});  # Assign a UUID if it doesn't already have one
-    return $member;
 }
 
 sub _prepare_delete {
