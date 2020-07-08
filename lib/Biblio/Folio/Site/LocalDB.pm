@@ -14,22 +14,47 @@ sub new {
 }
 
 sub create {
-# my $db = Biblio::Folio::Site::LocalDB->create(
-#     'name' => $name,
-#     'tables' => {
-#         'foo' => 'CREATE TABLE foo (instance_id INT PRIMARY KEY, ...)',
-#         'bar' => '(id INTEGER PRIMARY KEY, ...)',
-#         'baz' => 'id INTEGER PRIMARY KEY, ...',
-#     },
-#     'indexes' => {
-#     },
-# );
-    my $cls = shift;
-    return $cls->new(
-        @_,
-        'create' => 1,
-    );
+    my $proto = shift;
+    if (!ref $proto) {
+        # $db = $cls->create($file, ...);
+        return $proto->new(
+            @_,
+            'create' => 1,
+        );
+    }
+    else {
+        my $self = $proto;
+        my @tables = $self->tables;
+        my @indexes = $self->indexes;
+        die "no tables?" if !@tables;
+        $dbh->begin_work;
+        my $ok;
+        eval {
+            while (@tables > 1) {
+                my ($t, $table) = splice @tables, 0, 2;
+                $self->_create_table($t, $table);
+            }
+            while (@indexes > 1) {
+                (my ($i, $index) = splice @indexes, 0, 2;
+                $self->_create_index($i, $index);
+            }
+            $ok = 1;
+        };
+        if ($ok) {
+            $dbh->commit;
+            return $self;
+        }
+        else {
+            $dbh->rollback;
+            die "can't create database: " . $dbh->errstr;
+        }
+    }
 }
+
+# --- Class methods
+
+sub tables { }  # Must be overridden if create is not overridden
+sub indexes { }
 
 # --- Accessors
 
@@ -64,41 +89,48 @@ sub init {
     my $file = $self->{'file'}
         ||= $site->file("var/db/$name.db");
     my $exists = -e $file;
-    my $create = delete $self->{'create'};
+    my $create = delete $self->{'create'} || $self->can('create');
     $self->{'sth'} = {};
     my $dbh;
     if (!$exists) {
-        die "no such local DB file: $file" if !$create;
+        if (!$create) {
+            die "no such local DB file: $file";
+        }
+        elsif (!ref $create) {
+            $create = $self->can('create')
+                or die 'unimplemented method: ' . ref($self) . '::create';
+        }
+        elsif (ref($create) eq 'ARRAY') {
+            my @sql = @$create;
+            $create = sub {
+                my (undef, $dbh) = @_;
+                $dbh->begin_work;
+                $dbh->do($_) for @sql;
+                $dbh->commit;
+            };
+        }
         $dbh = $self->dbh;
-        my ($tables, $indexes) = @$self{qw(tables indexes)};
-        $dbh->begin_work;
-        while (my ($t, $table) = each %{ $tables || {} }) {
-            $self->_create_table($t, $table);
-        }
-        while (my ($i, $index) = each %{ $indexes || {} }) {
-            $self->_create_index($i, $index);
-        }
-        $dbh->commit;
+        $create->($self, $dbh);
     }
     # $self->{'tables'} = {};
     # $self->_discover_schema;
     return $self;
 }
 
-sub _discover_schema {
-    my ($self) = @_;
-    my $name = $self->name;
-    my $dbh = $self->dbh;
-    my $sth = $dbh->table_info(undef, $name, '%', 'table');
-    my $tables = $self->tables;
-    while (my @row = $sth->fetchrow_array) {
-        my $table = $row[2];
-        my @keys = $dbh->primary_key(undef, $name, $table);
-        next if @keys != 1;
-        $tables->{$table} = { 'id_column' => $keys[0] };
-    }
-}
-    
+### sub _discover_schema {
+###     my ($self) = @_;
+###     my $name = $self->name;
+###     my $dbh = $self->dbh;
+###     my $sth = $dbh->table_info(undef, $name, '%', 'table');
+###     my $tables = $self->tables;
+###     while (my @row = $sth->fetchrow_array) {
+###         my $table = $row[2];
+###         my @keys = $dbh->primary_key(undef, $name, $table);
+###         next if @keys != 1;
+###         $tables->{$table} = { 'id_column' => $keys[0] };
+###     }
+### }
+
 sub _create_table_or_index {
     my ($self, $what_type, $what_name, $sql) = @_;
     $sql =~ s{;\s*\z}{}ms;
@@ -155,6 +187,8 @@ sub _create_index {
 
 sub DESTROY {
     my ($self) = @_;
+    my $dbh = $self->{'dbh'}
+    $dbh->disconnect if $dbh;
 }
 
 1;
