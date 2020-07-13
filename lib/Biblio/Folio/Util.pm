@@ -47,6 +47,9 @@ our @EXPORT_OK = qw(
     _json_decode
     _json_read
     _json_write
+    _json_begin
+    _json_append
+    _json_end
     $rx_const_token
 );
 
@@ -76,7 +79,7 @@ use constant CQL_NULL => 'null';
 
 use vars qw($rx_const_token);
 
-my $json = JSON->new->pretty->canonical->convert_blessed;
+my $json = JSON->new->pretty->canonical->convert_blessed->allow_unknown;
 my $dumper = Data::Dumper->new([])->Terse(1)->Indent(0)->Sortkeys(1)->Sparseseen(1);
 my $uuidgen = Data::UUID->new;
 my %tok2const = (
@@ -597,6 +600,69 @@ sub _json_write {
     my $str = $json->encode(@_);
     open my $fh, '>', $f or die "open $f for writing: $!";
     print $fh $str;
+    close $fh or die "close $f: $!";
+}
+
+sub _json_begin {
+    my ($container, $k, $fh) = @_;
+    my ($v, %context);
+    $context{'fh'} = $fh ||= \*STDOUT;
+    if (defined $k) {
+        die "only hashes are supported by _json_begin, et al."
+            if ref($container) ne 'HASH';
+            # if !eval { defined((keys %$container, 1)[0]) };
+        $v = delete $container->{$k};
+        if (defined $v) {
+            die "only arrays may be appended to by _json_append"
+                if ref($v) ne 'ARRAY';
+        }
+        my $hstr = $json->encode($container);
+        $hstr =~ s/\s*\}\s*\z//;
+        print $fh $hstr;
+        if (keys %$container) {
+            print $fh ",\n";
+        }
+        else {
+            print $fh "\n";
+        }
+        my $vstr = $json->encode({$k => []});
+        $vstr =~ s/\s*\]\s*\}\s*\z//;
+        $vstr =~ s/\A\{\s*//;
+        print $fh '  ', $vstr;
+        $context{'indent'} = '    ';
+        $context{'end'} = "]\n}\n";
+    }
+    elsif (ref($container) eq 'ARRAY') {
+        print $fh '[';
+        $v = $container;
+        $context{'indent'} = '  ';
+        $context{'end'} = "]\n";
+    }
+    $context{'count'} = 0;
+    _json_append(\%context, @$v) if defined $v && @$v;
+    return \%context;
+}
+
+sub _json_append {
+    my $ctx = shift;
+    return if !@_;
+    my $ind = $ctx->{'indent'};
+    my $fh = $ctx->{'fh'};
+    foreach (@_) {
+        print $fh ",\n", $ind if $ctx->{'count'}++;
+        my $str = $json->encode($_);
+        chomp $str;
+        $str =~ s/^/$ind/mg;
+        print $fh $str;
+    }
+}
+
+sub _json_end {
+    my $ctx = shift;
+    my $fh = $ctx->{'fh'};
+    print $fh "\n", $ctx->{'indent'} if $ctx->{'count'};
+    print $fh delete $ctx->{'end'};
+    my $f = $ctx->{'file'} || 'JSON output handle';
     close $fh or die "close $f: $!";
 }
 

@@ -69,7 +69,6 @@ sub iterate {
         _run_hooks('before' => $before, %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $before;
         _run_hooks('each'   => $each,   %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $each;
         _run_hooks('after'  => $after,  %params, 'batch_num' => $batch_num, 'n' => $n, 'num_errors' => $num_errors, @_) if $after;
-        @batch = ();
     };
     eval {
         while (1) {
@@ -86,6 +85,7 @@ sub iterate {
                     if (!$only || $only->{$batch_num}) {
                         $proc->();
                     }
+                    @batch = ();
                 }
             }
             elsif ($ok) {

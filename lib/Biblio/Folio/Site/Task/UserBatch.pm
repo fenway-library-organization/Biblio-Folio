@@ -8,6 +8,9 @@ use base qw(Biblio::Folio::Site::Task);
 use Biblio::Folio::Util qw(
     FORMAT_MARC FORMAT_JSON FORMAT_TEXT
     _json_encode
+    _json_begin
+    _json_append
+    _json_end
     _indentf
     _unbless
 );
@@ -17,9 +20,12 @@ use constant qw(OK     0);
 use constant qw(FAILED 1);
 
 sub site { @_ > 1 ? $_[0]{'site'} = $_[1] : $_[0]{'site'} }
-sub batch { @_ > 1 ? $_[0]{'batch'} = $_[1] : $_[0]{'batch'} }
-sub format { @_ > 1 ? $_[0]{'format'} = $_[1] : $_[0]{'format'} }
 sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
+sub context { @_ > 1 ? $_[0]{'context'} = $_[1] : $_[0]{'context'} }
+
+sub batch { @_ > 1 ? $_[0]{'context'}{'batch'} = $_[1] : $_[0]{'context'}{'batch'} }
+sub format { @_ > 1 ? $_[0]{'context'}{'format'} = $_[1] : $_[0]{'context'}{'format'} }
+sub verb { @_ > 1 ? $_[0]{'context'}{'verb'} = $_[1] : $_[0]{'context'}{'verb'} }
 
 sub all_steps { return qw(pickup validate prepare match load) }
 
@@ -55,6 +61,91 @@ sub loader {
 
 sub validator {
     return shift->worker('validator', @_);
+}
+
+sub begin {
+    my ($self, $verb, %context) = @_;
+    $self->verb($verb);
+    $self->context(\%context);
+    my $format = $self->format || $self->format(FORMAT_TEXT);
+    if ($format eq FORMAT_JSON) {
+        my $hash = { %context };
+        delete @$hash{qw(out err)};
+        $hash->{'profile_name'} = $self->profile->{'name'};
+        $self->{'_json_context'} =_json_begin($hash, $verb . '_results');
+    }
+}
+
+sub end {
+    my ($self) = @_;
+    my $format = $self->format;
+    if ($format eq FORMAT_JSON) {
+        _json_end($self->{'_json_context'});
+    }
+}
+
+sub out {
+    my $self = shift;
+    my $format = $self->format;
+    if ($format eq FORMAT_JSON) {
+        _json_append($self->{'_json_context'}, @_);
+        return;
+    }
+    elsif ($self->verb eq 'parse') {
+        foreach my $user (@_) {
+            $self->_show_parsed_user('user' => $user);
+        }
+    }
+    foreach my $member (@_) {
+        my ($n, $ok, $error, $status) = @$member{qw(n ok error status)};
+    }
+}
+
+# --- Action functions
+
+sub parse {
+    my ($self, %arg) = @_;
+    my $files = $arg{'files'};
+    return if !@$files;
+    $self->begin('parse', %arg);
+    my $parser = $self->parser(%arg);
+    #my (@errors, @parsed, @unparsed);
+    my %hooks = (
+        'each' => sub {
+            my %param = @_;
+            my $batch = $param{'batch'};
+            $self->out(@$batch);
+        },
+        'error' => sub {
+            my %param = @_;
+            my ($file, $n, $err) = @param{qw(file n error)};
+            $err = "unknown error" if !defined $err;
+            # ($err) = split /\n/, defined $err ? $err : 'unknown error';
+            #push @errors, [$file, $n, $err];
+            $self->_show_error('prepare', %param, %arg, 'error' => $err);
+        },
+        #'end' => sub {
+        #    my %param = @_;
+        #    my $file = $param{'file'};
+        #    if (@errors) {
+        #        push @unparsed, $file;
+        #    }
+        #    else {
+        #        push @parsed, $file;
+        #    }
+        #    @errors = ();
+        #},
+    );
+    foreach my $file (@$files) {
+        print STDERR "Parsing: $file\n" if $arg{'verbose'};
+        $parser->iterate(
+            %arg,
+            'hooks' => \%hooks,
+            'file' => $file,
+        );
+        1;
+    }
+    $self->end;
 }
 
 sub validate {
@@ -115,118 +206,32 @@ sub validate {
 ### my $result = $ok && !@invalid ? OK : FAILED;
 ### return $result, { @work, 'valid' => \@valid, 'invalid' => \@invalid };
 
-### sub step_parse {
-###     my ($self, @work) = @_;
-###     my %arg = (%$self, @work);
-###     my ($site, $files) = @arg{qw(site files)};
-###     return (OK) if !@$files;
-###     my $parser = $self->parser(%arg);
-###     my (@errors, @parsed, @unparsed);
-###     my %hook = (
-###         'each' => sub {
-###             my %param = @_;
-###             my $batch = $param{'batch'};
-###             my ($user) = @$batch;
-###             $self->_print_user(%arg, 'user' => $user);
-###         },
-###         'error' => sub {
-###             my %param = @_;
-###             my ($file, $n, $err) = @param{qw(file n error)};
-###             ($err) = split /\n/, $err;
-###             push @errors, [$file, $n, $err];
-###         },
-###         'end' => sub {
-###             my %param = @_;
-###             my $file = $param{'file'};
-###             if (@errors) {
-###                 push @unparsed, $file;
-###             }
-###             else {
-###                 push @parsed, $file;
-###             }
-###             @errors = ();
-###         },
-###     );
-###     foreach my $file (@$files) {
-###         $parser->iterate(
-###             %arg,
-###             %hook,
-###             'file' => $file,
-###         );
-###     }
-### }
-
-# --- Action functions
-
-sub parse {
-    my ($self, %arg) = @_;
-    my $files = $arg{'files'};
-    return if !@$files;
-    my $parser = $self->parser(%arg);
-    my (@errors, @parsed, @unparsed);
-    my %hooks = (
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my ($user) = @$batch;
-            $self->_print_user(%arg, %param, 'user' => $user);
-        },
-        'error' => sub {
-            my %param = @_;
-            my ($file, $n, $err) = @param{qw(file n error)};
-            $err = "unknown error" if !defined $err;
-            # ($err) = split /\n/, defined $err ? $err : 'unknown error';
-            push @errors, [$file, $n, $err];
-            $self->_show_error('prepare', %param, %arg, 'error' => $err);
-        },
-        'end' => sub {
-            my %param = @_;
-            my $file = $param{'file'};
-            if (@errors) {
-                push @unparsed, $file;
-            }
-            else {
-                push @parsed, $file;
-            }
-            @errors = ();
-        },
-    );
-    foreach my $file (@$files) {
-        print STDERR "Parsing: $file\n" if $arg{'verbose'};
-        $parser->iterate(
-            %arg,
-            'hooks' => \%hooks,
-            'file' => $file,
-        );
-        1;
-    }
-    1;
-}
-
 sub match {
     my ($self, %arg) = @_;
     $arg{'batch_size'} ||= 1;
     my $files = $arg{'files'};
     return if !@$files;
+    $self->begin('match', %arg);
     my $parser = $self->parser(%arg);
     my $matcher = $self->matcher(%arg);
     my (@errors, @parsed, @unparsed);
     my $verbose = $arg{'verbose'};
     $arg{'format'} ||= FORMAT_TEXT;
-    my $batch_base;
+    my $batch_base = 1;
     my %hooks = (
-        'before' => sub {
-            $batch_base = 1;
-        },
+        #'before' => sub {
+        #    $batch_base = 1;
+        #},
         'each' => sub {
             my %param = @_;
             my $batch = $param{'batch'};
             my $results = $matcher->match(@$batch);
             $self->_show_matching_users(%param, %arg, 'batch_base' => $batch_base, 'results' => $results);
-        },
-        'after' => sub {
             $batch_base += $arg{'batch_size'};
         },
+        #'after' => sub {
+        #    $batch_base += $arg{'batch_size'};
+        #},
     );
     foreach my $file (@$files) {
         $parser->iterate(
@@ -235,6 +240,7 @@ sub match {
             'file' => $file,
         );
     }
+    $self->end;
 }
 
 sub prepare {
@@ -242,22 +248,24 @@ sub prepare {
     $arg{'batch_size'} ||= 1;
     my $files = $arg{'files'};
     return if !@$files;
+    $self->begin('prepare', %arg);
     my $site = $self->site;
     my $parser = $self->parser(%arg);
     my $matcher = $self->matcher(%arg);
     my $loader = $self->loader(%arg);
-    my $batch_base;
+    my $batch_base = 1;
     my $format = $self->format;
     $arg{'site'} = $site;
     my %hooks = (
-        'before' => sub { $batch_base = 1 },
-        'after' => sub { $batch_base += $arg{'batch_size'} },
+        # 'before' => sub { $batch_base = 1 },
+        # 'after' => sub { $batch_base += $arg{'batch_size'} },
         'each' => sub {
             my %param = @_;
             my $batch = $param{'batch'};
             my @match_results = $matcher->match(@$batch);
             my $prepared_batch = $loader->prepare(@match_results);
             $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+            $batch_base += $arg{'batch_size'};
         },
         'error' => sub {
             my %param = @_;
@@ -286,6 +294,7 @@ sub prepare {
             'file' => $file,
         );
     }
+    $self->end;
 }
 
 sub load {
@@ -293,14 +302,15 @@ sub load {
     $arg{'batch_size'} ||= 1;
     my $files = $arg{'files'};
     return if !@$files;
+    $self->begin('load', %arg);
     my $site = $self->site;
     my $parser = $self->parser(%arg);
     my $matcher = $self->matcher(%arg);
     my $loader = $self->loader(%arg);
-    my $batch_base;
+    my $batch_base = 1;
     my %hooks = (
-        'before' => sub { $batch_base = 1 },
-        'after' => sub { $batch_base += $arg{'batch_size'} },
+        # 'before' => sub { $batch_base = 1 },
+        # 'after' => sub { $batch_base += $arg{'batch_size'} },
         'each' => sub {
             my %param = @_;
             my $batch = $param{'batch'};
@@ -308,42 +318,44 @@ sub load {
             my $prepared_batch = $loader->prepare(@match_results);
             #my @objects = $loader->prepare(@match_results);
             if ($self->dry_run) {
-                my @members = @{ $prepared_batch->{'members'} };
-                foreach my $member (@members) {
-                    my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
-                        = @$member{qw(n action record object matches warning rejected matching)};
-                    my @matches = $matches ? @$matches : ();
-                    # my $raw = $record->{'_raw'};
-                    my $parsed = $record->{'_parsed'};
-                    $n += $batch_base;
-                    print "--------------------------------------------------------------------------------\n" if $n;
-                    print "Record: $n\n";
-                    print "Action: ", uc $action, "\n";
-                    # print "Raw input: $raw\n";
-                    print "Parsed:\n";
-                    print _indent(_json_encode($parsed));
-                    print "Matches: ", scalar(@matches), "\n";
-                    my $what = $action eq 'create' ? $record : $object;
-                    if (defined $what) {
-                        print "Object:\n";
-                        print _indent(_json_encode($what));
-                        if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
-                            my $m = 0;
-                            foreach my $match (@matches) {
-                                $m++;
-                                # TODO
-                            }
-                        }
-                    }
-                    else {
-                        print "No match to $action\n";
-                    }
-                }
+                $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+                # my @members = @{ $prepared_batch->{'members'} };
+                # foreach my $member (@members) {
+                #     my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
+                #         = @$member{qw(n action record object matches warning rejected matching)};
+                #     my @matches = $matches ? @$matches : ();
+                #     # my $raw = $record->{'_raw'};
+                #     my $parsed = $record->{'_parsed'};
+                #     $n += $batch_base;
+                #     print "--------------------------------------------------------------------------------\n" if $n;
+                #     print "Record: $n\n";
+                #     print "Action: ", uc $action, "\n";
+                #     # print "Raw input: $raw\n";
+                #     print "Parsed:\n";
+                #     print _indent(_json_encode($parsed));
+                #     print "Matches: ", scalar(@matches), "\n";
+                #     my $what = $action eq 'create' ? $record : $object;
+                #     if (defined $what) {
+                #         print "Object:\n";
+                #         print _indent(_json_encode($what));
+                #         if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
+                #             my $m = 0;
+                #             foreach my $match (@matches) {
+                #                 $m++;
+                #                 # TODO
+                #             }
+                #         }
+                #     }
+                #     else {
+                #         print "No match to $action\n";
+                #     }
+                # }
             }
             else {
                 my ($ok, $failed) = $loader->load($prepared_batch);
-                $self->show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
+                $self->_show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
             }
+            $batch_base += $arg{'batch_size'};
         },
     );
     $arg{'site'} = $site;
@@ -354,193 +366,197 @@ sub load {
             'file' => $file,
         );
     }
+    $self->end;
 }
 
 # --- Phases
 
-sub step_pickup {
-    my ($self, @work) = @_;
-    my %arg = (%$self, @work);
-    my $site = $self->site;
-    my $sorter = $self->sorter(%arg); # $site->sorter_for('user_file', %arg);
-    return OK, $sorter->sort;
-}
-
-sub step_prepare {
-    my ($self, @work) = @_;
-    my %arg = (%$self, @work);
-    my ($site, $files) = @arg{qw(site files)};
-    return (OK) if !@$files;
-    my $parser = $self->parser(%arg);
-    my $matcher = $self->matcher(%arg);
-    my $loader = $self->loader(%arg);
-    my $batch_base;
-    my $format = $self->format;
-    $arg{'site'} = $site;
-    my %hooks = (
-        'before' => sub {
-            $batch_base = 1;
-        },
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my @match_results = $matcher->match(@$batch);
-            my $prepared_batch = $loader->prepare(@match_results);
-            $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
-        },
-        'error' => sub {
-            my %param = @_;
-            my ($n, $err) = @param{qw(n num_errors)};
-            $self->_show_error('prepare', %param, %arg, 'error' => $err);
-        },
-        'after' => sub {
-            $batch_base += $arg{'batch_size'};
-        },
-    );
-    if ($format eq FORMAT_JSON) {
-        my %hash = (
-            'batch_size' => $arg{'batch_size'},
-            'parser_class' => ref $parser,
-            'matcher_class' => ref $matcher,
-            'loader_class' => ref $loader,
-        );
-        $hooks{'begin'} = sub {
-            print $self->json_begin_hash_array_members(\%hash, 'records');
-        };
-        $hooks{'end'} = sub {
-            print $self->json_end_hash_array_members;
-        };
-    }
-    foreach my $file (@$files) {
-        $parser->iterate(
-            %arg,
-            'hooks' => \%hooks,
-            'file' => $file,
-        );
-    }
-}
-
-sub _old_step_prepare {
-    my ($self, @work) = @_;
-    my %arg = (%$self, @work);
-    my ($site, $files) = @arg{qw(site files)};
-    return (OK) if !@$files;
-    my @ready;
-    foreach my $file (@$files) {
-        my $ok = $self->prepare(
-            'file' => $file,
-            'dry_run' => $self->dry_run,
-            'verbose' => $self->verbose,
-        );
-        if ($ok) {
-            push @ready, $file;
-        }
-        else {
-            print STDERR "prepare failed: $file\n";
-            return FAILED, @ready;
-        }
-    }
-    my ($ok, @moved) = _move_to_dir(@ready, $self->directory('ready'));
-    return ($ok ? OK : FAILED, @moved);
-}
-
-sub step_match {
-    my ($self, @work) = @_;
-    my %arg = (%$self, @work);
-    my ($site, $files) = @arg{qw(site files)};
-    return (OK) if !@$files;
-    my $parser = $self->parser(%arg);
-    my $matcher = $self->matcher(%arg);
-    my $batch_base;
-    my %hooks = (
-        'before' => sub {
-            $batch_base = 1;
-        },
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my $results = $matcher->match(@$batch);
-            $self->_show_matching_users(%param, %arg, 'batch_base' => $batch_base, 'results' => $results);
-        },
-        'after' => sub {
-            $batch_base += $arg{'batch_size'};
-        },
-    );
-    foreach my $file (@$files) {
-        $parser->iterate(
-            %arg,
-            'hooks' => \%hooks,
-            'file' => $file,
-        );
-    }
-}
-
-sub step_load {
-    my ($self, @work) = @_;
-    my %arg = (%$self, @work);
-    my ($site, $files) = @arg{qw(site files)};
-    return (OK) if !@$files;
-    my $parser = $self->parser(%arg);
-    my $matcher = $self->matcher(%arg);
-    my $loader = $self->loader(%arg);
-    my $batch_base;
-    my %hooks = (
-        'before' => sub { $batch_base = 1 },
-        'after' => sub { $batch_base += $arg{'batch_size'} },
-        'each' => sub {
-            my %param = @_;
-            my $batch = $param{'batch'};
-            my @match_results = $matcher->match(@$batch);
-            my $prepared_batch = $loader->prepare(@match_results);
-            #my @objects = $loader->prepare(@match_results);
-            if ($self->dry_run) {
-                my @members = @{ $prepared_batch->{'members'} };
-                foreach my $member (@members) {
-                    my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
-                        = @$member{qw(n action record object matches warning rejected matching)};
-                    my @matches = $matches ? @$matches : ();
-                    # my $raw = $record->{'_raw'};
-                    my $parsed = $record->{'_parsed'};
-                    $n += $batch_base;
-                    print "--------------------------------------------------------------------------------\n" if $n;
-                    print "Record: $n\n";
-                    print "Action: ", uc $action, "\n";
-                    # print "Raw input: $raw\n";
-                    print "Parsed:\n";
-                    print _indent(_json_encode($parsed));
-                    print "Matches: ", scalar(@matches), "\n";
-                    my $what = $action eq 'create' ? $record : $object;
-                    if (defined $what) {
-                        print "Object:\n";
-                        print _indent(_json_encode($what));
-                        if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
-                            my $m = 0;
-                            foreach my $match (@matches) {
-                                $m++;
-                                # TODO
-                            }
-                        }
-                    }
-                    else {
-                        print "No match to $action\n";
-                    }
-                }
-            }
-            else {
-                my ($ok, $failed) = $loader->load($prepared_batch);
-                $self->show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
-            }
-        },
-    );
-    $arg{'site'} = $site;
-    foreach my $file (@$files) {
-        $parser->iterate(
-            %arg,
-            'hooks' => \%hooks,
-            'file' => $file,
-        );
-    }
-}
+### sub step_pickup {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my $site = $self->site;
+###     my $sorter = $self->sorter(%arg); # $site->sorter_for('user_file', %arg);
+###     return OK, $sorter->sort;
+### }
+### 
+### sub step_prepare {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my ($site, $files) = @arg{qw(site files)};
+###     return (OK) if !@$files;
+###     my $parser = $self->parser(%arg);
+###     my $matcher = $self->matcher(%arg);
+###     my $loader = $self->loader(%arg);
+###     my $batch_base = 1;
+###     my $format = $self->format;
+###     $arg{'site'} = $site;
+###     my %hooks = (
+###         #'before' => sub {
+###         #    $batch_base = 1;
+###         #},
+###         'each' => sub {
+###             my %param = @_;
+###             my $batch = $param{'batch'};
+###             my @match_results = $matcher->match(@$batch);
+###             my $prepared_batch = $loader->prepare(@match_results);
+###             $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+###             $batch_base += $arg{'batch_size'};
+###         },
+###         'error' => sub {
+###             my %param = @_;
+###             my ($n, $err) = @param{qw(n num_errors)};
+###             $self->_show_error('prepare', %param, %arg, 'error' => $err);
+###         },
+###         #'after' => sub {
+###         #    $batch_base += $arg{'batch_size'};
+###         #},
+###     );
+###     if ($format eq FORMAT_JSON) {
+###         my %hash = (
+###             'batch_size' => $arg{'batch_size'},
+###             'parser_class' => ref $parser,
+###             'matcher_class' => ref $matcher,
+###             'loader_class' => ref $loader,
+###         );
+###         $hooks{'begin'} = sub {
+###             print $self->json_begin_hash_array_members(\%hash, 'records');
+###         };
+###         $hooks{'end'} = sub {
+###             print $self->json_end_hash_array_members;
+###         };
+###     }
+###     foreach my $file (@$files) {
+###         $parser->iterate(
+###             %arg,
+###             'hooks' => \%hooks,
+###             'file' => $file,
+###         );
+###     }
+### }
+### 
+### sub _old_step_prepare {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my ($site, $files) = @arg{qw(site files)};
+###     return (OK) if !@$files;
+###     my @ready;
+###     foreach my $file (@$files) {
+###         my $ok = $self->prepare(
+###             'file' => $file,
+###             'dry_run' => $self->dry_run,
+###             'verbose' => $self->verbose,
+###         );
+###         if ($ok) {
+###             push @ready, $file;
+###         }
+###         else {
+###             print STDERR "prepare failed: $file\n";
+###             return FAILED, @ready;
+###         }
+###     }
+###     my ($ok, @moved) = _move_to_dir(@ready, $self->directory('ready'));
+###     return ($ok ? OK : FAILED, @moved);
+### }
+### 
+### sub step_match {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my ($site, $files) = @arg{qw(site files)};
+###     return (OK) if !@$files;
+###     my $parser = $self->parser(%arg);
+###     my $matcher = $self->matcher(%arg);
+###     my $batch_base = 1;
+###     my %hooks = (
+###         #'before' => sub {
+###         #    $batch_base = 1;
+###         #},
+###         'each' => sub {
+###             my %param = @_;
+###             my $batch = $param{'batch'};
+###             my $results = $matcher->match(@$batch);
+###             $self->_show_matching_users(%param, %arg, 'batch_base' => $batch_base, 'results' => $results);
+###             $batch_base += $arg{'batch_size'};
+###         },
+###         #'after' => sub {
+###         #    $batch_base += $arg{'batch_size'};
+###         #},
+###     );
+###     foreach my $file (@$files) {
+###         $parser->iterate(
+###             %arg,
+###             'hooks' => \%hooks,
+###             'file' => $file,
+###         );
+###     }
+### }
+### 
+### sub step_load {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my ($site, $files) = @arg{qw(site files)};
+###     return (OK) if !@$files;
+###     my $parser = $self->parser(%arg);
+###     my $matcher = $self->matcher(%arg);
+###     my $loader = $self->loader(%arg);
+###     my $batch_base = 1;
+###     my %hooks = (
+###         #'before' => sub { $batch_base = 1 },
+###         #'after' => sub { $batch_base += $arg{'batch_size'} },
+###         'each' => sub {
+###             my %param = @_;
+###             my $batch = $param{'batch'};
+###             my @match_results = $matcher->match(@$batch);
+###             my $prepared_batch = $loader->prepare(@match_results);
+###             #my @objects = $loader->prepare(@match_results);
+###             if ($self->dry_run) {
+###                 my @members = @{ $prepared_batch->{'members'} };
+###                 foreach my $member (@members) {
+###                     my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
+###                         = @$member{qw(n action record object matches warning rejected matching)};
+###                     my @matches = $matches ? @$matches : ();
+###                     # my $raw = $record->{'_raw'};
+###                     my $parsed = $record->{'_parsed'};
+###                     $n += $batch_base;
+###                     print "--------------------------------------------------------------------------------\n" if $n;
+###                     print "Record: $n\n";
+###                     print "Action: ", uc $action, "\n";
+###                     # print "Raw input: $raw\n";
+###                     print "Parsed:\n";
+###                     print _indent(_json_encode($parsed));
+###                     print "Matches: ", scalar(@matches), "\n";
+###                     my $what = $action eq 'create' ? $record : $object;
+###                     if (defined $what) {
+###                         print "Object:\n";
+###                         print _indent(_json_encode($what));
+###                         if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
+###                             my $m = 0;
+###                             foreach my $match (@matches) {
+###                                 $m++;
+###                                 # TODO
+###                             }
+###                         }
+###                     }
+###                     else {
+###                         print "No match to $action\n";
+###                     }
+###                 }
+###             }
+###             else {
+###                 my ($ok, $failed) = $loader->load($prepared_batch);
+###                 $self->_show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
+###             }
+###             $batch_base += $arg{'batch_size'};
+###         },
+###     );
+###     $arg{'site'} = $site;
+###     foreach my $file (@$files) {
+###         $parser->iterate(
+###             %arg,
+###             'hooks' => \%hooks,
+###             'file' => $file,
+###         );
+###     }
+### }
 
 # --- Supporting functions
 
@@ -585,7 +601,7 @@ sub _show_matching_users {
     1;
 }
 
-sub _print_user {
+sub _show_parsed_user {
     my ($self, %arg) = @_;
     my $user = $arg{'user'};
     my $n = $arg{'n'};
@@ -595,6 +611,9 @@ sub _print_user {
     # printf "    raw data:   %s\n", $user->{'_raw'};
     print $self->_user_to_text($user, 2);
     print "\}\n";
+}
+
+sub _show_unparsed_user {
 }
 
 sub _show_prepared_users {
@@ -628,8 +647,10 @@ sub _show_prepared_users {
     my $n = $batch_base;
     my $double_divider = scalar('=' x 80) . "\n";
     my $divider = scalar('-' x 80) . "\n";
-    print $double_divider if !$splitter;
-    print "Batch $batch_num\n";
+    if ($format eq FORMAT_TEXT) {
+        print $double_divider if !$splitter;
+        print "Batch $batch_num\n";
+    }
     foreach my $member ($batch->members) {
         my $action = $member->{'action'};
         my $user = $member->{$action};
@@ -673,7 +694,7 @@ sub _show_prepared_users {
         }
         else {
             if ($format eq FORMAT_JSON) {
-                print _json_encode({
+                _json_append({
                     'old' => $old,
                     'new' => $user,
                     'via' => $via,
@@ -726,11 +747,13 @@ sub _show_prepared_users {
     }
 }
 
-sub show_user_load_results {
+sub _show_user_load_results {
     my ($self, %arg) = @_;
     my $batch = $arg{'batch'};
+    my $format = $arg{'format'};
     my ($num_ok, $num_failed) = @arg{qw(ok failed)};
-    1;
+    my @members = @{ $batch->{'members'} };
+    $self->out(@members);
 }
 
 sub _show_error {
@@ -779,41 +802,84 @@ sub _user_to_text {
 
 # --- Junk
 
-sub old_prepare {
-    my $self = shift;
-    my %arg = (%$self, @_);
-    my ($site, $file) = @arg{qw(site file)};
-    my $parser = $self->parser(%arg);
-    my $matcher = $self->matcher(%arg);
-    my $loader = $self->loader(%arg);
-    my $batch_base = 1;
-    my $format = $self->format;
-    $arg{'site'} = $site;
-    if ($format eq FORMAT_JSON) {
-        my %hash = (
-            'batch_size' => $arg{'batch_size'},
-            'parser_class' => ref $parser,
-            'matcher_class' => ref $matcher,
-            'loader_class' => ref $loader,
-        );
-        $arg{'begin'} = sub {
-            print $self->json_begin_hash_array_members(\%hash, 'records');
-        };
-        $arg{'end'} = sub {
-            print $self->json_end_hash_array_members;
-        };
-    }
-    $arg{'each'} = sub {
-        my %param = @_;
-        my $batch = $param{'batch'};
-        my @match_results = $matcher->match(@$batch);
-        my $prepared_batch = $loader->prepare(@match_results);
-        $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
-    };
-    $arg{'after'} = sub {
-        $batch_base += $arg{'batch_size'};
-    };
-    $parser->iterate(%arg);
-}
+### sub old_prepare {
+###     my $self = shift;
+###     my %arg = (%$self, @_);
+###     my ($site, $file) = @arg{qw(site file)};
+###     my $parser = $self->parser(%arg);
+###     my $matcher = $self->matcher(%arg);
+###     my $loader = $self->loader(%arg);
+###     my $batch_base = 1;
+###     my $format = $self->format;
+###     $arg{'site'} = $site;
+###     if ($format eq FORMAT_JSON) {
+###         my %hash = (
+###             'batch_size' => $arg{'batch_size'},
+###             'parser_class' => ref $parser,
+###             'matcher_class' => ref $matcher,
+###             'loader_class' => ref $loader,
+###         );
+###         $arg{'begin'} = sub {
+###             print $self->json_begin_hash_array_members(\%hash, 'records');
+###         };
+###         $arg{'end'} = sub {
+###             print $self->json_end_hash_array_members;
+###         };
+###     }
+###     $arg{'each'} = sub {
+###         my %param = @_;
+###         my $batch = $param{'batch'};
+###         my @match_results = $matcher->match(@$batch);
+###         my $prepared_batch = $loader->prepare(@match_results);
+###         $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+###     };
+###     $arg{'after'} = sub {
+###         $batch_base += $arg{'batch_size'};
+###     };
+###     $parser->iterate(%arg);
+### }
+###
+### sub step_parse {
+###     my ($self, @work) = @_;
+###     my %arg = (%$self, @work);
+###     my ($site, $files) = @arg{qw(site files)};
+###     return (OK) if !@$files;
+###     my $parser = $self->parser(%arg);
+###     my (@errors, @parsed, @unparsed);
+###     my %hook = (
+###         'each' => sub {
+###             my %param = @_;
+###             my $batch = $param{'batch'};
+###             my ($user) = @$batch;
+###             $self->_show_parsed_user(%arg, 'user' => $user);
+###         },
+###         'error' => sub {
+###             my %param = @_;
+###             my ($file, $n, $err) = @param{qw(file n error)};
+###             ($err) = split /\n/, $err;
+###             push @errors, [$file, $n, $err];
+###         },
+###         'end' => sub {
+###             my %param = @_;
+###             my $file = $param{'file'};
+###             if (@errors) {
+###                 push @unparsed, $file;
+###             }
+###             else {
+###                 push @parsed, $file;
+###             }
+###             @errors = ();
+###         },
+###     );
+###     foreach my $file (@$files) {
+###         $parser->iterate(
+###             %arg,
+###             %hook,
+###             'file' => $file,
+###         );
+###     }
+### }
+
 
 1;
+
