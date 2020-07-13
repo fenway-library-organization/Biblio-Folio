@@ -87,14 +87,16 @@ sub end {
 sub out {
     my $self = shift;
     my $format = $self->format;
+    my $verb = $self->verb;
     if ($format eq FORMAT_JSON) {
         _json_append($self->{'_json_context'}, @_);
         return;
     }
-    elsif ($self->verb eq 'parse') {
+    elsif ($verb eq 'parse') {
         foreach my $user (@_) {
             $self->_show_parsed_user('user' => $user);
         }
+        return;
     }
     foreach my $member (@_) {
         my ($n, $ok, $error, $status) = @$member{qw(n ok error status)};
@@ -694,12 +696,14 @@ sub _show_prepared_users {
         }
         else {
             if ($format eq FORMAT_JSON) {
-                _json_append({
-                    'old' => $old,
-                    'new' => $user,
-                    'via' => $via,
-                    'changes' => $member->{'changes'},
-                });
+                _json_append($self->{'_json_context'},
+                    {
+                        'old' => $old,
+                        'new' => $user,
+                        'via' => $via,
+                        'changes' => $member->{'changes'},
+                    }
+                );
             }
             elsif ($format eq FORMAT_TEXT) {
                 print $divider;
