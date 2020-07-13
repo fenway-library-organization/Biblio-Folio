@@ -27,6 +27,7 @@ sub create {
         my @tables = $self->tables;
         my @indexes = $self->indexes;
         die "no tables?" if !@tables;
+        my $dbh = $self->dbh;
         $dbh->begin_work;
         my $ok;
         eval {
@@ -35,7 +36,7 @@ sub create {
                 $self->_create_table($t, $table);
             }
             while (@indexes > 1) {
-                (my ($i, $index) = splice @indexes, 0, 2;
+                my ($i, $index) = splice @indexes, 0, 2;
                 $self->_create_index($i, $index);
             }
             $ok = 1;
@@ -187,7 +188,7 @@ sub _create_index {
 
 sub DESTROY {
     my ($self) = @_;
-    my $dbh = $self->{'dbh'}
+    my $dbh = $self->{'dbh'};
     $dbh->disconnect if $dbh;
 }
 
