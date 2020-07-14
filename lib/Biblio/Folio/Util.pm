@@ -649,10 +649,11 @@ sub _json_append {
     my $ind = $ctx->{'indent'};
     my $fh = $ctx->{'fh'};
     foreach (@_) {
-        print $fh ",\n", $ind if $ctx->{'count'}++;
+        print $fh ',' if $ctx->{'count'}++;
+        print $fh "\n", $ind;
         my $str = $json->encode($_);
         chomp $str;
-        $str =~ s/^/$ind/mg;
+        $str =~ s/^/$ind/msg;
         print $fh $str;
     }
 }
