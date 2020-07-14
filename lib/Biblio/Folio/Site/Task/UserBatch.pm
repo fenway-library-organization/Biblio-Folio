@@ -20,7 +20,6 @@ use constant qw(OK     0);
 use constant qw(FAILED 1);
 
 sub site { @_ > 1 ? $_[0]{'site'} = $_[1] : $_[0]{'site'} }
-sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
 sub context { @_ > 1 ? $_[0]{'context'} = $_[1] : $_[0]{'context'} }
 
 sub batch { @_ > 1 ? $_[0]{'context'}{'batch'} = $_[1] : $_[0]{'context'}{'batch'} }
@@ -302,10 +301,12 @@ sub prepare {
 sub load {
     my ($self, %arg) = @_;
     $arg{'batch_size'} ||= 1;
-    my $files = $arg{'files'};
-    return if !@$files;
     $self->begin('load', %arg);
+    my $files = $arg{'files'};
     my $site = $self->site;
+    my $sorter = $self->sorter(%arg);
+    $files = [ $sorter->sort(@$files) ];
+    $self->end, return if !@$files;
     my $parser = $self->parser(%arg);
     my $matcher = $self->matcher(%arg);
     my $loader = $self->loader(%arg);
@@ -321,37 +322,6 @@ sub load {
             #my @objects = $loader->prepare(@match_results);
             if ($self->dry_run) {
                 $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
-                # my @members = @{ $prepared_batch->{'members'} };
-                # foreach my $member (@members) {
-                #     my ($n, $action, $record, $object, $matches, $warning, $rejected, $matching)
-                #         = @$member{qw(n action record object matches warning rejected matching)};
-                #     my @matches = $matches ? @$matches : ();
-                #     # my $raw = $record->{'_raw'};
-                #     my $parsed = $record->{'_parsed'};
-                #     $n += $batch_base;
-                #     print "--------------------------------------------------------------------------------\n" if $n;
-                #     print "Record: $n\n";
-                #     print "Action: ", uc $action, "\n";
-                #     # print "Raw input: $raw\n";
-                #     print "Parsed:\n";
-                #     print _indent(_json_encode($parsed));
-                #     print "Matches: ", scalar(@matches), "\n";
-                #     my $what = $action eq 'create' ? $record : $object;
-                #     if (defined $what) {
-                #         print "Object:\n";
-                #         print _indent(_json_encode($what));
-                #         if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
-                #             my $m = 0;
-                #             foreach my $match (@matches) {
-                #                 $m++;
-                #                 # TODO
-                #             }
-                #         }
-                #     }
-                #     else {
-                #         print "No match to $action\n";
-                #     }
-                # }
             }
             else {
                 my ($ok, $failed) = $loader->load($prepared_batch);

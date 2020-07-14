@@ -97,8 +97,9 @@ sub kind {
 }
 
 sub worker {
-    my ($self, $actor, %arg) = @_;
-    my $kind = $arg{'kind'} ||= $self->kind;
+    my ($self, $actor) = @_;
+    my $ctx = $self->context;
+    my $kind = $ctx->{'kind'} ||= $self->kind;
     my $worker = $self->{'workers'}{$actor};
     return $worker if $worker;
     my $profile = $self->profile;
@@ -106,7 +107,7 @@ sub worker {
     my $pkg = $site->class_for($kind, $actor, $profile);
     _use_class($pkg);
     return $self->{'workers'}{$actor} = $pkg->new(
-        %arg,
+        %$ctx,
         'site' => $self->site,
         'profile' => $self->profile,
         'kind' => $kind,
