@@ -6,8 +6,11 @@
 *~
 *.bak
 *.old
+*.new
+*.new2
 /old
 /lib/Biblio/Folio/Classes.pm
 /.perldb
 /perl5db.pl
 /private
+/util
