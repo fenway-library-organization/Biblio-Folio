@@ -74,21 +74,27 @@ my $exit_status = 0;
 foreach my $site_name (@site_names) {
     blather "Site $site_name\n";
     my $site = $folio->site($site_name);
-    my ($out_file, @site_files) = pickup($site, $action, @files);
+    my ($out, @site_files) = pickup($site, $action, @files);
     if (@site_files) {
         blather "Found new files:\n";
         blather '  ', $_->{'path'}, "\n" for @site_files;
+        blather "Output will be written to:\n";
+        blather '  ', $out->{'path'}, "\n";
         (my $acting = ucfirst $action) =~ s/e?$/ing/;
-        my $task = $site->task('user_batch', %arg);
+        my $task = $site->task('user_batch', 
+            %arg,
+            'output_file' => $out->{'path'},
+        );
         blatherf "%s %s...\n", hms(), $acting;
         $task->$action(
             'files' => [map { $_->{'path'} } @site_files],
             %arg,
         );
         blatherf "%s %s\n", hms(), 'Finishing...';
-        dispose($site, $out_file, @site_files);
-        blatherf "%s %s\n", hms(), 'Done';
-        print STDOUT join("\t", $site_name, $out_file->{'path'}), "\n";
+        my $outcome = dispose($site, $out, @site_files);
+        $exit_status = 2 if $outcome eq 'failed';
+        print STDOUT join("\t", $site_name, $outcome, $out->{'path'}), "\n";
+        blatherf "%s %s\n", hms(), uc $outcome;
     }
     else {
         blather "No new files\n";
@@ -180,7 +186,7 @@ sub pickup {
         }
     }
     my %dir = directories_for_action($action);
-    my ($origin, $tmp, $ok, $failed, $results) = map { $site->path("var/patrons/$_") } @dir{qw(origin tmp ok failed results)};
+    my ($origin, $tmp, $ok, $failed, $results) = map { $site->path(dir("var/patrons/$_")) } @dir{qw(origin tmp ok failed results)};
     @files = files($origin) if !@files;
     return if !@files;
     if ($arg{'dry_run'}) {
@@ -194,12 +200,15 @@ sub pickup {
     elsif (!$arg{'dry_run'}) {
         $out = "$results/results.json";
     }
-    xmkpath($results) if !$arg{'dry_run'};
+    xmkpath($results) if defined $results && !$arg{'dry_run'};
     if (defined $out) {
-        open STDOUT, '>', $out or fatal "open $out for writing: $!";
+        # open STDOUT, '>', $out or fatal "open $out for writing: $!";
+        $out = file($out);
+        my $outdirs = $out->{'directory'};
+        @$outdirs{qw(tmp ok failed)} = ($tmp, $ok, $failed);
     }
     else {
-        $out = '-';
+        $out = file('-');
     }
     #if ($action eq 'load' && !$arg{'dry_run'}) {
     #    @files = loadable($site, @files);
@@ -213,49 +222,29 @@ sub pickup {
         $fdirs->{'failed'}  = $failed;
         $fdirs->{'results'} = $results;
     }
-    return file($out), moveto($tmp, @files);
+    return $out, moveto($tmp, @files);
 }
 
-sub expand {
-    my $str = shift;
-    my %substitute = (
-        'n' => $now,
-        'p', => $$,
-        @_,
-    );
-    $str =~ s{%([%0-9A-Za-z])}{
-        my $key = $1;
-        my $val = $substitute{$key};
-        my $ref = ref $val;
-        if    (!defined $val ) { ''       }
-        elsif ($ref eq 'CODE') { $val->() }
-        elsif ($key eq '%'   ) { '%'      }
-        elsif ($ref eq ''    ) { $val     }
-        else {
-            fatal "internal error: can't expand %$key to a(n) $ref"
-        }
-    }eg;
-    #$str =~ s{%n}{$now};
-    #$str =~ s{%p}{$$};
-    return $str;
+sub dir {
+    my ($dir) = @_;
+    $dir =~ s{%n}{$now};
+    $dir =~ s{%p}{$$};
+    return $dir;
 }
 
 sub dispose {
-    my ($site, $results, @files) = @_;
-    foreach my $file ($results, @files) {
-        next if !defined $file;
+    my $site = shift;
+    my @files = grep { defined } @_;
+    my (@failed, @ok);
+    my $outcome = (grep { $_->{'failed'} } @files) ? 'failed' : 'ok';
+    foreach my $file (@files) {
         my $f = $file->{'path'};
         if ($f ne '-') {
             my $fdirs = $file->{'directory'};
-            if ($file->{'failed'}) {
-                moveto($fdirs->{'failed'}, $file);
-                $exit_status = 2;
-            }
-            else {
-                moveto($fdirs->{'ok'}, $file);
-            }
+            moveto($fdirs->{$outcome}, $file);
         }
     }
+    return $outcome;
 }
 
 sub directories_for_action {
@@ -268,12 +257,14 @@ sub directories_for_action {
         'validate' => {
             'origin' => 'inbox',
             'ok' => 'valid',
-            'failed' => 'invalid'
+            'failed' => 'invalid',
+            'results' => 'tmp',
         },
         'prepare'  => {
             'origin' => 'valid',
             'ok' => 'ready',
             'failed' => 'invalid',
+            'results' => 'tmp',
         },
         'match'    => {
             'origin' => 'valid',
@@ -282,19 +273,18 @@ sub directories_for_action {
         'load'     => {
             'origin' => 'ready',
             'tmp' => $arg{'dry_run'} ? 'tmp' : 'loading/%n.%p',
-            'destination' => $arg{'dry_run'} ? 'tmp' : 'loading/%n.%p',
+            'results' => $arg{'dry_run'} ? 'tmp' : 'loading/%n.%p',
+            'ok' => 'loaded/%n.%p',
+            'failed' => 'loaded/%n.%p',
         }
     );
     fatal "internal error: no directories defined for action $action"
         if !exists $action2dir{$action};
     my %dir = %{ $action2dir{$action} };
     $dir{'tmp'}     ||= 'tmp';
-    foreach (qw(ok failed results)) {
-        $dir{$_} ||= $dir{'destination'} || $_;
-    }
-    for (values %dir) {
-        $_ = expand($_);
-    }
+    $dir{'ok'}      ||= $dir{'destination'} or fatal "internal error: no destination for action $action";
+    $dir{'failed'}  ||= $dir{'destination'} or fatal "internal error: no destination for action $action";
+    $dir{'results'} ||= $dir{'destination'} or fatal "internal error: no destination for action $action";
     return %dir;
 }
 
@@ -322,4 +312,93 @@ sub fatal {
     print STDERR "$0: @_\n";
     exit 2;
 }
+
+### sub loadable {
+###     my ($site, @files) = @_;
+###     if ($site eq 'sim') {  # XXX Hard-coded exception -- never load a student file without an accompanying employee file
+###         my ($nemp, $nstu) = (0, 0);
+###         foreach my $f (@files) {
+###             if ($f->{'name'} =~ /employee/i) {
+###                 $nemp++;
+###             }
+###             else {
+###                 $nstu++;
+###             }
+###         }
+###         return if !$nemp || !$nstu;
+###     }
+###     return @files;
+### }
+
+### sub find_files_to_parse {
+###     my ($site) = @_;
+###     my $inbox = $site->directory('var/patrons/inbox');
+###     my %dest2file;
+###     foreach my $f (glob("$inbox/*")) {
+###         next if ! -f $f;
+###         (my $base = $f) =~ s{.*/}{};
+###         $base =~ m{(.+)\.([^./]+)$};
+###         my $name = $1 // $base;
+###         my $ext = $2 // '';
+###         my $dest = sprintf('%s/%s.tab', $inbox, $name);
+###         next if exists $dest2file{$dest};
+###         $dest2file{$f} = $f, next if $ext eq 'tab';
+###         next if -e $dest && -M $f > -M $dest;
+###         # See if we should convert it or not
+###         my $convert = $site->file('bin/patron/convert');
+###         $convert .= "-$ext" if length $ext;
+###         if (-x $convert) {
+###             open my $fh, '-|', $convert, $f or die "exec $convert: $!";
+###             open my $fh_out, '>', $dest or die "open $dest for writing: $!";
+###             while (<$fh>) {
+###                 print $fh_out $_;
+###             }
+###             close $fh or die "$convert: exit status ", $?>>8;
+###             $dest2file{$dest} = $f;
+###         }
+###         else {
+###             system('cp', $f, $dest) == 0 or die "cp $f $dest: $!";
+###             $dest2file{$dest} = $f;
+###         }
+###     }
+###     return keys %dest2file;
+### }
+### 
+### sub find_files_to_validate {
+###     my ($site) = @_;
+###     my $inbox = $site->directory('var/patrons/inbox');
+###     my @files;
+###     foreach my $f (glob("$inbox/*")) {
+###         next if ! -f $f;
+###         push @files, $f;
+###     }
+###     return @files;
+### }
+### 
+### sub find_files_to_load {
+###     my ($site) = @_;
+###     my %dir = map { $site->directory("var/patrons/$_") } qw(ready loading loaded);
+###     my @files = files($dir{'ready'});
+###     moveto($dir{'loading'}, @files);
+###     return @files;
+### }
+
+### sub open_out_and_err {
+###     my ($fhout, $fherr);
+###     if (defined $arg{'out_file'}) {
+###         my $f = $arg{'out_file'};
+###         open $fhout, '>', $f or fatal "open $f: $!";
+###     }
+###     else {
+###         $fhout = \*STDOUT;
+###     }
+###     if (defined $arg{'err_file'}) {
+###         my $f = $arg{'err_file'};
+###         open $fherr, '>', $f or fatal "open $f: $!";
+###     }
+###     else {
+###         $fherr = \*STDERR;
+###     }
+###     return @$args{qw(out err)} = ($fhout, $fherr);
+### }
 

@@ -21,6 +21,9 @@ use constant qw(FAILED 1);
 
 sub site { @_ > 1 ? $_[0]{'site'} = $_[1] : $_[0]{'site'} }
 sub context { @_ > 1 ? $_[0]{'context'} = $_[1] : $_[0]{'context'} }
+sub output_file { @_ > 1 ? $_[0]{'output_file'} = $_[1] : $_[0]{'output_file'} }
+sub output_fh { @_ > 1 ? $_[0]{'output_fh'} = $_[1] : $_[0]{'output_fh'} }
+sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
 
 sub batch { @_ > 1 ? $_[0]{'context'}{'batch'} = $_[1] : $_[0]{'context'}{'batch'} }
 sub format { @_ > 1 ? $_[0]{'context'}{'format'} = $_[1] : $_[0]{'context'}{'format'} }
@@ -38,6 +41,15 @@ sub init {
     }
     elsif (!ref $self->{'profile'}) {
         $self->{'profile'} = $site->profile('user', $self->{'profile'});
+    }
+    if (defined $self->{'output_file'} && !defined $self->{'output_fh'}) {
+        my $f = $self->{'output_file'};
+        open my $fh, '>', $f
+            or die "open $f: $!";
+        $self->{'output_fh'} = $fh;
+    }
+    else {
+        $self->{'output_fh'} ||= \*STDOUT;
     }
     return $self;
 }
@@ -62,42 +74,51 @@ sub validator {
     return shift->worker('validator', @_);
 }
 
-sub begin {
-    my ($self, $verb, %context) = @_;
-    $self->verb($verb);
-    $self->context(\%context);
+sub output_container {
+    my ($self) = @_;
     my $format = $self->format || $self->format(FORMAT_TEXT);
     if ($format eq FORMAT_JSON) {
-        my $hash = { %context };
-        delete @$hash{qw(out err)};
-        $hash->{'profile_name'} = $self->profile->{'name'};
-        $self->{'_json_context'} =_json_begin($hash, $verb . '_results');
+        my %context = %{ $self->context };
+        my $output = { %context };
+        delete @$output{qw(out err)};
+        $output->{'profile_name'} = $self->profile->{'name'};
+        return $self->{'output'} = $output;
     }
+}
+
+sub begin {
+    my ($self, $verb, %context) = @_;
+    $context{'verb'} = $verb;
+    $self->context(\%context);
 }
 
 sub end {
     my ($self) = @_;
     my $format = $self->format;
     if ($format eq FORMAT_JSON) {
-        _json_end($self->{'_json_context'});
+        my $jctx = delete $self->{'_json_context'};
+        _json_end($jctx) if $jctx;
     }
 }
 
 sub out {
-    my $self = shift;
+    my ($self, @output) = @_;
     my $format = $self->format;
     my $verb = $self->verb;
     if ($format eq FORMAT_JSON) {
-        _json_append($self->{'_json_context'}, @_);
+        my $fhout = $self->output_fh;
+        my $jctx = $self->{'_json_context'}
+            ||= _json_begin($self->output_container, $verb . '_results', $fhout);
+        _json_append($jctx, @output);
         return;
     }
     elsif ($verb eq 'parse') {
-        foreach my $user (@_) {
+        foreach my $user (@output) {
             $self->_show_parsed_user('user' => $user);
         }
         return;
     }
-    foreach my $member (@_) {
+    foreach my $member (@output) {
         my ($n, $ok, $error, $status) = @$member{qw(n ok error status)};
     }
 }
@@ -188,11 +209,12 @@ sub validate {
             'file' => $file,
         );
     }
-    print join("\t", qw(row file error)), "\n"
+    my $fhout = $self->output_fh;
+    print $fhout join("\t", qw(row file error)), "\n"
         if @errors;
     foreach (@errors) {
         my ($file, $n, $err) = @$_;
-        print join("\t", $n, $file, $err), "\n";
+        print $fhout join("\t", $n, $file, $err), "\n";
     }
 }
 ### foreach my $f (@invalid) {
@@ -281,11 +303,12 @@ sub prepare {
             'matcher_class' => ref $matcher,
             'loader_class' => ref $loader,
         );
+        my $fhout = $self->output_fh;
         $hooks{'begin'} = sub {
-            print $self->json_begin_hash_array_members(\%hash, 'records');
+            print $fhout $self->json_begin_hash_array_members(\%hash, 'records');
         };
         $hooks{'end'} = sub {
-            print $self->json_end_hash_array_members;
+            print $fhout $self->json_end_hash_array_members;
         };
     }
     foreach my $file (@$files) {
@@ -318,14 +341,14 @@ sub load {
             my %param = @_;
             my $batch = $param{'batch'};
             my @match_results = $matcher->match(@$batch);
-            my $prepared_batch = $loader->prepare(@match_results);
+            $batch = $loader->prepare(@match_results);
             #my @objects = $loader->prepare(@match_results);
             if ($self->dry_run) {
-                $self->_show_prepared_users(%param, %arg, 'batch' => $prepared_batch, 'match_results' => \@match_results);
+                $self->_show_prepared_users(%param, %arg, 'batch' => $batch, 'match_results' => \@match_results);
             }
             else {
-                my ($ok, $failed) = $loader->load($prepared_batch);
-                $self->_show_user_load_results(%param, %arg, 'batch' => $prepared_batch, 'ok' => $ok, 'failed' => $failed);
+                my ($num_ok, $num_failed) = $loader->load($batch);
+                $self->_show_user_load_results(%param, %arg, 'batch' => $batch, 'ok' => $num_ok, 'failed' => $num_failed);
             }
             $batch_base += $arg{'batch_size'};
         },
@@ -391,10 +414,10 @@ sub load {
 ###             'loader_class' => ref $loader,
 ###         );
 ###         $hooks{'begin'} = sub {
-###             print $self->json_begin_hash_array_members(\%hash, 'records');
+###             print $fhout $self->json_begin_hash_array_members(\%hash, 'records');
 ###         };
 ###         $hooks{'end'} = sub {
-###             print $self->json_end_hash_array_members;
+###             print $fhout $self->json_end_hash_array_members;
 ###         };
 ###     }
 ###     foreach my $file (@$files) {
@@ -489,17 +512,17 @@ sub load {
 ###                     # my $raw = $record->{'_raw'};
 ###                     my $parsed = $record->{'_parsed'};
 ###                     $n += $batch_base;
-###                     print "--------------------------------------------------------------------------------\n" if $n;
-###                     print "Record: $n\n";
-###                     print "Action: ", uc $action, "\n";
-###                     # print "Raw input: $raw\n";
-###                     print "Parsed:\n";
-###                     print _indent(_json_encode($parsed));
-###                     print "Matches: ", scalar(@matches), "\n";
+###                     print $fhout "--------------------------------------------------------------------------------\n" if $n;
+###                     print $fhout "Record: $n\n";
+###                     print $fhout "Action: ", uc $action, "\n";
+###                     # print $fhout "Raw input: $raw\n";
+###                     print $fhout "Parsed:\n";
+###                     print $fhout _indent(_json_encode($parsed));
+###                     print $fhout "Matches: ", scalar(@matches), "\n";
 ###                     my $what = $action eq 'create' ? $record : $object;
 ###                     if (defined $what) {
-###                         print "Object:\n";
-###                         print _indent(_json_encode($what));
+###                         print $fhout "Object:\n";
+###                         print $fhout _indent(_json_encode($what));
 ###                         if (@matches > 1 && $action eq 'update' || @matches > 0 && $action eq 'create') {
 ###                             my $m = 0;
 ###                             foreach my $match (@matches) {
@@ -509,7 +532,7 @@ sub load {
 ###                         }
 ###                     }
 ###                     else {
-###                         print "No match to $action\n";
+###                         print $fhout "No match to $action\n";
 ###                     }
 ###                 }
 ###             }
@@ -537,15 +560,16 @@ sub _show_matching_users {
     my ($site, $source, $results, $batch_base, $format) = @arg{qw(site source results batch_base format)};
     my $file = $source->{'file'};
     my ($incoming, $matching) = map { $_->{'results'} } @$results{qw(incoming candidates)};
+    my $fhout = $self->output_fh;
     foreach my $inc (@$incoming) {
         my ($user, $n, $matches) = @$inc{qw(record n matches)};
         $n += $batch_base;
         my $m = @$matches;
         my $res = $m == 1 ? 'one' : $m > 1 ? 'multiple' : 'none';
         if ($format eq FORMAT_JSON) {
-            print "# ------------------------------------------------------------------------------\n"
+            print $fhout "# ------------------------------------------------------------------------------\n"
                 if $n > 1;
-            print _json_encode({
+            print $fhout _json_encode({
                 'index' => $n,
                 'input' => $user,
                 'matches' => $matches,
@@ -553,21 +577,21 @@ sub _show_matching_users {
             });
         }
         else {
-            printf "user %d \{\n", $n;
-            print $self->_user_to_text($user, 2);
-            printf "  file:             %s\n", $file;
-            printf "    row number:     %s\n", $n;
-            # printf "    raw data:       %s\n", $user->{'_raw'};
-            printf "    matches:        %d\n", $m;
+            printf $fhout "user %d \{\n", $n;
+            print $fhout $self->_user_to_text($user, 2);
+            printf $fhout "  file:             %s\n", $file;
+            printf $fhout "    row number:     %s\n", $n;
+            # printf $fhout "    raw data:       %s\n", $user->{'_raw'};
+            printf $fhout "    matches:        %d\n", $m;
             foreach my $i (0..$#$matches) {
                 my $match = $matches->[$i];
                 my ($matched_user, $matched_by) = @$match{qw(object by)};
                 my $bystr = join(', ', @$matched_by);
-                printf "  match %d on %s \{\n", $i, $bystr;
-                print $self->_user_to_text($matched_user, 4);
-                print "  \}\n";
+                printf $fhout "  match %d on %s \{\n", $i, $bystr;
+                print $fhout $self->_user_to_text($matched_user, 4);
+                print $fhout "  \}\n";
             }
-            print "\}\n";
+            print $fhout "\}\n";
         }
     }
     1;
@@ -577,12 +601,13 @@ sub _show_parsed_user {
     my ($self, %arg) = @_;
     my $user = $arg{'user'};
     my $n = $arg{'n'};
-    printf "user %d \{\n", $n;
-    printf "  file:         %s\n", $arg{'file'};
-    printf "    row number: %s\n", $n;
-    # printf "    raw data:   %s\n", $user->{'_raw'};
-    print $self->_user_to_text($user, 2);
-    print "\}\n";
+    my $fhout = $self->output_fh;
+    printf $fhout "user %d \{\n", $n;
+    printf $fhout "  file:         %s\n", $arg{'file'};
+    printf $fhout "    row number: %s\n", $n;
+    # printf $fhout "    raw data:   %s\n", $user->{'_raw'};
+    print $fhout $self->_user_to_text($user, 2);
+    print $fhout "\}\n";
 }
 
 sub _show_unparsed_user {
@@ -619,9 +644,10 @@ sub _show_prepared_users {
     my $n = $batch_base;
     my $double_divider = scalar('=' x 80) . "\n";
     my $divider = scalar('-' x 80) . "\n";
+    my $fhout = $self->output_fh;
     if ($format eq FORMAT_TEXT) {
-        print $double_divider if !$splitter;
-        print "Batch $batch_num\n";
+        print $fhout $double_divider if !$splitter;
+        print $fhout "Batch $batch_num\n";
     }
     foreach my $member ($batch->members) {
         my $action = $member->{'action'};
@@ -666,52 +692,51 @@ sub _show_prepared_users {
         }
         else {
             if ($format eq FORMAT_JSON) {
-                _json_append($self->{'_json_context'},
-                    {
-                        'old' => $old,
-                        'new' => $user,
-                        'via' => $via,
-                        'changes' => $member->{'changes'},
-                    }
-                );
+                $self->out({
+                    'old' => $old,
+                    'new' => $user,
+                    'via' => $via,
+                    'changes' => $member->{'changes'},
+                });
             }
             elsif ($format eq FORMAT_TEXT) {
-                print $divider;
-                printf "user %d : %s \{\n", $n, $action;
-                print $self->_user_to_text($user, 2);
-                printf "  file:             %s\n", $file;
-                printf "    row number: %s\n", $n;
-                # printf "    raw data:   %s\n", $member->{'record'}{'_raw'};
-                printf "    matches:    %d\n", $m;
+                my $fhout = $self->output_fh;
+                print $fhout $divider;
+                printf $fhout "user %d : %s \{\n", $n, $action;
+                print $fhout $self->_user_to_text($user, 2);
+                printf $fhout "  file:             %s\n", $file;
+                printf $fhout "    row number: %s\n", $n;
+                # printf $fhout "    raw data:   %s\n", $member->{'record'}{'_raw'};
+                printf $fhout "    matches:    %d\n", $m;
                 my @changes = @{ $member->{'changes'} || [] };
                 if (@changes) {
-                    print "  changes:\n";
+                    print $fhout "  changes:\n";
                     foreach (@changes) {
                         my ($verb, @etc) = @$_;
                         if ($verb eq 'set') {
-                            printf "    set %s\n",    shift @etc;
-                            printf "      new: %s\n", shift @etc;
+                            printf $fhout "    set %s\n",    shift @etc;
+                            printf $fhout "      new: %s\n", shift @etc;
                         }
                         elsif ($verb eq 'unset') {
-                            printf "    unset %s\n",  shift @etc;
-                            printf "      old: %s\n", shift @etc;
+                            printf $fhout "    unset %s\n",  shift @etc;
+                            printf $fhout "      old: %s\n", shift @etc;
                         }
                         elsif ($verb eq 'change') {
-                            printf "    change %s\n", shift @etc;
-                            printf "      old: %s\n", shift @etc;
-                            printf "      new: %s\n", shift @etc;
+                            printf $fhout "    change %s\n", shift @etc;
+                            printf $fhout "      old: %s\n", shift @etc;
+                            printf $fhout "      new: %s\n", shift @etc;
                         }
                         elsif ($verb eq 'keep') {
-                            printf "    keep %s (unchanged)\n", @etc;
+                            printf $fhout "    keep %s (unchanged)\n", @etc;
                         }
                         elsif ($verb eq 'protected') {
-                            printf "    keep %s (protected)\n", @etc;
+                            printf $fhout "    keep %s (protected)\n", @etc;
                         }
                         elsif ($verb eq 'add') {
-                            printf "    add %s\n", @etc;
+                            printf $fhout "    add %s\n", @etc;
                         }
                         else {
-                            printf "    $verb @etc\n";
+                            printf $fhout "    $verb @etc\n";
                         }
                     }
                 }
@@ -794,10 +819,10 @@ sub _user_to_text {
 ###             'loader_class' => ref $loader,
 ###         );
 ###         $arg{'begin'} = sub {
-###             print $self->json_begin_hash_array_members(\%hash, 'records');
+###             print $fhout $self->json_begin_hash_array_members(\%hash, 'records');
 ###         };
 ###         $arg{'end'} = sub {
-###             print $self->json_end_hash_array_members;
+###             print $fhout $self->json_end_hash_array_members;
 ###         };
 ###     }
 ###     $arg{'each'} = sub {

@@ -97,9 +97,9 @@ sub kind {
 }
 
 sub worker {
-    my ($self, $actor) = @_;
+    my ($self, $actor, %arg) = @_;
     my $ctx = $self->context;
-    my $kind = $ctx->{'kind'} ||= $self->kind;
+    my $kind = $arg{'kind'} || ($ctx->{'kind'} ||= $self->kind);
     my $worker = $self->{'workers'}{$actor};
     return $worker if $worker;
     my $profile = $self->profile;

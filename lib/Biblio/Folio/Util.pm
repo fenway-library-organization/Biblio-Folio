@@ -66,7 +66,7 @@ use File::Basename qw(dirname basename);
 
 use constant DEBUGGING => $ENV{'DD'};
 
-use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.000+0000';
+use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.%L+0000';
 use constant COMPACT_UTC_FORMAT => '%Y%m%dT%H%M%SZ';
 
 use constant TRUE => JSON::true;
@@ -79,7 +79,7 @@ use constant CQL_NULL => 'null';
 
 use vars qw($rx_const_token);
 
-my $json = JSON->new->pretty->canonical->convert_blessed->allow_unknown;
+my $json = JSON->new->pretty->canonical->convert_blessed->allow_blessed->allow_unknown;
 my $dumper = Data::Dumper->new([])->Terse(1)->Indent(0)->Sortkeys(1)->Sparseseen(1);
 my $uuidgen = Data::UUID->new;
 my %tok2const = (
@@ -416,49 +416,62 @@ sub _utc_datetime {
     $format ||= FOLIO_UTC_FORMAT;
     $format = COMPACT_UTC_FORMAT if $format eq 'compact';
     return strftime($format, gmtime) if !defined $t;
+    my $F = 0;  # Fraction of a second
     if ($t =~ m{^[0-9]+$}) {
         # Seconds since the Unix epoch
-        return strftime($format, gmtime $t);
-    }
-    $t =~ s/
-        ^
-        ([1-9][0-9][0-9][0-9])
-        -?
-        ([0-9][0-9])
-        -?
-        ([0-9][0-9])
-    //x or die "malformed date: $t";
-    my ($Y, $m, $d) = ($1, $2, $3);
-    my ($H, $M, $S) = (0, 0, 0, 0);
-    if ($t =~ s/^T//) {
-        $t =~ s/
-            ^
-            ([0-9][0-9])
-            :?
-            ([0-9][0-9])
-            :?
-            ([0-9][0-9])
-            (?:
-                \.[0-9]+
-            )?
-        //x or die "bad time: $t";
-        ($H, $M, $S) = ($1, $2, $3, $4);
-    }
-    my @datetime = ($S, $M, $H, $d, $m-1, $Y-1900);
-    my $z;
-    if ($t =~ /^([-+]0000|Z)$/) {
-        return strftime($format, @datetime);
-    }
-    elsif ($t =~ /^([-+]) ( [0-9][0-9] (?:[0-9][0-9])? )$/x) {
-        my $offset = int($1 . sprintf('%02d%02d00', $2, $3||0));
-        my $s = strftime('%s', @datetime);
-        $s += $offset;  # ???
-        return strftime($format, gmtime $s);
+        $t = strftime($format, gmtime $t);
     }
     else {
-        my $s = strftime('%s', @datetime);
-        return strftime($format, localtime $s);
+        # Ymd string with optional time and timezone
+        $t =~ s/
+            ^
+            ([1-9][0-9][0-9][0-9])
+            -?
+            ([0-9][0-9])
+            -?
+            ([0-9][0-9])
+        //x or die "malformed date: $t";
+        my ($Y, $m, $d) = ($1, $2, $3);
+        my ($H, $M, $S) = (0, 0, 0);
+        my $z;
+        if ($t =~ s/^T//) {
+            if ($t =~ s/
+                ^
+                ([0-9][0-9])
+                :?
+                ([0-9][0-9])
+                :?
+                ([0-9][0-9])
+                (?:
+                    \.([0-9]+)
+                )?
+            //x) {
+                ($H, $M, $S, $F) = ($1, $2, $3, $4||0);
+            }
+            $z = $1 if $t =~ s/^(Z|[-+][0-9][0-9](?:[0-9][0-9])?)$//;
+        }
+        die "junk at end of date/time: $t" if length $t;
+        my @datetime = ($S, $M, $H, $d, $m-1, $Y-1900);
+        if (!defined $z) {
+            my $s = strftime('%s', @datetime);
+            $t = strftime($format, gmtime $s);
+        }
+        elsif ($z =~ /^([-+]0000|Z)$/) {
+            $t = strftime($format, @datetime);
+        }
+        elsif ($z =~ /^([-+]) ( [0-9][0-9] (?:[0-9][0-9])? )$/x) {
+            my $offset = int($1 . sprintf('%02d%02d00', $2, $3||0));
+            my $s = strftime('%s', @datetime);
+            $s += $offset;  # ???
+            $t = strftime($format, gmtime $s);
+        }
     }
+    # Expand milliseconds (%L) or microseconds (%K)
+    $t =~ s/%L/sprintf '%03d', substr($F, 0, 3)/e
+    or
+    $t =~ s/%M/sprintf '%06d', substr($F, 0, 6)/e
+    ;
+    return $t;
 }
 
 sub _uuid {
