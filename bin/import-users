@@ -1,0 +1,325 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use lib '/usr/local/folio/lib';
+
+use Biblio::Folio;
+use Biblio::Folio::Util qw(FORMAT_TEXT FORMAT_JSON);
+use File::Basename qw(basename dirname);
+use POSIX qw(strftime);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub blather;
+sub blatherf;
+sub usage;
+sub fatal;
+
+my $root = '/usr/local/folio';
+my $now = strftime('%Y%m%dT%H%M%S', localtime);
+my %arg = (
+    'dry_run' => 0,
+    'format' => FORMAT_JSON,
+    'batch_size' => 10,
+);
+my $action = 'load';
+GetOptions(
+    'r|root=s' => \$root,
+    'v|verbose' => \$arg{'verbose'},
+    'n|dry-run' => sub { $arg{'dry_run'} = 1; $action = 'load' },
+    'o|output=s' => \$arg{'out'},
+    #'e|errors=s' => \$arg{'err'},
+    'q|stop-after=s' => \$action,
+    'p|parse' => sub { $action = 'parse' },
+    'v|validate' => sub { $action = 'validate' },
+    't|prepare' => sub { $action = 'prepare' },
+    'm|match' => sub { $action = 'match' },
+    'l|load' => sub { $action = 'load' },
+    'T|as-text' => sub { $arg{'format'} = FORMAT_TEXT },
+    'k|batch-size=i' => \$arg{'batch_size'},
+# Prepare only?
+    'S|split-into=s' => \$arg{'split_into'},
+    'O|only-batches=s' => \$arg{'only_batches'},
+) or usage;
+# TODO: usage 'option -S may only be used with -p, -v, -t, or -m'
+#           if $arg{'split_into'} && $action !~ /^(parse|validate|prepare|match)$/;
+
+my $folio = Biblio::Folio->new('root' => $root);
+
+my (@site_names, @files);
+while (@ARGV && $ARGV[0] =~ s/^[@]//) {
+    push @site_names, shift @ARGV;
+}
+if (@ARGV) {
+    # bin/process [OPTION...] [@SITE] FILE...
+    usage if @site_names != 1;
+    @files = map { file($_) } @ARGV;
+}
+else {
+    @site_names = $folio->site_names if !@site_names;
+}
+
+if ($arg{'dry_run'}) {
+    $arg{'verbose'} = 1;
+    print STDERR "Dry run -- no changes will be made\n";
+}
+elsif (-t STDERR) {
+    $arg{'verbose'} = 1;
+}
+
+my @output;
+my $exit_status = 0;
+foreach my $site_name (@site_names) {
+    blather "Site $site_name\n";
+    my $site = $folio->site($site_name);
+    my ($out_file, @site_files) = pickup($site, $action, @files);
+    if (@site_files) {
+        blather "Found new files:\n";
+        blather '  ', $_->{'path'}, "\n" for @site_files;
+        (my $acting = ucfirst $action) =~ s/e?$/ing/;
+        my $task = $site->task('user_batch', %arg);
+        blatherf "%s %s...\n", hms(), $acting;
+        $task->$action(
+            'files' => [map { $_->{'path'} } @site_files],
+            %arg,
+        );
+        blatherf "%s %s\n", hms(), 'Finishing...';
+        dispose($site, $out_file, @site_files);
+        blatherf "%s %s\n", hms(), 'Done';
+        print STDOUT join("\t", $site_name, $out_file->{'path'}), "\n";
+    }
+    else {
+        blather "No new files\n";
+    }
+    blather "\n";
+}
+
+exit $exit_status;
+
+# --- Functions
+
+sub hms {
+    return strftime('%H:%M:%S', localtime);
+}
+
+sub files {
+    my ($dir, $rx) = @_;
+    my @files = map { file($_) } glob("$dir/*");
+    return @files if !defined $rx;
+    return grep { $_->{'name'} =~ $rx } @files;
+}
+
+sub file {
+    my ($f) = @_;
+    my $dir = dirname($f);
+    my $name = basename($f);
+    my $ext = extension($f);
+    my %file = (
+        'path' => $f,
+        'directory' => {
+            'current' => $dir,
+            'origin' => $dir,
+        },
+        'name' => $name,
+        'extension' => $ext,
+    );
+    $file{'original'} = { %file };
+    return \%file;
+}
+
+sub extension {
+    return $1 if shift() =~ m{(\.[^./]*)$};
+    return '';
+}
+
+sub moveto {
+    my ($destdir, @files) = @_;
+    $DB::single = 1;
+    my $nerr = 0;
+    foreach my $f (@files) {
+        my $name = $f->{'name'};
+        my $curpath = $f->{'path'},
+        my $newpath = "$destdir/$name";
+        if ($newpath ne $curpath) {
+            xmkpath($destdir);
+            xrename($curpath, $newpath);
+            $f->{'directory'}{'current'} = $destdir;
+            $f->{'path'} = $newpath;
+        }
+    }
+    return @files;
+}
+
+sub xrename {
+    my ($from, $to) = @_;
+    rename $from, $to
+        or fatal "move $from $to: $!";
+}
+
+sub xmkpath {
+    my ($dir) = @_;
+    my @make;
+    while (!-d $dir && $dir ne '/') {
+        $DB::single = 1;
+        unshift @make, $dir;
+        $dir = dirname($dir);
+    }
+    xmkdir(@make) if @make;
+}
+
+sub pickup {
+    my ($site, $action, @files) = @_;
+    my $name = $site->name;
+    my $sort = "site/$name/bin/sort-files";
+    if (-x $sort) {
+        if (system($sort, $name, $action) != 0) {
+            my $e = $? >> 8;
+            fatal "$sort failed with exit status $e";
+        }
+    }
+    my %dir = directories_for_action($action);
+    my ($origin, $tmp, $ok, $failed, $results) = map { $site->path("var/patrons/$_") } @dir{qw(origin tmp ok failed results)};
+    @files = files($origin) if !@files;
+    return if !@files;
+    if ($arg{'dry_run'}) {
+        ($ok, $failed) = ($origin, $origin);
+    }
+    my $out = $arg{'out'};
+    if (defined $out) {
+        $out = sprintf($out, $name);
+        $results = dirname($out);
+    }
+    elsif (!$arg{'dry_run'}) {
+        $out = "$results/results.json";
+    }
+    xmkpath($results) if !$arg{'dry_run'};
+    if (defined $out) {
+        open STDOUT, '>', $out or fatal "open $out for writing: $!";
+    }
+    else {
+        $out = '-';
+    }
+    #if ($action eq 'load' && !$arg{'dry_run'}) {
+    #    @files = loadable($site, @files);
+    #    return if !@files;
+    #}
+    foreach my $file (@files) {
+        my $fdirs = $file->{'directory'};
+        $fdirs->{'origin'} ||= $origin;  # It might come from somewhere else
+        $fdirs->{'tmp'}     = $tmp;
+        $fdirs->{'ok'}      = $ok;
+        $fdirs->{'failed'}  = $failed;
+        $fdirs->{'results'} = $results;
+    }
+    return file($out), moveto($tmp, @files);
+}
+
+sub expand {
+    my $str = shift;
+    my %substitute = (
+        'n' => $now,
+        'p', => $$,
+        @_,
+    );
+    $str =~ s{%([%0-9A-Za-z])}{
+        my $key = $1;
+        my $val = $substitute{$key};
+        my $ref = ref $val;
+        if    (!defined $val ) { ''       }
+        elsif ($ref eq 'CODE') { $val->() }
+        elsif ($key eq '%'   ) { '%'      }
+        elsif ($ref eq ''    ) { $val     }
+        else {
+            fatal "internal error: can't expand %$key to a(n) $ref"
+        }
+    }eg;
+    #$str =~ s{%n}{$now};
+    #$str =~ s{%p}{$$};
+    return $str;
+}
+
+sub dispose {
+    my ($site, $results, @files) = @_;
+    foreach my $file ($results, @files) {
+        next if !defined $file;
+        my $f = $file->{'path'};
+        if ($f ne '-') {
+            my $fdirs = $file->{'directory'};
+            if ($file->{'failed'}) {
+                moveto($fdirs->{'failed'}, $file);
+                $exit_status = 2;
+            }
+            else {
+                moveto($fdirs->{'ok'}, $file);
+            }
+        }
+    }
+}
+
+sub directories_for_action {
+    my ($action) = @_;
+    my %action2dir = (
+        'parse'    => {
+            'origin' => 'inbox',
+            'destination' => 'inbox',
+        },
+        'validate' => {
+            'origin' => 'inbox',
+            'ok' => 'valid',
+            'failed' => 'invalid'
+        },
+        'prepare'  => {
+            'origin' => 'valid',
+            'ok' => 'ready',
+            'failed' => 'invalid',
+        },
+        'match'    => {
+            'origin' => 'valid',
+            'destination' => 'valid',
+        },
+        'load'     => {
+            'origin' => 'ready',
+            'tmp' => $arg{'dry_run'} ? 'tmp' : 'loading/%n.%p',
+            'destination' => $arg{'dry_run'} ? 'tmp' : 'loading/%n.%p',
+        }
+    );
+    fatal "internal error: no directories defined for action $action"
+        if !exists $action2dir{$action};
+    my %dir = %{ $action2dir{$action} };
+    $dir{'tmp'}     ||= 'tmp';
+    foreach (qw(ok failed results)) {
+        $dir{$_} ||= $dir{'destination'} || $_;
+    }
+    for (values %dir) {
+        $_ = expand($_);
+    }
+    return %dir;
+}
+
+sub xmkdir {
+    foreach my $dir (@_) {
+        -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
+    }
+}
+
+sub blather {
+    print STDERR @_ if $arg{'verbose'};
+}
+
+sub blatherf {
+    printf STDERR @_ if $arg{'verbose'};
+}
+
+sub usage {
+    print STDERR "usage: $0 [OPTION...] [\@SITE] [FILE...]\n";
+    print STDERR "@_\n" if @_;
+    exit 1;
+}
+
+sub fatal {
+    print STDERR "$0: @_\n";
+    exit 2;
+}
+
