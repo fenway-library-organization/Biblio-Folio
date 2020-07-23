@@ -142,7 +142,6 @@ sub extension {
 
 sub moveto {
     my ($destdir, @files) = @_;
-    $DB::single = 1;
     my $nerr = 0;
     foreach my $f (@files) {
         my $name = $f->{'name'};
@@ -168,7 +167,6 @@ sub xmkpath {
     my ($dir) = @_;
     my @make;
     while (!-d $dir && $dir ne '/') {
-        $DB::single = 1;
         unshift @make, $dir;
         $dir = dirname($dir);
     }

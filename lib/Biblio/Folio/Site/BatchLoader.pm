@@ -183,7 +183,8 @@ sub _make_requests {
     my @requests;
     my $actions = $self->actions;
     foreach my $member (@$members) {
-        my $a = $member->{'action'} or next;  # XXX
+        my $a = $member->{'action'};
+        next if !defined $a || $a eq 'unchanged' || $a eq 'skip';
         my $obj = $member->{$a} or next;  # XXX
         my ($m, $u);
         if (defined $method) {
@@ -220,17 +221,21 @@ sub load {
             $_->{'ok'} = 1 for @ok;
         }
         else {
-            # XXX
             @failed = @$members;
             my ($status, $content) = ($res->status, $res->content);
-            @$_{qw(status error)} = ($status, $content) for @$members;
+            @$_{qw(status error)} = ($status, $content) for @failed;
         }
     }
     else {
         foreach my $member (@$members) {
             $n++;
-            my $req = $member->{'_request'}
-                or next;  # Skip or unchanged
+            my $req = $member->{'_request'};
+            if (!defined $req) {
+                # Skip or unchanged
+                push @ok, $member;
+                $member->{'ok'} = 1;
+                next;
+            }
             my $res = $site->req($req);
             if (!defined $res) {
                 push @failed, $member;
@@ -248,6 +253,7 @@ sub load {
             }
         }
     }
+    $_->{'failed'} = 1 for @failed;
     my %result;
     $result{'ok'} = \@ok if @ok;
     $result{'failed'} = \@failed if @failed;
