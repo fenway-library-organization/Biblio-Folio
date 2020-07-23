@@ -26,6 +26,8 @@ sub output_fh { @_ > 1 ? $_[0]{'output_fh'} = $_[1] : $_[0]{'output_fh'} }
 sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
 
 sub batch { @_ > 1 ? $_[0]{'context'}{'batch'} = $_[1] : $_[0]{'context'}{'batch'} }
+sub file { @_ > 1 ? $_[0]{'context'}{'file'} = $_[1] : $_[0]{'context'}{'file'} }
+sub record_number { @_ > 1 ? $_[0]{'context'}{'record_number'} = $_[1] : $_[0]{'context'}{'record_number'} }
 sub format { @_ > 1 ? $_[0]{'context'}{'format'} = $_[1] : $_[0]{'context'}{'format'} }
 sub verb { @_ > 1 ? $_[0]{'context'}{'verb'} = $_[1] : $_[0]{'context'}{'verb'} }
 
@@ -101,10 +103,29 @@ sub end {
     }
 }
 
+sub begin_file {
+    my ($self, $file) = @_;
+    my $context = $self->context;
+    $context->{'file'} = $file;
+    $context->{'record_number'} = 0;
+}
+
+sub end_file {
+    my ($self) = @_;
+    my $context = $self->context;
+    delete $context->{'file'};
+    delete $context->{'record_number'};
+}
+
 sub out {
     my ($self, @output) = @_;
+    my $file = $self->file;
     my $format = $self->format;
     my $verb = $self->verb;
+    foreach (@output) {
+        $_->{'file'} = $file;
+        $_->{'n'} = $self->{'record_number'}++;
+    }
     if ($format eq FORMAT_JSON) {
         my $fhout = $self->output_fh;
         my $jctx = $self->{'_json_context'}
@@ -159,13 +180,14 @@ sub parse {
         #},
     );
     foreach my $file (@$files) {
+        $self->begin_file($file);
         print STDERR "Parsing: $file\n" if $arg{'verbose'};
         $parser->iterate(
             %arg,
             'hooks' => \%hooks,
             'file' => $file,
         );
-        1;
+        $self->end_file;
     }
     $self->end;
 }
@@ -202,12 +224,14 @@ sub validate {
         },
     );
     foreach my $file (@$files) {
+        $self->begin_file($file);
         $progress->('file' => $file, 'n' => 0);
         $validator->iterate(
             %arg,
             'hooks' => \%hooks,
             'file' => $file,
         );
+        $self->end_file;
     }
     my $fhout = $self->output_fh;
     print $fhout join("\t", qw(row file error)), "\n"
@@ -257,11 +281,13 @@ sub match {
         #},
     );
     foreach my $file (@$files) {
+        $self->begin_file($file);
         $parser->iterate(
             %arg,
             'hooks' => \%hooks,
             'file' => $file,
         );
+        $self->end_file;
     }
     $self->end;
 }
@@ -312,11 +338,13 @@ sub prepare {
         };
     }
     foreach my $file (@$files) {
+        $self->begin_file($file);
         $parser->iterate(
             %arg,
             'hooks' => \%hooks,
             'file' => $file,
         );
+        $self->end_file;
     }
     $self->end;
 }
@@ -355,11 +383,13 @@ sub load {
     );
     $arg{'site'} = $site;
     foreach my $file (@$files) {
+        $self->begin_file($file);
         $parser->iterate(
             %arg,
             'hooks' => \%hooks,
             'file' => $file,
         );
+        $self->end_file;
     }
     $self->end;
 }
@@ -421,11 +451,13 @@ sub load {
 ###         };
 ###     }
 ###     foreach my $file (@$files) {
+###         $self->begin_file($file);
 ###         $parser->iterate(
 ###             %arg,
 ###             'hooks' => \%hooks,
 ###             'file' => $file,
 ###         );
+###         $self->end_file;
 ###     }
 ### }
 ### 
@@ -436,6 +468,7 @@ sub load {
 ###     return (OK) if !@$files;
 ###     my @ready;
 ###     foreach my $file (@$files) {
+###         $self->begin_file($file);
 ###         my $ok = $self->prepare(
 ###             'file' => $file,
 ###             'dry_run' => $self->dry_run,
@@ -448,6 +481,7 @@ sub load {
 ###             print STDERR "prepare failed: $file\n";
 ###             return FAILED, @ready;
 ###         }
+###         $self->end_file;
 ###     }
 ###     my ($ok, @moved) = _move_to_dir(@ready, $self->directory('ready'));
 ###     return ($ok ? OK : FAILED, @moved);
@@ -477,11 +511,13 @@ sub load {
 ###         #},
 ###     );
 ###     foreach my $file (@$files) {
+###         $self->begin_file($file);
 ###         $parser->iterate(
 ###             %arg,
 ###             'hooks' => \%hooks,
 ###             'file' => $file,
 ###         );
+###         $self->end_file;
 ###     }
 ### }
 ### 
@@ -545,11 +581,13 @@ sub load {
 ###     );
 ###     $arg{'site'} = $site;
 ###     foreach my $file (@$files) {
+###         $self->begin_file($file);
 ###         $parser->iterate(
 ###             %arg,
 ###             'hooks' => \%hooks,
 ###             'file' => $file,
 ###         );
+###         $self->end_file;
 ###     }
 ### }
 
@@ -871,11 +909,13 @@ sub _user_to_text {
 ###         },
 ###     );
 ###     foreach my $file (@$files) {
+###         $self->begin_file($file);
 ###         $parser->iterate(
 ###             %arg,
 ###             %hook,
 ###             'file' => $file,
 ###         );
+###         $self->end_file;
 ###     }
 ### }
 
