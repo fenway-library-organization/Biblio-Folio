@@ -47,6 +47,7 @@ sub json { @_ > 1 ? $_[0]{'json'} = $_[1] : $_[0]{'json'} }
 
 sub argv { @_ > 1 ? $_[0]{'argv'} = $_[1] : $_[0]{'argv'} }
 sub program { @_ > 1 ? $_[0]{'program'} = $_[1] : $_[0]{'program'} }
+sub program_file { @_ > 1 ? $_[0]{'program_file'} = $_[1] : $_[0]{'program_file'} }
 sub command { @_ > 1 ? $_[0]{'command'} = $_[1] : $_[0]{'command'} }
 sub dryrun { @_ > 1 ? $_[0]{'dryrun'} = $_[1] : $_[0]{'dryrun'} }
 sub verbose { @_ > 1 ? $_[0]{'verbose'} = $_[1] : $_[0]{'verbose'} }
@@ -94,7 +95,7 @@ sub cmd_login {
     );
     my $argv = $self->argv;
     if ($check) {
-        usage "login [-k USER PASSWORD]"
+        $self->usage("login [-k USER PASSWORD]")
             if @$argv != 2;
         $self->login_if_necessary($site);
         my $result = $site->authenticate(
@@ -137,7 +138,7 @@ sub cmd_config {
         print YAML::XS::Dump(\%config);
     }
     elsif (@$argv > 1) {
-        usage;
+        $self->usage;
     }
     else {
         print YAML::XS::Dump($config{$argv->[0]});
@@ -148,7 +149,7 @@ sub cmd_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "get URI [KEY=VAL]..." if !@$argv;
+    $self->usage("get URI [KEY=VAL]...") if !@$argv;
     my @args = (shift @$argv);
     if (@$argv) {
         my %arg;
@@ -171,7 +172,7 @@ sub cmd_search {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(':search');
     my $argv = $self->argv;
-    usage "search [-m OFFSET] [-z LIMIT] [-o ORDERBY] URI CQL" if @$argv != 2;
+    $self->usage("search [-m OFFSET] [-z LIMIT] [-o ORDERBY] URI CQL") if @$argv != 2;
     my ($uri, $query) = @$argv;
     my $results = $site->search($uri, $query, %arg);
     my $json = $self->json;
@@ -182,7 +183,7 @@ sub cmd_post {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "post URI JSONFILE|[KEY=VAL]..." if !@$argv;
+    $self->usage("post URI JSONFILE|[KEY=VAL]...") if !@$argv;
     my $uri = shift @$argv;
     my @args;
     if (@$argv == 1 && $argv->[0] !~ /^([^=]+)=(.*)$/) {
@@ -214,7 +215,7 @@ sub cmd_put {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "put URI JSONFILE|[KEY=VAL]..." if !@$argv;
+    $self->usage("put URI JSONFILE|[KEY=VAL]...") if !@$argv;
     my $uri = shift @$argv;
     my @args;
     if (@$argv == 1 && $argv->[0] !~ /^([^=]+)=(.*)$/) {
@@ -243,8 +244,9 @@ sub cmd_put {
 }
 
 sub cmd_instance {
+    # usage "instance get|search|source ..."
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_instance_get {
@@ -256,7 +258,7 @@ sub cmd_instance_get {
         'p|properties=s' => sub { push @properties, split /\,/, $_[1] },
     );
     my $argv = $self->argv;
-    usage "instance get INSTANCE_ID..." if !@$argv;
+    $self->usage("instance get INSTANCE_ID...") if !@$argv;
     my $json = $self->json;
     foreach my $id (@$argv) {
         my $instance = $site->instance($id);
@@ -279,7 +281,7 @@ sub cmd_instance_search {
     my ($self) = @_;
     my $site = $self->orient(':search');
     my $argv = $self->argv;
-    usage "instance search CQL" if @$argv != 1;
+    $self->usage("instance search CQL") if @$argv != 1;
     my ($cql) = @$argv;
     my $srec = $site->GET("/inventory/instances", {
         'query' => $cql,
@@ -289,14 +291,14 @@ sub cmd_instance_search {
 
 sub cmd_instance_source {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_instance_source_get {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(qw(:formats));
     my $argv = $self->argv;
-    usage "instance source get [-JMT] INSTANCE_ID..." if !@$argv;
+    $self->usage("instance source get [-JMT] INSTANCE_ID...") if !@$argv;
     my $format = $arg{'format'} || FORMAT_JSON;
     foreach my $id (@$argv) {
         my $source = $site->source('instance' => $id);
@@ -353,7 +355,7 @@ sub cmd_harvest {
     );
     $batch_size ||= 25;
     my $argv = $self->argv;
-    usage "harvest [-bL] [-k BATCHSIZE] [-a [-x] |-q CQL]"
+    $self->usage("harvest [-bL] [-k BATCHSIZE] [-a [-x] |-q CQL]")
         if @$argv && ($query || $all)
         || $query && $all;
     my @search = ('instance', '@limit' => $batch_size);
@@ -379,7 +381,7 @@ sub cmd_harvest {
         $bsearcher = $site->searcher(@search, '@query' => $query);
     }
     else {
-        usage;
+        $self->usage;
     }
     $site->dont_cache(qw(instance source_record holdings_record item));
     my (@bids, %bid2instance, %bid2marc, %bid2holdings);
@@ -491,14 +493,14 @@ sub cmd_harvest {
 
 sub cmd_holding {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_holding_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "holding get HOLDING_ID..." if !@$argv;
+    $self->usage("holding get HOLDING_ID...") if !@$argv;
     my $json = $self->json;
     foreach my $id (@$argv) {
         my $irec = eval { get_holding($site, $id) };
@@ -518,7 +520,7 @@ sub cmd_holding_search {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "holding search CQL" if @$argv != 1;
+    $self->usage("holding search CQL") if @$argv != 1;
     my ($cql) = @$argv;
     my $srec = $site->GET("/holdings-storage/holdings", {
         'query' => $cql,
@@ -528,14 +530,14 @@ sub cmd_holding_search {
 
 sub cmd_item {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_item_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "item get ITEM_ID..." if !@$argv;
+    $self->usage("item get ITEM_ID...") if !@$argv;
     my $json = $self->json;
     foreach my $id (@$argv) {
         my $irec = eval { get_item($site, $id) };
@@ -555,7 +557,7 @@ sub cmd_item_search {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "item search CQL" if @$argv != 1;
+    $self->usage("item search CQL") if @$argv != 1;
     my ($cql) = @$argv;
     my $srec = $site->GET("/item-storage/items", {
         'query' => $cql,
@@ -565,14 +567,14 @@ sub cmd_item_search {
 
 sub cmd_source {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_source_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "source get SOURCE_RECORD_ID..." if !@$argv;
+    $self->usage("source get SOURCE_RECORD_ID...") if !@$argv;
     my $json = $self->json;
     foreach my $id (@$argv) {
         my $srec = eval { $json->decode($site->GET("/source-storage/records/$id")->content) };
@@ -603,7 +605,7 @@ sub cmd_source_search {
     );
     $arg{'deleted'} = JSON::true if $deleted;
     my $argv = $self->argv;
-    usage "source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL" if @$argv != 1;
+    $self->usage("source search [-m POS] [-n LIMIT] [-o KEY] [-dJM] CQL") if @$argv != 1;
     my $format = $arg{'format'} || FORMAT_JSON;
     my ($cql) = @$argv;
     my $content = $site->search('/source-storage/records', $cql, %arg);
@@ -631,7 +633,7 @@ sub cmd_source_replace {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "source replace [MARCFILE]" if @$argv > 1;
+    $self->usage("source replace [MARCFILE]") if @$argv > 1;
     my $folio = $site->folio;
     my $j = _uuid();
     my $res = $site->POST("/source-storage/snapshots", {
@@ -660,7 +662,7 @@ sub cmd_source_sync {
     my ($self) = @_;
     my ($site, %arg) = $self->orient;
     my $argv = $self->argv;
-    usage "source sync DBFILE"
+    $self->usage("source sync DBFILE")
         if @$argv > 1;
     my ($dbfile) = @$argv;
     my $db = $site->local_instances_database($dbfile);
@@ -686,7 +688,7 @@ sub cmd_source_harvest {
         'b|from-instances-database=s' => 'instances_db',
     );
     my $argv = $self->argv;
-    usage "source harvest [-a|-i FILE|-q CQL] [-b DBFILE]"
+    $self->usage("source harvest [-a|-i FILE|-q CQL] [-b DBFILE]")
         if @$argv || 1 < scalar grep { exists $arg{$_} } qw(all instance_id_file query);
     my $batch_size = $arg{'batch_size'} || 100;
     my $next;
@@ -736,14 +738,14 @@ sub cmd_source_harvest {
 
 sub cmd_job {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_job_begin {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "job begin" if @$argv;
+    $self->usage("job begin") if @$argv;
     my $user_id = $site->state->{'user_id'};
     my $folio = $self->folio;
     my %job = (
@@ -777,7 +779,7 @@ sub cmd_job_add {
         'k|batch-size=i' => \$batch_size,
     );
     my $argv = $self->argv;
-    usage "job add JOB [FILE]" if @$argv > 2 || @$argv < 1;
+    $self->usage("job add JOB [FILE]") if @$argv > 2 || @$argv < 1;
     my $j = shift @$argv;
     my $uri = "/change-manager/jobExecutions/$j/records";
     my $fh = oread(@$argv == 0 ? \*STDIN : shift @$argv);
@@ -828,7 +830,7 @@ sub cmd_job_end {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "job end JOB" if @$argv != 1;
+    $self->usage("job end JOB") if @$argv != 1;
     my $j = shift @$argv;
     my $uri = "/change-manager/jobExecutions/$j/records";
     my $jfile = $site->file("var/jobs/$j.json");
@@ -857,7 +859,7 @@ sub cmd_job_status {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "job status JOB" if @$argv != 1;
+    $self->usage("job status JOB") if @$argv != 1;
     my ($j) = @$argv;
     my $job = $site->jobexec($j);
     1;
@@ -867,7 +869,7 @@ sub cmd_job_results {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "job results JOB" if @$argv != 1;
+    $self->usage("job results JOB") if @$argv != 1;
     my ($j) = @$argv;
     my $results = $self->content($site->GET("/metadata-provider/logs/$j"));
     my @sources = $site->objects('source', {'query' => 'snapshotId=="$j"'});
@@ -876,12 +878,12 @@ sub cmd_job_results {
 
 sub cmd_file {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_file_batch {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_file_batch_new {
@@ -931,7 +933,7 @@ sub cmd_file_batch_upload {
 
 sub cmd_source_batch {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_source_batch_create {
@@ -942,7 +944,7 @@ sub cmd_source_batch_create {
     );
     my $argv = $self->argv;
     my $bid = shift @$argv;
-    usage "source batch create [FILE]" if @$argv > 1;
+    $self->usage("source batch create [FILE]") if @$argv > 1;
     my $fh = oread(@$argv == 0 ? \*STDIN : shift @$argv);
     if (my $marcrefs = read_marc_records($fh, $batch_size)) {
         my $batch = $self->content($site->POST('/source-storage/batch/records', {
@@ -954,12 +956,12 @@ sub cmd_source_batch_create {
 
 sub cmd_user {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_group {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_group_search {
@@ -969,7 +971,7 @@ sub cmd_group_search {
         'm' => \$map,
     );
     my $argv = $self->argv;
-    usage "group search CQL" if @$argv != 1;
+    $self->usage("group search CQL") if @$argv != 1;
     my ($query) = @$argv;
     my $json = $self->json;
     my $groups = eval {
@@ -995,7 +997,7 @@ sub cmd_group_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "group get ID..." if !@$argv;
+    $self->usage("group get ID...") if !@$argv;
     my @groups;
     my $json = $self->json;
     foreach my $id (@$argv) {
@@ -1014,7 +1016,7 @@ sub cmd_user_search {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(':search');
     my $argv = $self->argv;
-    usage "user search CQL" if @$argv != 1;
+    $self->usage("user search CQL") if @$argv != 1;
     my ($query) = @$argv;
     my $users = $site->search("/users", $query, %arg);
     1;
@@ -1025,7 +1027,7 @@ sub cmd_user_get {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "user get ID..." if !@$argv;
+    $self->usage("user get ID...") if !@$argv;
     my @users;
     foreach my $id (@$argv) {
         my $user = eval { $self->content($site->GET("/users/$id")) };
@@ -1041,14 +1043,14 @@ sub cmd_user_get {
 
 sub cmd_user_batch {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_user_batch_pickup {
     my ($self) = @_;
     my ($site, %arg) = $self->orient;
     my $argv = $self->argv;
-    usage "user batch pickup DIR" if @$argv != 1;
+    $self->usage("user batch pickup DIR") if @$argv != 1;
     $site->task('user_batch')->pickup('directory' => $argv->[0], %arg);
 }
 
@@ -1058,7 +1060,7 @@ sub cmd_user_batch_validate {
         'L|load-profile=s' => 'profile',
     );
     my $argv = $self->argv;
-    usage "user batch validate FILE..." if !@$argv;
+    $self->usage("user batch validate FILE...") if !@$argv;
     $site->task('user_batch')->validate('files' => $argv, %arg);
 }
 
@@ -1070,7 +1072,7 @@ sub cmd_user_batch_parse {
         qw(:formats !as-marc !as-json),
     );
     my $argv = $self->argv;
-    usage "user batch parse [-p CLASS] [-L PROFILE] FILE..." if !@$argv;
+    $self->usage("user batch parse [-p CLASS] [-L PROFILE] FILE...") if !@$argv;
     $site->task('user_batch')->parse('files' => $argv, %arg);
 ### my ($file) = @$argv;
 ### $arg{'site'} = $site;
@@ -1099,7 +1101,7 @@ sub cmd_user_batch_match {
     $arg{'batch_size'} ||= 10;
     my $format = $arg{'format'} ||= FORMAT_JSON;
     my $argv = $self->argv;
-    usage "user batch match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE..."
+    $self->usage("user batch match [-xy] [-k NUM] [-p CLASS] [-L PROFILE] FILE...")
         if !@$argv
         || $arg{'prepare'} && $format ne FORMAT_JSON
         ;
@@ -1120,7 +1122,7 @@ sub cmd_user_batch_prepare {
     $arg{'batch_size'} ||= 10;
     my $format = $arg{'format'} ||= FORMAT_JSON;
     my $argv = $self->argv;
-    usage "user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE..."
+    $self->usage("user batch prepare [-x] [-k NUM] [-p CLASS] [-L PROFILE] FILE...")
         if !@$argv;
     $site->task('user_batch')->prepare('files' => $argv, %arg);
 }
@@ -1134,32 +1136,32 @@ sub cmd_user_batch_load {
     );
     $arg{'batch_size'} ||= 10;
     my $argv = $self->argv;
-    usage "user batch load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE..." if !@$argv;
+    $self->usage("user batch load [-n] [-k NUM] [-p CLASS] [-L PROFILE] FILE...") if !@$argv;
     $site->task('user_batch')->load('file' => $argv, %arg);
 }
 
 sub cmd_address {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_address_types {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "address types" if @$argv;
+    $self->usage("address types") if @$argv;
     my $res = $self->content($site->GET('/addresstypes'));
     print $self->json->encode($res);
 }
 
 sub cmd_marc {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_marc_to {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_marc_to_instance {
@@ -1194,7 +1196,7 @@ sub cmd_marc_to_instance {
 
 sub cmd_ref {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_ref_get {
@@ -1206,7 +1208,7 @@ sub cmd_ref_get {
     $dir ||= $site->directory('ref');
     my $argv = $self->argv;
     if (@$argv) {
-        usage "ref get [NAME...]" if grep { m{/} } @$argv;
+        $self->usage("ref get [NAME...]") if grep { m{/} } @$argv;
         s/\.json$// for @$argv;
     }
     -d $dir or mkdir $dir or fatal "mkdir $dir: $!";
@@ -1241,7 +1243,7 @@ sub cmd_ref_get {
 
 sub cmd_course {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_courses {
@@ -1324,14 +1326,14 @@ sub cmd_course_listings {
 
 sub cmd_course_item {
     my ($self) = @_;
-    $self->subcmd();
+    $self->subcmd;
 }
 
 sub cmd_course_item_list {
     my ($self) = @_;
     my $site = $self->orient;
     my $argv = $self->argv;
-    usage "course item list COURSE" if @$argv != 1;
+    $self->usage("course item list COURSE") if @$argv != 1;
     my ($course) = @$argv;
     1;
 }
@@ -1620,7 +1622,7 @@ sub orient {
             $opt{$o{'spec'}} = $dest;
         }
         else {
-            usage;
+            $self->usage;
         }
     }
     foreach my $not (keys %not) {
@@ -1634,7 +1636,7 @@ sub orient {
         print @_ if $_[0] !~ /^Unknown option/;
     };
     my $argv = $self->argv;
-    GetOptionsFromArray($argv, %opt) or usage;
+    GetOptionsFromArray($argv, %opt) or $self->usage;
     my $json = JSON->new->pretty->canonical->convert_blessed;
     my $folio = Biblio::Folio->new('root' => $root, 'json' => $json);
     $self->json($json);
@@ -1714,13 +1716,16 @@ sub fatal {
 }
 
 sub usage {
-    if (@_ && ref($_[0]) && $_[0]->isa(__PACKAGE__) && defined $_[0]{'usage'}) {
-        goto &{ $_[0]{'usage'} };
+    my @args = @_;
+    my $self;
+    if (@_ && ref($_[0]) && $_[0]->isa(__PACKAGE__)) {
+        $self = shift;
+        goto &{ $self->{'usage'} } if defined $self->{'usage'};
     }
-    my $prog = _program_name(@_);
-    my $progfile = _program_file(@_);
+    my $prog = _program_name(@args);
     my $usage;
     my @commands;
+    my %have_usage;
     my $cmd;
     foreach my $i (1..3) {
         my @caller = caller($i);
@@ -1732,14 +1737,25 @@ sub usage {
     if (@_) {
         $usage = defined($cmd) ? '@SITE ' . shift : shift;
     }
-    if (defined $cmd && open my $fh, '<', $progfile) {
+    if (defined $cmd && open my $fh, '<', __FILE__) {
         my $incmd;
         while (<$fh>) {
-            $incmd = $1, next if /^sub cmd_(\S+)/;
-            undef($incmd), next if /^\}/;
-            next if !/^(?:    |\t)(?:my \$)?usage (?:= )? "(.+)"/ || !$incmd;
-            push @commands, $1;
-            $usage = '@SITE ' . $1 if $incmd eq $cmd;
+            if (/^sub cmd_(\S+)/) {
+                $incmd = $1;
+            }
+            elsif (/^\}/) {
+                undef($incmd);
+            }
+            elsif (!defined $incmd) {
+                next;
+            }
+            elsif (m{->usage\("([^"]+)"} || m{ +usage +"([^"]+)"}) {
+                (my $shortcmd = $incmd) =~ s/_.*//;
+                push @commands, $shortcmd
+                    if !$have_usage{$shortcmd}++;
+                $usage = '@SITE ' . $1
+                    if defined $incmd && $incmd eq $cmd;
+            }
         }
     }
     $usage ||= '@SITE COMMAND [ARG...]';
@@ -1755,7 +1771,7 @@ sub _program_name {
 }
 
 sub _program_file {
-    return shift()->program if @_;
+    return shift()->program_file if @_;
     return $0;
 }
 
