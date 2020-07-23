@@ -49,6 +49,8 @@ sub init {
             my $sub = $can_cache{$cls.'::_uri_delete'} ||= $cls->can('_uri_delete');
             return { 'method' => 'DELETE', 'uri' => $sub->($cls, $obj) };
         },
+        'skip' => undef,
+        'none' => undef,  # XXX
     };
 }
 
@@ -188,10 +190,11 @@ sub _make_requests {
             ($m, $u) = @$member{qw(method uri)} = ($method, $uri);
         }
         else {
-            my $action = $actions->{$a}->($cls, $obj) or next;  # XXX
+            my $sub = $actions->{$a} or next;  # XXX
+            my $action = $sub->($cls, $obj) or next;
             ($m, $u) = @$member{qw(method uri)} = @$action{qw(method uri)};
         }
-        $member->{'request'} = $site->make_request($m, $u, $obj);
+        $member->{'_request'} = $site->make_request($m, $u, $obj);
     }
     return $self;
 }
@@ -226,7 +229,8 @@ sub load {
     else {
         foreach my $member (@$members) {
             $n++;
-            my $req = $member->{'request'};
+            my $req = $member->{'_request'}
+                or next;  # Skip or unchanged
             my $res = $site->req($req);
             if (!defined $res) {
                 push @failed, $member;

@@ -18,11 +18,19 @@ sub batch_number { @_ > 1 ? $_[0]{'batch_number'} = $_[1] : $_[0]{'batch_number'
 sub profile { @_ > 1 ? $_[0]{'profile'} = $_[1] : $_[0]{'profile'} }
 
 sub is_valid { @_ > 1 ? $_[0]{'is_valid'} = $_[1] : $_[0]{'is_valid'} }
-sub results { @_ > 1 ? $_[0]{'results'} = $_[1] : $_[0]{'results'} }
 sub errors { @_ > 1 ? $_[0]{'errors'} = $_[1] : $_[0]{'errors'} }
+
+sub results {
+    my $self = shift;
+    return $self->{'results'} if !@_;
+    my $file = shift;
+    return $self->{'results'}{$file} if !@_;
+    return $self->{'results'}{$file} = shift;
+}
 
 sub init {
     my ($self) = @_;
+    $self->{'results'} = {};
     return $self;
 }
 
@@ -124,9 +132,7 @@ sub iterate {
         _run_hooks('end' => $end, %params, 'n' => $n, 'num_errors' => $num_errors) if $n > 0;
     };
     $self->done(%arg);
-    $self->results({
-        'errors' => $num_errors,
-    });
+    $self->results($file, {'errors' => $num_errors, 'ok' => $n - $num_errors});
     return $self;
 }
 
