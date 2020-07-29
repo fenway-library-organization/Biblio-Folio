@@ -65,6 +65,7 @@ sub config {
 
 sub site {
     my ($self, $name, @args) = @_;
+    $self = __PACKAGE__->new if !ref $self;
     return Biblio::Folio::Site->new(
         @args,
         'name' => $name,
