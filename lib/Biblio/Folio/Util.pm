@@ -9,6 +9,10 @@ our @EXPORT_OK = qw(
     FORMAT_MARC
     FORMAT_JSON
     FORMAT_TEXT
+    ENCODING_ASCII
+    ENCODING_UTF8
+    ENCODING_LATIN1
+    ENCODING_CP1252
     _rx_const_token
     _tok2const
     _trim
@@ -50,12 +54,20 @@ our @EXPORT_OK = qw(
     _json_begin
     _json_append
     _json_end
+    _detect_file_encoding
+    _is_valid_utf8
+    _force_valid_utf8
     $rx_const_token
 );
 
 use constant FORMAT_MARC => 'marc';
 use constant FORMAT_JSON => 'json';
 use constant FORMAT_TEXT => 'text';
+
+use constant ENCODING_ASCII => 'ascii';
+use constant ENCODING_UTF8 => 'utf-8';
+use constant ENCODING_LATIN1 => 'iso-8859-1';
+use constant ENCODING_CP1252 => 'cp-1252';
 
 use JSON;
 use Data::UUID;
@@ -678,6 +690,68 @@ sub _json_end {
     print $fh delete $ctx->{'end'};
     my $f = $ctx->{'file'} || 'JSON output handle';
     close $fh or die "close $f: $!";
+}
+
+sub _detect_file_encoding {
+    my ($file) = @_;
+    my %possible = map { $_ => 1 } (ENCODING_ASCII, ENCODING_UTF8, ENCODING_LATIN1, ENCODING_CP1252);
+    open my $fh, '<', $file or die "open $file: $!";
+    binmode $fh or die "binmode $file: $!";
+    while (<$fh>) {
+        # N.B.: We ignore bytes \x00-\x1f -- their presence or absence is not a useful diagnostic
+        next if /\A[\x00-\x7e]*\z/;
+        delete $possible{ (ENCODING_ASCII) };
+        if (/[\x7f-\x9f]/) {
+            delete $possible{ (ENCODING_LATIN1) };
+            delete $possible{ (ENCODING_CP1252) } if /[\x81\x8d\x8f\x90\x9d]/;
+        }
+        delete $possible{ (ENCODING_UTF8) } if !_is_valid_utf8($_);
+        last if keys(%possible) < 2;
+    }
+    close $fh or die "close $file: $!";
+    die "can't detect file encoding: $file" if !keys %possible;
+    foreach (ENCODING_ASCII, ENCODING_UTF8, ENCODING_LATIN1) {
+        return $_ if $possible{$_};
+    }
+    return ENCODING_CP1252;  # Egad!
+}
+
+sub _is_valid_utf8 {
+    my ($str) = @_;
+    return $str =~ m{
+        \A
+        (?: [\x00-\x7e]                           # ASCII
+        | [\xc2-\xdf]         [\x80-\xbf]         # non-overlong 2-byte
+        |  \xe0 [\xa0-\xbf]   [\x80-\xbf]         # excluding overlongs
+        | [\xe1-\xec\xee\xef] [\x80-\xbf]{2}      # straight 3-byte
+        |  \xed [\x80-\x9f]   [\x80-\xbf]         # excluding surrogates
+        |  \xf0 [\x90-\xbf]   [\x80-\xbf]{2}      # planes 1-3
+        | [\xf1-\xf3]         [\x80-\xbf]{3}      # planes 4-15
+        |  \xf4 [\x80-\x8f]   [\x80-\xbf]{2}      # plane 16
+        )*
+        \z
+    }x;
+}
+
+sub _force_valid_utf8 {
+    my ($str) = @_;
+    $str =~ s{
+        (
+              [\x00-\x7e]                             # ASCII
+            | [\xc2-\xdf]         [\x80-\xbf]         # non-overlong 2-byte
+            |  \xe0 [\xa0-\xbf]   [\x80-\xbf]         # excluding overlongs
+            | [\xe1-\xec\xee\xef] [\x80-\xbf]{2}      # straight 3-byte
+            |  \xed [\x80-\x9f]   [\x80-\xbf]         # excluding surrogates
+            |  \xf0 [\x90-\xbf]   [\x80-\xbf]{2}      # planes 1-3
+            | [\xf1-\xf3]         [\x80-\xbf]{3}      # planes 4-15
+            |  \xf4 [\x80-\x8f]   [\x80-\xbf]{2}      # plane 16
+        )
+        |
+        (.)
+    }{
+        defined $1 ? $1 : '?'
+    }xeg;
+    return $str;
 }
 
 1;
