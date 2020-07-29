@@ -53,11 +53,12 @@ while (@ARGV && $ARGV[0] =~ s/^[@]//) {
     push @site_names, shift @ARGV;
 }
 if (@ARGV) {
-    # bin/process [OPTION...] [@SITE] FILE...
+    # bin/process [OPTION...] @SITE [FILE...]
     usage if @site_names != 1;
     @files = map { file($_) } @ARGV;
 }
 else {
+    # bin/process [OPTION...] [@SITE...]
     @site_names = $folio->site_names if !@site_names;
 }
 
@@ -74,26 +75,33 @@ my $exit_status = 0;
 foreach my $site_name (@site_names) {
     blather "Site $site_name\n";
     my $site = $folio->site($site_name);
-    my ($out, @site_files) = pickup($site, $action, @files);
-    if (@site_files) {
+    my ($out, @files_for_this_site) = pickup($site, $action, @files);
+    if (@files_for_this_site) {
+        my @paths = map { $_->{'path'} } @files_for_this_site;
         blather "Found new files:\n";
-        blather '  ', $_->{'path'}, "\n" for @site_files;
-        blather "Output will be written to:\n";
-        blather '  ', $out->{'path'}, "\n";
+        blather '  ', $_, "\n" for @paths;
+        # --- Load them (or whatever)
         (my $acting = ucfirst $action) =~ s/e?$/ing/;
+        blatherf "%s %s...\n", hms(), $acting;
         my $task = $site->task('user_batch', 
             %arg,
-            'output_file' => $out->{'path'},
+            'output_file' => $out->{'path'},  # [1] This will change by [2] below
         );
-        blatherf "%s %s...\n", hms(), $acting;
         $task->$action(
-            'files' => [map { $_->{'path'} } @site_files],
+            'files' => \@paths,
             %arg,
         );
+        # --- Move files to their final destination
         blatherf "%s %s\n", hms(), 'Finishing...';
-        my $outcome = dispose($site, $out, @site_files);
+        my $outcome = dispose($site, $action, $out, @files_for_this_site);
         $exit_status = 2 if $outcome eq 'failed';
-        print STDOUT join("\t", $site_name, $outcome, $out->{'path'}), "\n";
+        # --- Report results
+        my $out_path = $out->{'path'};  # [2] This has changed since [1] above
+        print STDOUT join("\t", $site_name, $outcome, $out_path), "\n";
+        if ($out_path ne '-') {
+            blather "Output has been written to:\n";
+            blather '  ', $out_path, "\n";
+        }
         blatherf "%s %s\n", hms(), uc $outcome;
     }
     else {
@@ -232,15 +240,26 @@ sub dir {
 
 sub dispose {
     my $site = shift;
+    my $action = shift;
     my @files = grep { defined } @_;
     my (@failed, @ok);
     my $outcome = (grep { $_->{'failed'} } @files) ? 'failed' : 'ok';
+    my %moved_from;
     foreach my $file (@files) {
         my $f = $file->{'path'};
         if ($f ne '-') {
             my $fdirs = $file->{'directory'};
-            moveto($fdirs->{$outcome}, $file);
+            my $from = $fdirs->{'current'};
+            my $to = $fdirs->{$outcome};
+            if ($from ne $to) {
+                moveto($to, $file);
+                $moved_from{$from} = 1;
+            }
         }
+    }
+    foreach my $dir (keys %moved_from) {
+        # Don't check for errors -- this is just a clean-up step
+        rmdir $dir;
     }
     return $outcome;
 }

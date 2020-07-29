@@ -38,6 +38,7 @@ sub _open {
     my ($self, $file) = @_;
     die "no file to open"
         if !defined($file //= $self->file);
+    # $self->{'file_encoding'} = _detect_file_encoding($file);
     open my $fh, '<', $file
         or die "open $file: $!";
     binmode $fh

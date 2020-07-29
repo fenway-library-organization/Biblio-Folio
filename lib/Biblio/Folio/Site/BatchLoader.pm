@@ -10,7 +10,7 @@ use strict;
 use warnings;
 
 use Biblio::Folio::Site::Batch;
-use Biblio::Folio::Util qw(_uuid _cmpable _unbless _kind2pkg);
+use Biblio::Folio::Util qw(_uuid _cmpable _unbless _kind2pkg _json_decode);
 use Scalar::Util qw(blessed);
 
 sub new {
@@ -222,8 +222,7 @@ sub load {
         }
         else {
             @failed = @$members;
-            my ($status, $content) = ($res->status, $res->content);
-            @$_{qw(status error)} = ($status, $content) for @failed;
+            $self->_set_errors_from_response($res, @$members);
         }
     }
     else {
@@ -234,6 +233,7 @@ sub load {
                 # Skip or unchanged
                 push @ok, $member;
                 $member->{'ok'} = 1;
+                $member->{'action'} ||= 'skip';
                 next;
             }
             my $res = $site->req($req);
@@ -248,12 +248,14 @@ sub load {
             }
             else {
                 push @failed, $member;
-                $member->{'status'} = $res->status;
-                $member->{'error'} = $res->content;
+                $self->_set_errors_from_response($res, $member);
             }
         }
     }
-    $_->{'failed'} = 1 for @failed;
+    foreach (@failed) {
+        my $action = $_->{'action'};  # What were we trying to do?
+        $_->{'failed'} = $_->{$action} || {};
+    }
     my %result;
     $result{'ok'} = \@ok if @ok;
     $result{'failed'} = \@failed if @failed;
@@ -261,6 +263,19 @@ sub load {
     $batch->is_loaded(1);
     return (scalar(@ok), scalar(@failed)) if wantarray;
     return @failed ? 0 : 1;
+}
+
+sub _set_errors_from_response {
+    my ($self, $res, @members) = @_;
+    my $status = $res->status;
+    my ($ok, @errors) = eval { 1, map { $_->{'message'} } @{ _json_decode($res->content)->{'errors'} } };
+    @errors = ($res->status_line) if !$ok;
+    my $errstr = join('; ', @errors);
+    foreach my $member (@members) {
+        $member->{'status'} = $status;
+        $member->{'error'} = $errstr;
+        $member->{'errors'} = \@errors;
+    }
 }
 
 1;

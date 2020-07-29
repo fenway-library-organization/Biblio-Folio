@@ -361,6 +361,18 @@ sub load {
     my $parser = $self->parser(%arg);
     my $matcher = $self->matcher(%arg);
     my $loader = $self->loader(%arg);
+    if (0) {
+        foreach my $file (@$files) {
+            $parser->begin_file($file);
+            while (my @users = $parser->next_batch($arg{'batch_size'})) {
+                my @match_results = $matcher->match(@users);
+                my $batch = $loader->prepare(@match_results);
+                # ...
+            }
+            $parser->end_file;
+        }
+        return;
+    }
     my $batch_base = 1;
     my %hooks = (
         # 'before' => sub { $batch_base = 1 },
@@ -379,6 +391,11 @@ sub load {
                 $self->_show_user_load_results(%param, %arg, 'batch' => $batch, 'ok' => $num_ok, 'failed' => $num_failed);
             }
             $batch_base += $arg{'batch_size'};
+        },
+        'error' => sub {
+            my %param = @_;
+            my $err = $param{'error'} || 'unknown error';
+            # XXX What to do?
         },
     );
     $arg{'site'} = $site;
