@@ -124,7 +124,7 @@ sub marcref {
     my $marc;
     if (@_ == 1) {
         my ($instance_id) = @_;
-        $sth = $self->sth(q{SELECT marc FROM instances WHERE id = ?});
+        $sth = $self->sth(q{SELECT source FROM instances WHERE id = ? AND source_type = 'MARC'});
         $sth->execute($instance_id);
         my @row = $sth->fetchrow_array;
         die "no such instance: $instance_id\n" if !@row;
