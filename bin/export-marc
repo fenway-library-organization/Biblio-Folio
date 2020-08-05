@@ -55,7 +55,7 @@ my %config = (
 my ($full, $query, $id_file, $deletes);
 my ($skip_file, $postproc);
 my ($config_file, $spell_out_locations, $copy_links_to_bib, $sync_lidb, $out_file, $comment, $verbose, $dryrun, $test);
-my $offset;
+# my $offset;
 my $use_ldp = 1;
 my $use_lidb = 1;
 my $small_batch_size = 25;
@@ -197,9 +197,10 @@ exit 3 if $failed;
 
 sub export_full {
     blather "Performing query...";
+    # Don't specify _WHERE source = 'MARC'_ -- we want to count non-MARC source records
     my $sql = q{SELECT id, source, data FROM inventory_instances ORDER BY id};
-    $sql .= qq{ OFFSET $offset} if defined $offset;
-    $sql .= qq{ LIMIT   $large_batch_size} if defined $large_batch_size;
+    # $sql .= qq{ OFFSET $offset} if defined $offset;
+    # $sql .= qq{ LIMIT   $large_batch_size} if defined $large_batch_size;
     my $sth = ldp()->query($sql);
     blatherf "done in %.1f seconds\n", time - $tstart;
     blather "Timer reset (ignore time required for query)\n";
@@ -790,7 +791,7 @@ sub report_error {
     my ($record) = @_;
     my $err = $record->{'error'};
     if (!defined $err_fh) {
-        if ($err_file eq '-' || $err_file eq '/dev/stderr') {
+        if (!defined $err_file || $err_file eq '-' || $err_file eq '/dev/stderr') {
             $err_fh = \*STDERR;
         }
         else {
@@ -894,7 +895,9 @@ sub ldp_incremental_sql {
 }
 
 sub blatherf {
-    print STDERR sprintf(@_) if $verbose;
+    return if !$verbose;
+    my $fmt = shift;
+    printf STDERR $fmt, @_;
 }
 
 sub blather {
