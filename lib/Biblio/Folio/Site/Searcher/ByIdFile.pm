@@ -38,6 +38,7 @@ sub read_one {
     my $id = <$fh>;
     return if !defined $id;
     chomp $id;
+    $id =~ s/\s.*//;  # Remove any fields after the first one
     return $id;
 };
 
