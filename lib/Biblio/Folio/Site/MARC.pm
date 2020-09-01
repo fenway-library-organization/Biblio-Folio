@@ -6,6 +6,7 @@ use warnings;
 use Biblio::Folio::Util qw(_optional);
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 use Scalar::Util qw(blessed);
+use Encode qw(encode decode :fallback_all);
 
 sub new {
     my $cls = shift;
@@ -24,6 +25,15 @@ sub new {
     }
     my $self = bless { @_ }, $cls;
     $self->init;
+    return $self;
+}
+
+sub init {
+    my ($self) = @_;
+    $self->{'is_parsed'} = 0;
+    $self->{'is_dirty'} = 0;
+    $self->{'marcref'} = $self->_marcref($self->{'marcref'});
+    delete $self->{'errors'};
     return $self;
 }
 
@@ -51,16 +61,95 @@ sub stub {
         die "invalid status: $status" if $status !~ /^[a-z]$/;
         substr($leader, 5, 1) = $status;
     }
-    my $hrid = $instance ? $instance->hrid : undef;
+    my $hrid = $arg{'hrid'} || ($instance ? $instance->hrid : undef);
     my @fields = defined $hrid ? (marcfield('001', $hrid)) : ();
     my $marc = marcbuild($leader, \@fields);
     return $cls->new(\$marc);
 }
 
-sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
-sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
-sub marcref { @_ > 1 ? $_[0]{'marcref'} = $_[1] : $_[0]{'marcref'} }
-sub status { @_ > 1 ? substr($_[0]{'leader'},5,1) = $_[1] : substr($_[0]->parse->{'leader'},5,1) }
+sub leader {
+    my $self = shift;
+    if (@_) {
+        $self->{'is_dirty'} = 1;
+        return $self->{'leader'} = shift;
+    }
+    elsif (!$self->{'is_parsed'}) {
+        $self->parse;
+    }
+    return $self->{'leader'};
+}
+
+sub fields {
+    my $self = shift;
+    if (@_) {
+        my $fields = shift;
+        $_->{'record'} = $self for @$fields;
+        $self->{'is_dirty'} = 1;
+        return $self->{'fields'} = $fields;
+    }
+    elsif (!$self->{'is_parsed'}) {
+        $self->parse;
+    }
+    return @{ $self->{'fields'} } if wantarray;
+    return $self->{'fields'};
+}
+
+sub status {
+    my $self = shift;
+    $self->parse if !$self->{'is_parsed'};
+    if (@_) {
+        $self->{'is_dirty'} = 1;
+        return substr($self->{'leader'}, 5, 1) = substr(shift, 0, 1);
+    }
+    else {
+        return substr($self->{'leader'}, 5, 1);
+    }
+}
+
+sub marcref {
+    my $self = shift;
+    if (@_) {
+        $self->{'is_parsed'} = 0;
+        $self->{'is_dirty'} = 1;
+        delete @$self{qw(leader fields)};
+        return $self->{'marcref'} = shift;
+    }
+    else {
+        my $marcref = $self->{'marcref'};
+        return $marcref if defined $marcref;
+        my $marc;
+        $marcref = \$marc;
+        if ($self->{'is_parsed'}) {
+            $$marcref = $self->as_marc21;
+            return $marcref;
+        }
+        else {
+            die "no MARC data to reference";
+        }
+    }
+}
+
+sub is_valid {
+    my ($self) = @_;
+    return 0 if $self->{'errors'};
+    return 1 if $self->{'is_parsed'};
+    $self->parse;
+    return $self->{'errors'} ? 0 : 1;
+}
+
+sub errors {
+    my ($self) = @_;
+    return if $self->is_valid;
+    my $errors = $self->{'errors'};
+    return @$errors if wantarray;
+    return $errors;
+}
+
+# sub leader { @_ > 1 ? $_[0]{'leader'} = $_[1] : $_[0]->parse->{'leader'} || _default_leader() }
+# sub fields { @_ > 1 ? $_[0]{'fields'} = $_[1] : $_[0]->parse->{'fields'} || [] }
+# sub status { @_ > 1 ? substr($_[0]{'leader'},5,1) = $_[1] : substr($_[0]->parse->{'leader'},5,1) }
+
+# sub marcref { @_ > 1 ? $_[0]{'marcref'} = $_[0]->_marcref($_[1]) : $_[0]{'marcref'} }
 
 sub instance { @_ > 1 ? $_[0]{'instance'} = $_[1] : $_[0]{'instance'} }
 sub source_record { @_ > 1 ? $_[0]{'source_record'} = $_[1] : $_[0]{'source_record'} }
@@ -68,21 +157,128 @@ sub source_record { @_ > 1 ? $_[0]{'source_record'} = $_[1] : $_[0]{'source_reco
 sub is_parsed { @_ > 1 ? $_[0]{'is_parsed'} = $_[1] : $_[0]{'is_parsed'} }
 sub is_dirty { @_ > 1 ? $_[0]{'is_dirty'} = $_[1] : $_[0]{'is_dirty'} }
 
-sub init {
-    my ($self) = @_;
-    $self->{'is_parsed'} = 0;
-    $self->{'is_dirty'} = 0;
+sub _marcref {
+    # Return a reference to a MARC record *as a string of bytes* (see below)
+    my ($self, $marcref) = @_;
+    return if !defined $marcref;
+    my $r = ref $marcref;
+    if ($r eq '') {
+        my $marc = $marcref;
+        $marcref = \$marc;
+    }
+    elsif ($r ne 'SCALAR') {
+        die "can't make a scalar reference out of a(n) $r";
+    }
+    # ----------------------------------------------------------------------
+    # In order for the caller to parse the MARC record that we return, it must
+    # be a reference to a string of bytes (a.k.a. "octets"), not characters.
+    # Not only is the record length (in the first five bytes of the leader)
+    # specified in bytes, but all of the offsets and lengths in the directory
+    # (the bytes after the leader but before the first occurrence of "\x1e")
+    # are expressed in terms of bytes, not characters.  If you misinterpret
+    # these when parsing, you may get garbage back.
+    # ----------------------------------------------------------------------
+        # For some reason, $$marcref is a string of characters -- convert it to
+        # a string of bytes.  We work with a copy because, otherwise, if
+        # $$marcref were invalid in some fundamental way we would leave it
+        # undefined.
+            # Worse news. FOLIO actually stores source records with directory
+            # entries whose offsets and lengths are expressed as characters,
+            # not bytes.  We have to parse the whole record, tell Perl it's all
+            # bytes, and then rebuild the record.
+    my $is_utf8 = utf8::is_utf8($$marcref);
+    my $reclen_is_right = (length($$marcref) == 0 + substr($$marcref, 0, 5));
+    my $all_ascii = ($$marcref !~ /[^\x00-\x7f]/);
+    if ($all_ascii) {
+        if ($is_utf8) {
+            utf8::downgrade($$marcref);  # This may die!
+        }
+        substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
+        return $marcref;
+    }
+    elsif (!$is_utf8) {
+        # Make it characters
+        utf8::decode($$marcref) or die "uh-oh!";
+    }
+    my ($ok, $leader, $fields);
+    eval {
+        substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
+        ($leader, $fields) = marcparse($marcref, 'error' => sub {
+            my ($msg) = @_;
+            push @{ $self->{'errors'} ||= [] }, $msg;
+        });
+        foreach (@$fields) {
+            my $valref = $_->[VALREF];
+            $$valref = encode('UTF-8', $$valref);
+        }
+        my $marc = marcbuild($leader, $fields);
+        $marcref = \$marc;
+        $ok = 1;
+    };
+    if (!$ok) {
+        die "worse MARC record";
+    }
+    return $marcref;
 }
+### if ($$marcref =~ /[^\x00-\x7f]/) {
+###     # (1) 
+###     my ($leader, $fields);
+###     eval {
+###         my $reclen = substr($$marcref, 0, 5);
+###         
+###     if (!$is_utf8) {
+###         $reclen = utf8::upgrade($$marcref);
+###     }
+###     if ($reclen != length $$marcref) {
+###     substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
+###     my ($leader, $fields);
+###     foreach my $encode (1, 0) {
+###         my ($leader, $fields);
+###         eval {
+###             ($leader, $fields) = marcparse($marcref);
+###             if ($encode) {
+###                 foreach (@$fields) {
+###                     my $valref = $_->[VALREF];
+###                     $$valref = encode('UTF-8', $$valref);
+###                 }
+###             }
+###         };
+###         last if defined $leader;
+###     }
+###     die "unparseable MARC data" if !defined $leader;
+###     my $marc = marcbuild($leader, $fields);
+###     #substr($marc, 0, 5) = sprintf('%05d', length $marc);
+###     $marcref = \$marc;
+### }
+### elsif (utf8::is_utf8($$marcref)) {
+###     # No special characters, but Perl sees it as a string of characters
+###     my $marc = eval { encode('UTF-8', $$marcref, LEAVE_SRC|DIE_ON_ERR) };
+###     if (!defined $marc) {
+###         my ($err) = split /\n/, $@;
+###         die "MARC data can't be converted from characters to octets: $err\n";
+###     }
+###     $marcref = \$marc;
+### }
+### #elsif (0) {
+### #    # XXX Bad!  Don't do this!!!  See above.
+### #    $$marcref = eval { decode('UTF-8', $$marcref, LEAVE_SRC|DIE_ON_ERR) };
+### #    die "MARC data can't be decoded as UTF-8\n" if !defined $$marcref;
+### #}
+### if (1) {
+###     # XXX Debugging code
+###     my $length_in_octets = sprintf('%05d', length $$marcref);
+###     if ($length_in_octets ne substr($$marcref, 0, 5)) {
+###         substr($$marcref, 0, 5) = $length_in_octets;
+###     }
+### }
+### return $marcref;
+###}
 
 sub parse {
     my ($self, $marc) = @_;
     my $marcref;
     if (defined $marc) {
-        my $r = ref $marc;
-        $marcref =
-            $r eq ''       ? \$marc :
-            $r eq 'SCALAR' ? $marc  :
-            die "unparseable: $marc";
+        $marcref = $self->{'marcref'} = $self->_marcref(ref $marc ? $marc : \$marc);
     }
     elsif ($self->{'is_parsed'}) {
         return $self;
@@ -91,21 +287,20 @@ sub parse {
         $marcref = $self->{'marcref'}
             or die "nothing to parse: $self";
     }
-    #if (!is_utf8($$marcref)) {
-    #    $$marcref = decode('UTF-8', $$marcref);
-    #}
-    #my $lenstr = substr($$marcref, 0, 5);
-    #if ($lenstr + 0 != length $$marcref) {
-    #    substr($$marcref, 0, 5) = sprintf '%05d', length $$marcref;  # XXX
-    #    $self->{'is_dirty'} = 1;
-    #}
-    my ($leader, $fields) = marcparse($marcref);
-    $self->{'leader'} = $leader;
-    $self->{'fields'} = [ map {
-        _make_field($self, $_)
-    } @$fields ];
-    $self->{'is_parsed'} = 1;
-    return $self;
+    my $ok;
+    eval {
+        delete $self->{'errors'};
+        my ($leader, $fields) = marcparse($marcref, 'error' => sub {
+            my ($msg) = @_;
+            push @{ $self->{'errors'} ||= [] }, $msg;
+        });
+        $self->{'leader'} = $leader;
+        $self->{'fields'} = [ map {
+            _make_field($self, $_)
+        } @$fields ];
+        $ok = $self->{'is_parsed'} = 1;
+    };
+    return $self if $ok;
 }
 
 sub field {
@@ -116,13 +311,32 @@ sub field {
     my @fields = grep { !$_->{'content'}[DELETE] } @{ $self->{'fields'} };
     my $ref = ref $what;
     if ($ref eq '') {
-        @fields = grep { $_->{'content'}[TAG] eq $what } @fields;
+        $what = qr/$what/;
+        $ref = ref $what;
     }
-    elsif ($ref eq 'CODE') {
+    if ($ref eq 'CODE') {
         @fields = grep { $what->() } @fields;
     }
     elsif ($ref eq 'Regexp') {
-        @fields = grep { $_ =~ $what } @fields;
+        # Possible ways of specifying fields to match:
+        #   $marc->field(qr/6../);      Tag with wildcards
+        #   $marc->field(qr/648/);      Tag alone
+        #   $marc->field(qr/648 0/);    Tag with indicators
+        #   $marc->field(qr/648#0/);    Ditto, with "#" for " "
+        @fields = grep {
+            my $matches;  # What we return
+            my $field = $_;
+            my $content = $field->{'content'};
+            my $tag = $content->[TAG];
+            my $inds = $tag ge '010' ? $content->[IND1] . $content->[IND2] : '';
+            (my $inds2 = $inds) =~ tr/ /#/;
+            foreach ($tag, $tag . $inds, $tag . $inds2) {
+                next if !/^$what/;
+                $matches = 1;
+                last;
+            }
+            $matches;
+        } @fields;
     }
     else {
         die "usage: \$marc->field($what)";
@@ -142,6 +356,13 @@ sub field {
         die "multiple fields returned" if @fields > 1;
         return $fields[0];
     }
+}
+
+sub subfield {
+    my ($self, $what, $sub) = @_;
+    my ($field) = $self->field($what);  # First one only, for compatibility with MARC::Record
+    return if !defined $field;
+    return $field->subfield($sub);
 }
 
 sub add_metadata {
@@ -172,7 +393,10 @@ sub add_metadata {
     }
     if (@subs && !$old999) {
         my $marcref = $self->marcref;
-        my ($leader, $fields) = marcparse($marcref);
+        my ($leader, $fields) = marcparse($marcref, 'error' => sub {
+            my ($msg) = @_;
+            push @{ $self->{'errors'} ||= [] }, $msg;
+        });
         $self->leader($leader);
         $self->fields($fields);
         @$fields = (
@@ -205,6 +429,24 @@ sub _default_leader {
 sub new_field {
     my $self = shift;
     return _make_field($self, @_);
+}
+
+sub insert_field {
+    my ($self, $field, %where) = @_;
+    my $tag = $field->tag;
+    $field->record($self);
+    my $fields = $self->fields;
+    if (!keys %where) {
+        @$fields = (
+            ( grep { $_->tag le $tag } @$fields ),
+            $field,
+            ( grep { $_->tag gt $tag } @$fields ),
+        );
+    }
+    else {
+        die "not implemented";
+    }
+    $self->is_dirty(1);
 }
 
 sub garnish {
@@ -293,6 +535,9 @@ sub delete_fields {
             elsif ($r eq 'CODE') {
                 push @conditions, $what;
             }
+            elsif ($r->can('tag')) {
+                push @conditions, sub { shift() eq $what };
+            }
             else {
                 die "unknown field specifier type: $r";
             }
@@ -311,6 +556,7 @@ sub delete_fields {
         $ok = 1;
     };
     die "wtf?" if !$ok;
+    $self->is_dirty(1) if $n;
     return $n;
 }
 
@@ -490,7 +736,17 @@ sub new {
     return bless \%self, $cls;
 }
 
-sub is_deleted { @_ > 1 ? $_[0]{'content'}[DELETE] = $_[1] : $_[0]{'content'}[DELETE] }
+sub is_deleted {
+    my $self = shift;
+    my $del = !!$self->{'content'}[DELETE];
+    return $del if !@_;
+    my $new_del = !!shift;
+    return $new_del if $new_del eq $del;
+    $self->{'content'}[DELETE] = $new_del;
+    $self->{'is_dirty'} = 1;
+}
+
+sub record { @_ > 1 ? $_[0]{'record'} = $_[1] : $_[0]{'record'} }
 sub is_dirty { @_ > 1 ? $_[0]{'is_dirty'} = $_[1] : $_[0]{'is_dirty'} }
 
 sub value { goto &data }
@@ -572,6 +828,15 @@ sub subfields {
     my ($self) = @_;
     my $content = $self->{'content'};
     return @$content[SUBS..$#$content];
+}
+
+sub add_subfields {
+    my $self = shift;
+    my $content = $self->{'content'};
+    return undef if @_ % 2;  # For compatibility with MARC::Field, sadly
+    push @$content, @_;
+    $self->{'is_dirty'} = 1;
+    return @_ / 2;
 }
 
 1;

@@ -124,14 +124,11 @@ sub marcref {
     my $marc;
     if (@_ == 1) {
         my ($instance_id) = @_;
-        $sth = $self->sth(q{SELECT source FROM instances WHERE id = ? AND source_type = 'MARC'});
+        $sth = $self->sth(q{SELECT source, source_type FROM instances WHERE id = ? AND source_type = 'MARC'});
         $sth->execute($instance_id);
-        my @row = $sth->fetchrow_array;
-        die "no such instance: $instance_id\n" if !@row;
-        $marc = $row[0];  # eval { encode('UTF-8', $row[0]) };
-        #_utf8_on($marc);  # XXX
-        # substr($marc, 0, 5) = sprintf('%05d', length $marc);
-        # die "instance: MARC data can't be encoded as UTF-8: $instance_id\n" if !defined $marc;
+        my ($marc, $type) = $sth->fetchrow_array;
+        die "no such instance: $instance_id\n" if !defined $marc;
+        die "not a MARC record: $instance_id\n" if $type ne 'MARC';
         return \$marc;
     }
     else {

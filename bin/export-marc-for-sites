@@ -7,6 +7,7 @@ use Cwd qw(getcwd);
 use POSIX qw(strftime);
 use String::ShellQuote;
 use Text::ParseWords;
+use File::Basename qw(basename dirname);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -29,7 +30,7 @@ my $mode = INCREMENTAL;
 my ($query, $id_file, $dest, $skipfile, $dryrun, $verbose, $test);
 GetOptions(
     # Export mode
-    'f|all' => sub { $mode = FULL },
+    'f|full' => sub { $mode = FULL },
     'q|query=s' => sub { $query = $_[1]; $mode = SPECIAL },
     'i|id-file=s' => sub { $id_file = $_[1]; $mode = SPECIAL },
     # Options shared by export-marc
@@ -60,6 +61,9 @@ my $now = strftime('%Y%m%dT%H%M%SZ', gmtime $t0);
 my $cwd = getcwd;
 
 my %outboxes;
+my %site_mode_var = map { $_ => undef } qw(site dir var exports mode outbox parent);
+my $rxstr = join('|', keys %site_mode_var);
+my $rxpando = qr/\%\(($rxstr)\)/;
 
 # Read outboxes first, just in case they're misconfigured
 foreach my $site (@ARGV) {
@@ -137,28 +141,61 @@ Output files:
   outerr  = $outerr
 EOS
     }
+    blather_path();
     xsystem($cmd);
     if ($tmpdir ne $outdir) {
         xrename($tmpdir, $outdir);
     }
-    return $dryrun ? ($tmpdir, $tmpmarc, $tmperr) : ($outdir, glob("$outdir/*"));
+    return ($tmpdir, $tmpmarc, $tmperr) if $dryrun;
+    # Clean up empty files
+    unlink $outerr  if !-s $outerr;   # No output to stderr
+    if (-s $outmarc < 26) {
+        # Impossibly small -- no records output
+        unlink $outmarc;
+        return ($outdir);
+    }
+    return ($outdir, glob("$outdir/*"));
 }
 
 sub distribute_files {
     my ($site, @files) = @_;
+    my $sdir = site_dir($site);
+    my $vdir = site_var($site);
+    my $xdir = site_exports_dir($site);
+    %site_mode_var = (
+        'site' => $site,
+        'dir' => $sdir,
+        'var' => $vdir,
+        'exports' => $xdir,
+        'mode' => $mode,
+    );
     foreach my $m ($mode, FULL_OR_INCREMENTAL) {
         foreach my $outbox (@{ $outboxes{$site}{$m} || [] }) {
             my ($odir, $ocmd) = @$outbox{qw(directory command)};
-            blather "Distributing to outbox $odir";
             if (defined $ocmd) {
-                xsystem(@$ocmd, $mode, @files);
+                # Expand %(dir), %(mode), %(tmp), and %(dest) accordingly
+                my $pdir = dirname($odir);
+                my @bin = map { "$_/bin" } ($odir, $pdir, $xdir, $vdir);
+                local $ENV{'PATH'} = join(':', @bin, $ENV{'PATH'});
+                my %var = (
+                    %site_mode_var,
+                    'outbox' => $odir,
+                    'parent' => $pdir,
+                    # 'tmp' => "$odir/tmp",
+                    # 'dest' => "$odir/dest",
+                );
+                s{$rxpando}{defined $var{$1} ? $var{$1} : fatal "undefined expando: $_"}eg for @$ocmd;
+                blather "Distributing to outbox $odir: command";
+                xsystem(@$ocmd, @files);
                     # or fatal join(' ', shell_quote(@$ocmd, $mode, @files)) . ": $!";
             }
             elsif (-x "$odir/bin/process" && -f _) {
-                xsystem("$odir/bin/process", '-t' => "$odir/tmp", '-d' => "$odir/dest", '-m' => $mode, @files);
+                blather "Distributing to outbox $odir: bin/process";
+                xsystem("$odir/bin/process", '-o' => $odir, '-m' => $mode, @files);
                     # or fatal "$odir/bin/process @files: $!";
             }
             else {
+                blather "Distributing to outbox $odir: link";
                 foreach my $f (@files) {
                     (my $name = $f) =~ s{.+/}{};
                     xlink($f, "$odir/$name");
@@ -184,6 +221,9 @@ sub xrename {
 
 sub xsystem {
     my ($cmd, @args) = @_;
+    my $exec = which($cmd);
+    fatal "no such command: $cmd" if !defined $exec;
+    $cmd = $exec;
     my $cmdstr = join(' ', $cmd, map { shell_quote($_) } @args);;
     blather "Command:\n  $cmdstr";
     if ($dryrun) {
@@ -258,8 +298,18 @@ sub site_outboxes {
         my $outbox = {
             'mode' => $m,
             'directory' => "$expdir/outboxes/$dir",
-            defined $cmd ? ('command' => [shellwords($cmd)]) : (),
         };
+        if (defined $cmd) {
+            my @cmd = shellwords($cmd);
+            $outbox->{'command-string'} = $cmd;
+            $outbox->{'command'} = \@cmd;
+            foreach (@cmd) {
+                while (m{(\%\([^()]+\))}g) {
+                    my $expando = $1;
+                    $expando =~ /^$rxpando$/ or fatal "unrecognized expando in $listfile: $expando";
+                }
+            }
+        }
         push @{ $boxes{$m} ||= [] }, $outbox;
     }
     return \%boxes;
@@ -272,6 +322,22 @@ sub xmkdir {
         next if $dryrun;
         mkdir $dir or fatal "mkdir $dir: $!";
     }
+}
+
+sub which {
+    my ($cmd) = @_;
+    return $cmd if $cmd =~ m{/};
+    foreach (split /:/, $ENV{'PATH'}) {
+        my $f = "$_/$cmd";
+        return $f if -x $f && -f _;
+    }
+    return undef;
+}
+
+sub blather_path {
+    return if !$verbose;
+    print STDERR "PATH:\n";
+    print STDERR '  ', $_, "\n" for split /:/, $ENV{'PATH'};
 }
 
 sub blather {

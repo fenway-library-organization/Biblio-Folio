@@ -1,5 +1,7 @@
 package Biblio::Folio::Site::LocalDB;
 
+use Biblio::Folio::Util qw(_unindent);
+
 use strict;
 use warnings;
 
@@ -155,23 +157,6 @@ sub _create_table_or_index {
     my $dbh = $self->dbh;
     $dbh->do($sql);
     return $self;
-}
-
-sub _unindent {
-    my @lines = map { split /(?<=\n)/ } @_;
-    my ($first_indent_len, $last_indent_len) = map { m{^(\s+)} ? length($1) : 0 } ($lines[0], $lines[-1]);
-    my $imax = $first_indent_len > $last_indent_len ? $first_indent_len : $last_indent_len;
-    if ($imax == 0) {
-        # First and last lines are not indented
-        return @_ if wantarray;
-        return join("\n", @lines);
-    }
-    my $rx = "[ ]{1,$imax}";
-    $rx = qr/$rx/;
-    s/^$rx// for @lines;
-    return @lines if wantarray;
-    my $end = $_[0] =~ /\n\z/ ? "\n" : '';
-    return join("\n", @lines) . $end;
 }
 
 sub _create_table {

@@ -45,6 +45,7 @@ our @EXPORT_OK = qw(
     _unique
     _int_set_str_to_hash
     _indentf
+    _unindent
     _mkdirs
     _json_file
     _json_encode
@@ -564,6 +565,21 @@ sub _int_set_str_to_hash {
 sub _indentf {
     my ($lvl, $fmt) = splice @_, 0, 2;
     return scalar(' ' x $lvl) . sprintf($fmt, map { defined ? $_ : '' } @_);
+}
+
+sub _unindent {
+    my @lines = map { split /(?<=\n)/ } @_;
+    s/(?<!\n)\z/\n/, s/\A\t/    / for @lines;
+    # N.B.: Each element of @lines now ends in "\n"
+    my ($imax) = sort { $b <=> $a } map { m{^( +)} ? length($1) : 0 } @lines[0, -1];
+    if ($imax != 0) {
+        # First and last lines are not indented
+        my $rx = "[ ]{1,$imax}";
+        $rx = qr/$rx/;
+        s/^$rx// for @lines;
+    }
+    return @lines if wantarray;
+    return join('', @lines);
 }
 
 sub _move_to_dir {

@@ -19,11 +19,14 @@ lib/Biblio/Folio/Classes.pm: classes.ini make-classes
 	./make-classes < $< > $@
 	chmod 444 $@
 
-diff:
-	diff -ur lib /usr/local/folio/lib || true
-	diff -ur bin /usr/local/folio/bin || true
+#diff:
+#	diff -ur lib /usr/local/folio/lib || true
+#	diff -ur bin /usr/local/folio/bin || true
 
 check:
 	@for f in $(shell find bin -maxdepth 1 -type f -executable) $(shell find lib -name \*.pm); do perl -Ilib -I$(PREFIX)/lib -c $$f; done
+
+diff:
+	@for f in $(shell find bin -maxdepth 1 -type f -executable) $(shell find lib -name \*.pm); do cmp -s $(PREFIX)/$$f $$f || diff -u $(PREFIX)/$$f $$f; done | less
 
 .PHONY: build install classes diff check

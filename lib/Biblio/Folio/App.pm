@@ -296,7 +296,10 @@ sub cmd_instance_source {
 
 sub cmd_instance_source_get {
     my ($self) = @_;
-    my ($site, %arg) = $self->orient(qw(:formats));
+    my ($site, %arg) = $self->orient(
+        qw(:formats),
+        'g|garnish' => 'garnish',
+    );
     my $argv = $self->argv;
     $self->usage("instance source get [-JMT] INSTANCE_ID...") if !@$argv;
     my $format = $arg{'format'} || FORMAT_JSON;
@@ -309,19 +312,15 @@ sub cmd_instance_source_get {
                 next;
             }
             my $marc = $source->{'rawRecord'}{'content'};
-            my $sid = $source->id;
-            print_cooked_marc(
-                'marcref' => \$marc,
-                'instance_id' => $id,
-                'source_id' => $sid,
-                'strict' => 1,
-            );
-            #my %opt = (
-            #    'error' => sub { die @_ },
-            #);
-            #my ($leader, $fields, $marcref) = marcparse(\$marc, \%opt);
-            #1;
-            #print $marc;
+            if ($arg{'garnish'}) {
+                print Biblio::Folio::Site::MARC->new(\$marc)->garnish(
+                    'instance' => $site->instance($id),
+                    'source_record' => $source,
+                );
+            }
+            else {
+                print $marc;
+            }
         }
         elsif ($format eq FORMAT_TEXT) {
             if ($rectype ne 'MARC') {
@@ -572,25 +571,32 @@ sub cmd_source {
 
 sub cmd_source_get {
     my ($self) = @_;
-    my $site = $self->orient;
+    my ($site, %arg) = $self->orient(
+        'g|garnish' => 'garnish',
+    );
     my $argv = $self->argv;
     $self->usage("source get SOURCE_RECORD_ID...") if !@$argv;
-    my $json = $self->json;
     foreach my $id (@$argv) {
-        my $srec = eval { $json->decode($site->GET("/source-storage/records/$id")->content) };
-        my ($err) = split /\n/, $@;
-        if (defined $srec) {
-            my $instance_id = $srec->{'externalIdsHolder'}{'instanceId'} || $srec->{'instanceId'};
-            print_cooked_marc(
-                'marcref' => \$srec->{'rawRecord'}{'content'}, 
-                'instance_id' => $instance_id,
-                'source_id' => $id,
-                'strict' => 1,
+        my $source = eval { $site->source($id) };
+        if (!$source) {
+            print STDERR "source record $id not found\n";
+            next;
+        }
+        my $format = $source->record_type;
+        if ($format ne FORMAT_MARC) {
+            print STDERR "source record $id is not in MARC format\n";
+            next;
+        }
+        my $marc = $source->{'rawRecord'}{'content'};
+        if ($arg{'garnish'}) {
+            my $instance_id = $source->{'externalIdsHolder'}{'instanceId'} || $source->{'instanceId'};
+            print Biblio::Folio::Site::MARC->new(\$marc)->garnish(
+                'instance' => $site->instance($instance_id),
+                'source_record' => $source,
             );
         }
         else {
-            $err = ': ' if $err =~ /\S/;
-            print STDERR "record $id not found$err\n";
+            print $marc;
         }
     }
 }
@@ -1522,7 +1528,7 @@ sub _marc_delete_stub {
 sub print_cooked_marc {
     my %arg = @_;
     my $marcref = $arg{'marcref'} || \$arg{'marc'};
-    my %sub = ('i' => $arg{'instance_id'}, 's' => $arg{'source_id'});
+    my %sub = ('i' => $arg{'instance_id'}, 's' => $arg{'source_record_id'});
     my @s999;
     my %set;
     foreach (sort keys %sub) {
