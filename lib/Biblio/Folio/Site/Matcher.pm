@@ -250,7 +250,7 @@ sub make_cql_query {
             my @cqlv = keys %$cqlv2n2v;
             next if !@cqlv;
             my $field = $fields->{$f};
-            push @check_terms, _cql_term($f, \@cqlv, $field, 1);
+            push @check_terms, _cql_term($f, \@cqlv, 'matchpoint' => $field, 'is_cql' => 1);
         }
     }
     foreach my $f (sort keys %$matchpoints) {
@@ -258,7 +258,7 @@ sub make_cql_query {
         my @cqlv = keys %$cqlv2n2v;
         next if !@cqlv;
         my $field = $fields->{$f};
-        push @matchpoint_terms, _cql_term($f, \@cqlv, $field, 1);
+        push @matchpoint_terms, _cql_term($f, \@cqlv, 'matchpoint' => $field, 'is_cql' => 1);
     }
     return if !@matchpoint_terms;
     my $query = _cql_or(@matchpoint_terms);

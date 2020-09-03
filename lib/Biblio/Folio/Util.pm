@@ -273,7 +273,7 @@ sub _cql_query {
         my $signs = $1;
         my $exact  = ($signs =~ /~/ ? 0 : 1);
         my $is_cql = ($signs =~ /%/ ? 1 : 0);
-        push @terms, _cql_term($k, $v, {'exact' => $exact}, $is_cql);
+        push @terms, _cql_term($k, $v, 'exact' => $exact, 'is_cql' => $is_cql);
     }
     return _cql_and(@terms);
 }
@@ -292,6 +292,9 @@ sub _cql_value {
     elsif ($r ne '') {
         die "unrecognized value type in term: $r";
     }
+    elsif ($is_cql) {
+        return $v;
+    }
     else {
         return $v if $v !~ s{(?=["\\?*^])}{\\}g  # Escape " \ ? * ^ (we don't grok wildcards)
                   && $v !~ m{[ =<>/()]};         # Special characters
@@ -301,10 +304,12 @@ sub _cql_value {
 }
 
 sub _cql_term {
-    my ($k, $v, $mp, $is_cql) = @_;
-    my $term = _cql_value($v, $is_cql);
+    my ($k, $v, %arg);
+    my $mp = $arg{'matchpoint'} || {};
+    my $term = _cql_value($v, $arg{'is_cql'});
     return $term if !defined $k;
-    my $op = $mp->{'exact'} ? '==' : '=';
+    my $exact = $arg{'exact'} // $mp->{'exact'};
+    my $op = $exact ? '==' : '=';
     return $k . $op . $term;
 }
 

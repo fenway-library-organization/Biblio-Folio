@@ -573,18 +573,28 @@ sub cmd_source_get {
     my ($self) = @_;
     my ($site, %arg) = $self->orient(
         'g|garnish' => 'garnish',
+        'i|for-instance' => 'for_instance',
     );
     my $argv = $self->argv;
-    $self->usage("source get SOURCE_RECORD_ID...") if !@$argv;
+    $self->usage("source get [-ig] ID...") if !@$argv;
     foreach my $id (@$argv) {
-        my $source = eval { $site->source($id) };
+        my (@search, $what);
+        if ($arg{'for_instance'}) {
+            @search = ('instance' => $id);
+            $what = "source record for instance $id";
+        }
+        else {
+            @search = ($id);
+            $what = "source record $id";
+        }
+        my $source = eval { $site->source(@search) };
         if (!$source) {
-            print STDERR "source record $id not found\n";
+            print STDERR "$what not found\n";
             next;
         }
         my $format = $source->record_type;
-        if ($format ne FORMAT_MARC) {
-            print STDERR "source record $id is not in MARC format\n";
+        if (lc $format ne lc FORMAT_MARC) {
+            print STDERR "$what is not in MARC format\n";
             next;
         }
         my $marc = $source->{'rawRecord'}{'content'};
@@ -593,7 +603,7 @@ sub cmd_source_get {
             print Biblio::Folio::Site::MARC->new(\$marc)->garnish(
                 'instance' => $site->instance($instance_id),
                 'source_record' => $source,
-            );
+            )->as_marc21;
         }
         else {
             print $marc;
@@ -1282,9 +1292,9 @@ if (1) {
             foreach my $reserve (@reserves) {
                 $item{$_} = 1 for $reserve->{'itemId'};
             }
-            my $cql = _cql_term('id', [keys %item], {'exact' => 1}, 1);
+            my $cql = _cql_term('id', [keys %item], 'exact' => 1, 'is_cql' => 1);
             my @items = $site->object('item', 'query' => $cql, 'limit' => $batch_size);
-            $cql = _cql_term('id', [map { $_->{'holdingsRecordId'} } @items], {'exact' => 1}, 1);
+            $cql = _cql_term('id', [map { $_->{'holdingsRecordId'} } @items], 'exact' => 1, 'is_cql' => 1);
             my @holdings = $site->object('holdings_record', 'query' => $cql, 'limit' => $batch_size);
             if ($want{'instance_ids'}) {
                 foreach my $holding (@holdings) {
