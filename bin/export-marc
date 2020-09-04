@@ -39,7 +39,7 @@ use constant FINISHED  => 'finished';
 use constant CANCELLED => 'cancelled';
 use constant FAILED    => 'failed';
 
-use constant DEBUGGING => $ENV{'DD'};
+use constant DEBUGGING => scalar keys %DB::;
 
 sub blather;
 sub blatherf;
@@ -168,14 +168,6 @@ my $json = JSON->new;
 
 my $t0 = my $tstart = time;
 
-# DEBUGGING
-if (DEBUGGING) {
-    my $f = $0 . '.debug';
-    $f = './' . $f if $f !~ m{^/};
-    do $f;
-    $DB::single = 1;
-}
-
 if ($sync_lidb) {
     blather "Refreshing local instances DB\n";
     sync_local_instances_db();
@@ -198,7 +190,7 @@ elsif (defined $out_file) {
         or fatal "open $out_file for writing: $!";
 }
 
-$DB::single = 1 if DEBUGGING;  # Breakpoint if running in debugger
+$DB::single = 1;  # Breakpoint if running in debugger
 if ($full) {
     export_full();
 }
@@ -306,7 +298,7 @@ sub _export_from_lidb_using_executed_sth {
             }
         }
         elsif (!$ok) {
-            $DB::single = 1 if DEBUGGING;
+            $DB::single = 1;
             my $err = $DBI::errstr;
             print STDERR "DBI error in LIDB fetch (after ID $prev_iid): $err\n" if defined $err;
         }
@@ -446,7 +438,7 @@ sub run {
     log_beginning($began, $mode, $comment)
         if !$dryrun;
     my $status;
-    $DB::single = 1 if DEBUGGING;  # Breakpoint if running in debugger
+    $DB::single = 1;  # Breakpoint if running in debugger
     eval {
         $sub->();
         $status = FINISHED;
@@ -465,7 +457,7 @@ sub run {
     my $ended = int(time);
     my $num_records = $counter{'instance'} - $counter{'nonmarc'};
     #my $num_batches = --$counter{'batch'};
-    $DB::single = 1 if DEBUGGING;  # Breakpoint if running in debugger
+    $DB::single = 1;  # Breakpoint if running in debugger
     log_result($began, $mode, $comment, $status, $ended, $num_records)
         if !$dryrun;
     show_progress($status, 'Totals');
@@ -502,7 +494,7 @@ sub _export_from_ldp_using_executed_sth {
             }
         }
         elsif (!$ok) {
-            $DB::single = 1 if DEBUGGING;
+            $DB::single = 1;
             my $err = $DBI::errstr;
             print STDERR "DBI error in LDP fetch (after ID $prev_iid): $err\n" if defined $err;
             eval { ldp()->ping } or fatal "LDP connection lost?";
