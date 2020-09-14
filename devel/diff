@@ -1,0 +1,31 @@
+#!/bin/zsh -e
+
+main() {
+    typeset opt cmd=diff
+    typeset -a opts
+    while getopts :vu opt; do
+        case $opt in
+            (v) cmd=vimdiff ;;
+            (u) opts+=( -u ) ;;
+            (*) usage ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+    opts+=( $@ )
+    typeset f g
+    for f in bin/*(*N) lib/**/*.pm(.N); do
+        g=/usr/local/folio/$f
+        cmp -s $f $g || show-diff $f $g $opts
+    done
+}
+
+show-diff() {
+    typeset f=$1 g=$2; shift 2
+    $cmd $@ $g $f
+}
+
+main "$@"
+
+# From old Makefile:
+#diff:
+#	bin/diff -u@for f in $(shell find bin -maxdepth 1 -type f -executable) $(shell find lib -name \*.pm); do cmp -s $(PREFIX)/$$f $$f || diff -u $(PREFIX)/$$f $$f; done | less

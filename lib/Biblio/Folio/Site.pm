@@ -969,13 +969,14 @@ sub source_record {
         my %arg = @_;
         if ($arg{'instance'}) {
             my $id = $arg{'instance'};
-            my $res = $self->GET('/source-storage/formattedRecords/'.$id, {'identifier' => 'INSTANCE'});
+            my $res = $self->GET("/source-storage/records/$id/formatted", {'identifier' => 'INSTANCE'});
             return if !$res->is_success;
             $source = $self->json->decode($res->content);
         }
         elsif ($arg{'query'}) {
+            die "Source record queries are no longer supported";
             my $query = $arg{'query'};
-            my $res = $self->GET('/source-storage/records', {'query' => $query, 'limit' => 2});
+            my $res = $self->GET('/source-storage/source-records', {'query' => $query, 'limit' => 2});
             return if !$res->is_success;
             $source = $res->content->{'records'}
                 or return;

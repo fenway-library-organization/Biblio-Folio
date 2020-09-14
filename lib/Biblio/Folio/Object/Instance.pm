@@ -9,7 +9,7 @@ use Biblio::Folio::Site::MARC;
 
 sub source_record {
     my ($self) = @_;
-    return $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/formattedRecords/%s?identifier=INSTANCE');
+    return $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/records/%s/formatted?idType=INSTANCE');
 }
 
 sub marcref {
