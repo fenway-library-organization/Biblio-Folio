@@ -304,7 +304,7 @@ sub _cql_value {
 }
 
 sub _cql_term {
-    my ($k, $v, %arg);
+    my ($k, $v, %arg) = @_;
     my $mp = $arg{'matchpoint'} || {};
     my $term = _cql_value($v, $arg{'is_cql'});
     return $term if !defined $k;
