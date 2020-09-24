@@ -136,11 +136,133 @@ sub marcref {
     }
 }
 
-sub sync {
+sub sync { goto &update_goldenrod }
+
+sub update_goldenrod {
     my ($self, %arg) = @_;
-    die "sync with a query is not allowed"
-        if defined $arg{'query'};
-    goto &update;
+    my $file = $self->file;
+    my $exists = -e $file;
+    my $full;
+    if (!$exists) {
+        $self->create;
+        $full = 1;
+    }
+    my $site = $self->site;
+    $site->dont_cache(qw(instance source_record holdings_record));
+    my ($query, $limit, $comment, $progress, $error) = @arg{qw(query limit comment progress error)};
+    $progress ||= sub {};
+    $error ||= $progress;
+    my @errors;
+    my ($type, $update_id);
+    my $record_this_update = !$arg{'dry_run'};
+    my $dbh = $self->dbh;
+    if (defined $query) {
+        ### die "sync with a query is not allowed";
+        $type = 'update';
+        $record_this_update = 0;
+    }
+    else {
+        $type = 'sync';
+        my $last = $self->last_sync;
+        if ($last) {
+            $query = sprintf 'metadata.updatedDate > "%s"', _utc_datetime($last);
+        }
+        else {
+            $full = 1;
+        }
+        $record_this_update //= 1;
+    }
+    my $began = time;
+    if ($record_this_update) {
+        $dbh->begin_work;
+        $self->sth(q{
+            INSERT INTO updates (began, type, query, comment, num_records) VALUES (?, ?, ?, ?, 0)}
+        )->execute($began, $type, $query, $comment);
+        $update_id = $dbh->sqlite_last_insert_rowid;
+        $dbh->commit;
+    }
+    if ($full) {
+        # Get all source records
+        $limit ||= 1000;
+        my $searcher = $site->searcher('source_record', '@limit' => $limit);
+        my $n = 0;
+        while (my @source_records = $searcher->next) {
+            $dbh->begin_work;
+            foreach my $source_record (@source_records) {
+                $n++;
+                my ($source, $source_type, $err, $instance_hrid);
+            }
+            $dbh->commit;
+            $progress->($n, \@errors);
+        }
+    }
+    else {
+        # Get new and updated instances, then the source record for each
+        $limit ||= 100;
+        my $searcher = $site->searcher('instance', '@query' => $query, '@limit' => $limit);
+        my $n = 0;
+        my $sth_ins;
+        while (my @instances = $searcher->next) {
+            $dbh->begin_work;
+            foreach my $instance (@instances) {
+                $n++;
+                my ($ok, $err, $iid, $ihrid, $source_record, $source_type, $marc21);
+                eval {
+                    $iid = $instance->id;
+                    $ihrid = $instance->hrid;
+                    $source_record = $instance->source_record;  # API call (#@$!?)
+                    $source_type = $source_record->recordType;
+                    die "instance $iid source record is not in MARC format"
+                        if $source_type ne 'MARC';
+                    my $marcjson = $source_record->{'parsedRecord'}{'content'};
+                    my $state = $source_record->{'state'};
+                    if ($state eq 'ACTUAL') {
+                        my $marc = Biblio::Folio::Site::MARC->new('marcjson' => $marcjson);
+                        if (!defined $marc) {
+                            $err = "instance $iid source record can't be parsed";
+                        }
+                        else {
+                            $marc21 = eval { $marc->as_marc21 };
+                            if (!defined $marc21) {
+                                $err = "instance $ihrid can't be exported as MARC21";
+                            }
+                        }
+                    }
+                    $ok = 1;
+                };
+                if (!$ok) {
+                    ($err) = split /\n/, $@ if !defined $err;
+                    $err = 'unknown error' if !length $err;
+                }
+                if (defined $err) {
+                    push @errors, $err;
+                    $error->($n, \@errors);
+                }
+                elsif (defined $marc21) {
+                    my $last_modified = $source_record->{'metadata'}{'updatedDate'};
+                    my $deleted = $source_record->{'deleted'} ? 1 : 0;
+                    my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
+                    $sth_ins ||= $self->sth(q{
+                        INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    });
+                    $sth_ins->execute($iid, $ihrid, $source_type, $marc21, $last_modified, $update_id, $deleted, $suppressed);
+                }
+            }
+            $dbh->commit;
+            $progress->($n, \@errors);
+        }
+    }
+    my $ended = time;
+    if ($record_this_update) {
+        $dbh->begin_work;
+        $self->sth(q{
+            UPDATE  updates
+            SET     ended = ?, status = ?, num_records = ?
+            WHERE   id = ?
+        })->execute($ended, 'ok', $n, $update_id);
+        $dbh->commit;
+    }
 }
 
 sub update {
@@ -152,10 +274,14 @@ sub update {
     }
     my $site = $self->site;
     $site->dont_cache(qw(instance source_record holdings_record));
-    my ($query, $comment, $progress) = @arg{qw(query comment progress)};
+    my ($query, $comment, $progress, $error) = @arg{qw(query comment progress error)};
+    $progress ||= sub {};
+    $error ||= $progress;
+    my @errors;
     my ($type, $record_this_update, $update_id);
     my $dbh = $self->dbh;
     if (defined $query) {
+        ### die "sync with a query is not allowed";
         $type = 'update';
         $query = sprintf q{(%s) and state==ACTUAL}, $query;
         $record_this_update = 0;
@@ -187,33 +313,57 @@ sub update {
     while (my @source_records = $searcher->next) {
         $dbh->begin_work;
         foreach my $source_record (@source_records) {
-            my $instance_id = $source_record->{'externalIdsHolder'}{'instanceId'}
-                or next;
-            next if $source_record->{'errorRecord'};
-            my $source_type = $source_record->{'recordType'};
-            my $source = $source_record->{'rawRecord'}{'content'};
-            my $instance_hrid = $instance_id;  # XXX Hack
-            if ($source_type eq 'MARC') {
-                my $hrid;
-                eval {
-                    my $marc = Biblio::Folio::Site::MARC->new(\$source);
-                    $hrid = $marc->field('001')->value;
-                };
-                $instance_hrid = $hrid if defined $hrid;
+            $n++;
+            my ($source, $source_type, $err, $instance_hrid);
+            my $instance_id = $source_record->{'externalIdsHolder'}{'instanceId'};
+            if (!defined $instance_id) {
+                $err = "record #$n doesn't have an instance ID";
             }
-            my $last_modified = $source_record->{'metadata'}{'updatedDate'};
-            my $deleted = $source_record->{'deleted'} ? 1 : 0;
-            my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
-            $sth_ins ||= $self->sth(q{
-                INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            });
-            $sth_ins->execute($instance_id, $instance_hrid, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
-            1;
+            else {
+                $source_type = $source_record->{'recordType'};
+                my $marcjson = $source_record->{'parsedRecord'}{'content'};
+                # my $source = $source_record->{'rawRecord'}{'content'};
+                $instance_hrid = $instance_id;  # XXX Hack
+                if ($source_type eq 'MARC') {
+                    my ($marc, $hrid);
+                    eval {
+                        $marc = Biblio::Folio::Site::MARC->new('marcjson' => \$marcjson);
+                        $hrid = $marc->field('001')->value;
+                        $instance_hrid = $hrid;
+                        $source = eval { $marc->as_marc21 };
+                    };
+                    if (!defined $marc) {
+                        $err = "instance $instance_id source record can't be parsed";
+                    }
+                    elsif (!defined $hrid) {
+                        $err = "instance $instance_id doesn't have an hrid";
+                    }
+                    elsif (!defined $source) {
+                        $err = "instance $instance_hrid can't be exported as MARC21";
+                    }
+                }
+                else {
+                    $err = "record $instance_id does not have a MARC source record";
+                }
+            }
+            if (defined $err) {
+                push @errors, $err;
+                $error->($n, \@errors);
+                next;
+            }
+            if (defined $source) {
+                my $last_modified = $source_record->{'metadata'}{'updatedDate'};
+                my $deleted = $source_record->{'deleted'} ? 1 : 0;
+                my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
+                $sth_ins ||= $self->sth(q{
+                    INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                });
+                $sth_ins->execute($instance_id, $instance_hrid, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
+            }
         }
         $dbh->commit;
-        $n += @source_records;
-        $progress->($n) if $progress;
+        $progress->($n, \@errors);
     }
     # Add hrids for new instances (hrid set to instance ID, which is 36 bytes long)
     my $sth_nulls = $self->sth(q{

@@ -983,12 +983,16 @@ sub error {
 sub sync_local_instances_db {
     my $num_synced = 0;
     printf STDERR "\r%8d records synced", $num_synced;
+    my @errors;
     local_instances_db()->sync('progress' => sub {
-        ($num_synced) = @_;
-        printf STDERR "\r%8d records synced", $num_synced
+        my $errors;
+        ($num_synced, $errors) = @_;
+        printf STDERR "\r%8d records synced, %d error(s)", $num_synced, scalar(@$errors)
             if $num_synced % 100 == 0;
+        push @errors, @$errors if @$errors;
     });
     printf STDERR "\r%8d records synced\n", $num_synced;
+    print STDERR "error: ", $_, "\n" for @errors;
 }
 
 sub report_error {

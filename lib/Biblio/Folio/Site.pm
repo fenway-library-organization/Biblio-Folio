@@ -969,7 +969,7 @@ sub source_record {
         my %arg = @_;
         if ($arg{'instance'}) {
             my $id = $arg{'instance'};
-            my $res = $self->GET("/source-storage/records/$id/formatted", {'identifier' => 'INSTANCE'});
+            my $res = $self->GET("/source-storage/records/$id/formatted", {'idType' => 'INSTANCE'});
             return if !$res->is_success;
             $source = $self->json->decode($res->content);
         }

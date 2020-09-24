@@ -3,10 +3,13 @@ package Biblio::Folio::Site::MARC;
 use strict;
 use warnings;
 
-use Biblio::Folio::Util qw(_optional);
+use Biblio::Folio::Util qw(_optional _json_decode);
 use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 use Scalar::Util qw(blessed);
 use Encode qw(encode decode :fallback_all);
+
+require bytes;
+# use bytes;  NO NO NO NO NO!!!!!!
 
 sub new {
     my $cls = shift;
@@ -32,7 +35,8 @@ sub init {
     my ($self) = @_;
     $self->{'is_parsed'} = 0;
     $self->{'is_dirty'} = 0;
-    $self->{'marcref'} = $self->_marcref($self->{'marcref'});
+    $self->{'marcjson'} = $self->_marcjson($self->{'marcjson'})
+        or $self->{'marcref'} = $self->_marcref($self->{'marcref'});
     delete $self->{'errors'};
     return $self;
 }
@@ -178,45 +182,63 @@ sub _marcref {
     # are expressed in terms of bytes, not characters.  If you misinterpret
     # these when parsing, you may get garbage back.
     # ----------------------------------------------------------------------
-        # For some reason, $$marcref is a string of characters -- convert it to
-        # a string of bytes.  We work with a copy because, otherwise, if
-        # $$marcref were invalid in some fundamental way we would leave it
-        # undefined.
-            # Worse news. FOLIO actually stores source records with directory
-            # entries whose offsets and lengths are expressed as characters,
-            # not bytes.  We have to parse the whole record, tell Perl it's all
-            # bytes, and then rebuild the record.
-    my $is_utf8 = utf8::is_utf8($$marcref);
-    my $reclen_is_right = (length($$marcref) == 0 + substr($$marcref, 0, 5));
-    my $all_ascii = ($$marcref !~ /[^\x00-\x7f]/);
-    if ($all_ascii) {
-        if ($is_utf8) {
-            utf8::downgrade($$marcref);  # This may die!
+    my $len = length $$marcref;
+    my $len_in_bytes = bytes::length($$marcref);
+    my $reclen = 0 + substr($$marcref, 0, 5);
+    if ($reclen == $len_in_bytes) {
+        if ($len != $len_in_bytes) {
+            # Someone gave us characters
+            utf8::encode($$marcref);
+            $len = length $$marcref;
         }
-        substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
-        return $marcref;
     }
-    elsif (!$is_utf8) {
-        # Make it characters
-        utf8::decode($$marcref) or die "uh-oh!";
+    elsif ($reclen == $len) {
+        utf8::encode($$marcref);
+        $len = length $$marcref;
+        substr($$marcref, 0, 5) = sprintf('%05d', $len);
     }
-    my ($ok, $leader, $fields);
-    eval {
-        substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
-        ($leader, $fields) = marcparse($marcref, 'error' => sub {
-            my ($msg) = @_;
-            push @{ $self->{'errors'} ||= [] }, $msg;
-        });
-        foreach (@$fields) {
-            my $valref = $_->[VALREF];
-            $$valref = encode('UTF-8', $$valref);
+    return $marcref;
+    if (0) {
+            # For some reason, $$marcref is a string of characters -- convert it to
+            # a string of bytes.  We work with a copy because, otherwise, if
+            # $$marcref were invalid in some fundamental way we would leave it
+            # undefined.
+                # Worse news. FOLIO actually stores source records with directory
+                # entries whose offsets and lengths are expressed as characters,
+                # not bytes.  We have to parse the whole record, tell Perl it's all
+                # bytes, and then rebuild the record.
+        my $is_utf8 = utf8::is_utf8($$marcref);
+        my $reclen_is_right = (length($$marcref) == 0 + substr($$marcref, 0, 5));
+        my $all_ascii = ($$marcref !~ /[^\x00-\x7f]/);
+        if ($all_ascii) {
+            if ($is_utf8) {
+                utf8::downgrade($$marcref);  # This may die!
+            }
+            substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
+            return $marcref;
         }
-        my $marc = marcbuild($leader, $fields);
-        $marcref = \$marc;
-        $ok = 1;
-    };
-    if (!$ok) {
-        die "worse MARC record";
+        elsif (!$is_utf8) {
+            # Make it characters
+            utf8::decode($$marcref) or die "uh-oh!";
+        }
+        my ($ok, $leader, $fields);
+        eval {
+            substr($$marcref, 0, 5) = sprintf('%05d', length $$marcref);
+            ($leader, $fields) = marcparse($marcref, 'error' => sub {
+                my ($msg) = @_;
+                push @{ $self->{'errors'} ||= [] }, $msg;
+            });
+            foreach (@$fields) {
+                my $valref = $_->[VALREF];
+                $$valref = encode('UTF-8', $$valref);
+            }
+            my $marc = marcbuild($leader, $fields);
+            $marcref = \$marc;
+            $ok = 1;
+        };
+        if (!$ok) {
+            die "worse MARC record";
+        }
     }
     return $marcref;
 }
@@ -274,30 +296,72 @@ sub _marcref {
 ### return $marcref;
 ###}
 
-sub parse {
-    my ($self, $marc) = @_;
-    my $marcref;
-    if (defined $marc) {
-        $marcref = $self->{'marcref'} = $self->_marcref(ref $marc ? $marc : \$marc);
+sub _marcjson {
+    # Return a reference to a MARC record as a parsed MARCJSON hash
+    my ($self, $marcjson) = @_;
+    return if !defined $marcjson;
+    my $r = ref $marcjson;
+    if ($r eq '') {
+        # $self->_marcjson($str);
+        $marcjson = _json_decode($marcjson);
+        $r = ref $marcjson;
     }
-    elsif ($self->{'is_parsed'}) {
-        return $self;
+    elsif ($r eq 'SCALAR') {
+        # $self->_marcjson(\$str);
+        $marcjson = _json_decode($$marcjson);
+        $r = ref $marcjson;
+    }
+    if (eval { 1 + keys(%$marcjson) }) {
+        # $self->_marcjson(_json_decode($str));
     }
     else {
-        $marcref = $self->{'marcref'}
+        die "can't make a MARCJSON hash out of a(n) $r";
+    }
+    my %key = map { $_ => 1 } keys %$marcjson;
+    die "MARCJSON without a leader" if !delete $key{'leader'};
+    die "MARCJSON without fields" if !delete $key{'fields'};
+    if (keys %key) {
+        my $keys = join(', ', sort keys %key);
+        die "MARCJSON with extraneous elements: $keys";
+    }
+    return $marcjson;
+}
+
+sub parse {
+    my ($self, %what) = @_;
+    my ($marcjson, $marcref);
+    return $self if $self->{'is_parsed'};
+    if (defined $what{'marcjson'}) {
+        $marcjson = $self->{'marcjson'} = $self->_marcjson($what{'marcjson'});
+    }
+    elsif (defined $what{'marcref'}) {
+        $marcref = $self->{'marcref'} = $self->_marcref($what{'marcref'});
+    }
+    else {
+        $marcjson = $self->{'marcjson'}
+            or $marcref = $self->{'marcref'}
             or die "nothing to parse: $self";
     }
     my $ok;
     eval {
         delete $self->{'errors'};
-        my ($leader, $fields) = marcparse($marcref, 'error' => sub {
-            my ($msg) = @_;
-            push @{ $self->{'errors'} ||= [] }, $msg;
-        });
-        $self->{'leader'} = $leader;
-        $self->{'fields'} = [ map {
-            _make_field($self, $_)
-        } @$fields ];
+        if ($marcjson) {
+            $self->{'leader'} = $marcjson->{'leader'};
+            my $fields = $marcjson->{'fields'};
+            $self->{'fields'} = [ map {
+                _make_field_from_marcjson($self, $_)
+            } @$fields ];
+        }
+        elsif ($marcref) {
+            my ($leader, $fields) = marcparse($marcref, 'error' => sub {
+                my ($msg) = @_;
+                push @{ $self->{'errors'} ||= [] }, $msg;
+            });
+            $self->{'leader'} = $leader;
+            $self->{'fields'} = [ map {
+                _make_field($self, $_)
+            } @$fields ];
+        }
         $ok = $self->{'is_parsed'} = 1;
     };
     return $self if $ok;
@@ -412,18 +476,71 @@ sub add_metadata {
 
 sub as_marc21 {
     my ($self) = @_;
-    my $marcref = $self->marcref;
+    my $leader = $self->leader;
+    my @fields = $self->fields;
     my $dirty = $self->is_dirty;
-    my @fields = map {
-        $dirty = 1 if $_->{'is_dirty'};
-        $_->{'content'}
-    } @{ $self->fields };
-    return $$marcref if $marcref && !$dirty;
-    return marcbuild($self->leader, \@fields);
+    if (!$dirty) {
+        foreach my $field (@fields) {
+            $dirty = 1 if $field->{'is_dirty'};
+        }
+        if (!$dirty) {
+            my $marcref = $self->{'marcref'};
+            return $$marcref if defined $marcref;
+        }
+    }
+    return marcbuild($leader, [ map { $_->{'content'} } @fields ]);
+}
+
+sub as_marcjson {
+    my ($self) = @_;
+    my $leader = $self->leader;
+    my @fields = $self->fields;
+    my $dirty = $self->is_dirty;
+    if (!$dirty) {
+        foreach my $field (@fields) {
+            $dirty = 1 if $field->{'is_dirty'};
+        }
+        if (!$dirty) {
+            my $marcjson = $self->{'marcjson'};
+            return $marcjson if $marcjson;
+        }
+    }
+    return $self->{'marcjson'} = {
+        'leader' => $leader,
+        'fields' => [ map { _field_to_marcjson_field($_) } @fields ],
+    }
 }
 
 sub _default_leader {
     return '00000cam a2200000 a 4500';
+}
+
+sub _field_to_marcjson_field {
+    my ($field) = @_;
+    my $content = $field->{'content'};
+    return if $content->[DELETE];
+    my $tag = $content->[TAG];
+    if ($tag lt '010') {
+        return +{
+            $tag => ${ $content->[VALREF] },
+        };
+    }
+    else {
+        my @subs = @$content[SUBS..$#$content];
+        return +{
+            $tag => {
+                'ind1' => $content->[IND1],
+                'ind2' => $content->[IND2],
+                'subfields' => [
+                    map  {
+                        my ($k, $v) = @$_[0,1];
+                        +{ $k => $$v };
+                    }
+                    grep { !$_->[DELETE] } @subs
+                ],
+            },
+        };
+    }
 }
 
 sub new_field {
@@ -479,6 +596,23 @@ sub garnish {
 sub _make_field {
     unshift @_, 'Biblio::Folio::Site::MARC::Field';
     goto &Biblio::Folio::Site::MARC::Field::new;
+}
+
+sub _make_field_from_marcjson {
+    my ($self, $field) = @_;
+    my ($tag, $data) = %$field;
+    if ($tag lt '010') {
+        return _make_field($self, $tag, $data);
+    }
+    else {
+        my ($ind1, $ind2) = @$data{qw(ind1 ind2)};
+        my @subs = map { %$_ } @{ $data->{'subfields'} };
+        #? my @subs = map {
+        #?     my ($k, $v) = %$_;
+        #?     ($k => \$v)
+        #? } @{ $data->{'subfields'} };
+        return _make_field($self, $tag, $ind1, $ind2, @subs);
+    }
 }
 
 sub add_fields {

@@ -70,6 +70,21 @@ sub buffer { @_ > 1 ? $_[0]{'buffer'} = $_[1] : $_[0]{'buffer'} }
 sub prepared { @_ > 1 ? $_[0]{'prepared'} = $_[1] : $_[0]{'prepared'} }
 sub finished { @_ > 1 ? $_[0]{'finished'} = $_[1] : $_[0]{'finished'} }
 
+sub param {
+    my $self = shift;
+    my $key = shift;
+    my $params = $self->{'params'};
+    return $params->{$key} if !@_;
+    my $val = shift;
+    if (defined $val) {
+        $params->{$key} = $val;
+    }
+    else {
+        delete $params->{$key};
+    }
+    return $self;
+}
+
 sub params {
     my $self = shift;
     return $self->{'params'} if !@_;

@@ -1,0 +1,73 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+# use lib '/usr/local/folio/lib';
+
+use Biblio::Folio;
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub usage;
+sub blather;
+
+my $tty = -t STDERR ? \*STDERR : undef;
+
+my ($query, $comment, $dryrun, $limit);
+GetOptions(
+    'q|query=s' => \$query,
+    'm|comment=s' => \$comment,
+    'n|dry-run' => \$dryrun,
+    's|batch-size=i' => \$limit,
+) or usage;
+
+my $t0 = time;
+
+usage if @ARGV != 1;
+my $site_name = shift;
+$site_name =~ s/^[@]//;
+
+my $root = '/usr/local/folio';
+my $folio = Biblio::Folio->new('root' => $root);
+my $site = $folio->site($site_name);
+
+blather "Refreshing local instances DB\n";
+
+my $n = 0;
+my @errors;
+my %arg = (
+    defined $query ? ('query' => $query) : (),
+    defined $limit ? ('limit' => $limit) : (),
+    defined $comment ? ('comment' => $comment) : (),
+    defined $dryrun ? ('dry_run' => $dryrun) : (),
+    'progress' => \&progress,
+);
+
+my $db = $site->local_instances_database;
+$db->dbh->do('PRAGMA cache_size = -2000');
+
+progress($n);
+$db->sync(%arg);
+progress($n);
+print $tty "\n" if $tty;
+
+print STDERR "error: ", $_, "\n" for @errors;
+
+blather sprintf("Refresh finished in %d second(s)\n", time - $t0);
+
+sub progress {
+    my ($n, $errors) = @_;
+    push @errors, @$errors if $errors && @$errors;
+    return if !$tty;
+    my $num_errors = $errors ? @$errors : 0;
+    my $td = time - $t0;
+    my $min = int($td / 60);
+    my $sec = $td % 60;
+    my $rate = $td ? $n / $td : 0;
+    printf $tty "\r%8d synced | %5d error | %02d:%02d elapsed | %.1f records/sec", $n, $num_errors, $min, $sec, $rate;
+}
+
+sub blather {
+    print { $tty || \*STDERR } @_;
+}
