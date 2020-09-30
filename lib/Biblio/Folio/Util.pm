@@ -79,7 +79,7 @@ use File::Basename qw(dirname basename);
 
 use constant DEBUGGING => $ENV{'DD'};
 
-use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.%L+0000';
+use constant FOLIO_UTC_FORMAT => '%Y-%m-%dT%H:%M:%S.%J+0000';
 use constant COMPACT_UTC_FORMAT => '%Y%m%dT%H%M%SZ';
 
 use constant TRUE => JSON::true;
@@ -372,7 +372,7 @@ sub _str2hash {
     my ($str) = @_;
     my %hash = map {
         s/^\s+//;
-        /^[^#]/ ? (split /\s+/) : ()
+        /^[^#]/ ? (split /\s+/, $_, 2) : ()
     } split /\n/, $str;
     return %hash if wantarray;
     return \%hash;
@@ -434,10 +434,25 @@ sub _utc_datetime {
     $format ||= FOLIO_UTC_FORMAT;
     $format = COMPACT_UTC_FORMAT if $format eq 'compact';
     return strftime($format, gmtime) if !defined $t;
-    my $F = 0;  # Fraction of a second
-    if ($t =~ m{^[0-9]+$}) {
-        # Seconds since the Unix epoch
-        $t = strftime($format, gmtime $t);
+    my ($ms, $us);  # milliseconds and microseconds are handled specially
+    if ($t =~ m{
+        ^
+        ([0-9]+)                # Seconds since the epoch
+        (?:
+            \.
+                ([0-9]{3})      # Milliseconds...
+                ([0-9]{3})?     # ...and microseconds
+        )?
+        $
+    }x) {
+        # Seconds (and optional milliseconds) since the Unix epoch
+        $t = $1;
+        if (defined $2) {
+            $ms = $2;
+            $us = $2.$3 if defined $3;
+        }
+        local $ENV{'TZ'} = 'UTC';
+        $t = strftime($format, gmtime $t);  # if $format !~ /^%s(?:\.%[36]Q)?$/;
     }
     else {
         # Ymd string with optional time and timezone
@@ -461,34 +476,42 @@ sub _utc_datetime {
                 :?
                 ([0-9][0-9])
                 (?:
-                    \.([0-9]+)
+                    \.([0-9]{3})
+                    ([0-9]{3})?
                 )?
             //x) {
-                ($H, $M, $S, $F) = ($1, $2, $3, $4||0);
+                ($H, $M, $S, $ms) = ($1, $2, $3, $4);
+                $us = $4.$5 if defined $5;
             }
             $z = $1 if $t =~ s/^(Z|[-+][0-9][0-9](?:[0-9][0-9])?)$//;
         }
         die "junk at end of date/time: $t" if length $t;
         my @datetime = ($S, $M, $H, $d, $m-1, $Y-1900);
         if (!defined $z) {
+            #local $ENV{'TZ'} = 'UTC';
             my $s = strftime('%s', @datetime);
             $t = strftime($format, gmtime $s);
         }
         elsif ($z =~ /^([-+]0000|Z)$/) {
-            $t = strftime($format, @datetime);
-        }
-        elsif ($z =~ /^([-+]) ( [0-9][0-9] (?:[0-9][0-9])? )$/x) {
-            my $offset = int($1 . sprintf('%02d%02d00', $2, $3||0));
+            local $ENV{'TZ'} = 'UTC';
             my $s = strftime('%s', @datetime);
-            $s += $offset;  # ???
             $t = strftime($format, gmtime $s);
         }
+        elsif ($z =~ /^([-+]) ([0-9][0-9]) (?:([0-9][0-9]))?$/x) {
+            my $offset = $1 . int($2*3600 + ($3||0)*60);
+
+local $ENV{'TZ'} = 'UTC';
+$t = strftime('%s', @datetime) - $offset
+
+#           local $ENV{'TZ'} = 'UTC'.$offset;
+#           my $s = strftime('%s', @datetime);
+#           # $s += $offset;  # ???
+#           $t = strftime($format, gmtime $s);
+        }
     }
-    # Expand milliseconds (%L) or microseconds (%K)
-    $t =~ s/%L/sprintf '%03d', substr($F, 0, 3)/e
-    or
-    $t =~ s/%M/sprintf '%06d', substr($F, 0, 6)/e
-    ;
+    # Expand milliseconds (%J) and/or microseconds (%K)
+    $t =~ s/%J/sprintf('%03d', $ms||0)/e;
+    $t =~ s/%K/sprintf('%06d', $us||0)/e;
     return $t;
 }
 
