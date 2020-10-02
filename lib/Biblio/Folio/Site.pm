@@ -550,7 +550,8 @@ sub object {
 
 sub fetch {
     my ($self, $pkg, %arg) = @_;
-    my ($uri, $objs, $id, $terms, $query) = @arg{qw(uri objects id terms query)};
+    my ($uri, $objs, $id, $terms, $query) = delete @arg{qw(uri objects id terms query)};
+    my ($offset, $limit, $dig, $key, $scalar, $array) = delete @arg{qw(offset limit dig key scalar array)};
     my $idref = ref $id;
     if (defined $terms) {
         die "fetch('$pkg', 'terms' => {...}, 'query' => q{$query}" 
@@ -581,8 +582,8 @@ sub fetch {
         if (!defined $query && $uri =~ /\?/) {
             $uri = URI->new($uri);
             %content = $uri->query_form;
-            $query = $arg{'query'} = $uri->query;
-            $uri = $arg{'uri'} = $uri->path;
+            $query = $uri->query;
+            $uri = $uri->path;
         }
         else {
             $content{'query'} = $query;
@@ -593,30 +594,26 @@ sub fetch {
                 if $id && $idref eq '' && $uri =~ /%s/;
             die "search URIs can't contain placeholder %s"
                 if $uri =~ /%s/;
-            foreach (qw(offset limit)) {
-                $content{$_} = $arg{$_} if defined $arg{$_};
-            }
-            $res = $self->GET($uri, \%content);
+            $content{'offset'} = $offset if defined $offset;
+            $content{'limit'} = $limit if defined $limit;
+            $res = $self->GET($uri, { %content, %arg });
         }
         elsif (defined $id) {
             $uri = sprintf($uri, $id);
             $res = $self->GET($uri);
         }
         else {
-            foreach (qw(offset limit)) {
-                $content{$_} = $arg{$_} if defined $arg{$_};
-            }
-            delete $content{'query'};
+            $content{'offset'} = $offset if defined $offset;
+            $content{'limit'} = $limit if defined $limit;
             $uri =~ s{/%s$}{};  # or die "I don't know how to fetch a $pkg using URI $uri without a query or an ID";
-            $res = $self->GET($uri, \%content);
+            $res = $self->GET($uri, { %content, %arg });
         }
         $code = $res->code;
         return if $code eq '404';  # Not Found
         if ($res->is_success) {
             my $content = $self->json->decode($res->content);
             my @dig = grep { defined } (
-                $arg{'dig'} ? @{ $arg{'dig'} }
-                            : $arg{'key'} ? ($arg{'key'}) : ()
+                $dig ? @$dig : $key ? ($key) : ()
             );
             if (defined $id) {
                 @return = ($content);
@@ -632,7 +629,7 @@ sub fetch {
     elsif (!@return) {
         die "can't construct or fetch $pkg objects without data or an ID or query";
     }
-    my $instantiate = !$arg{'scalar'} && !$arg{'array'};
+    my $instantiate = !$scalar && !$array;
     return if !@return;
     @return = map {
         $pkg->new('_site' => $self, '_json' => $self->json, %$_)
