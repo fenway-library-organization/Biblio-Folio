@@ -12,17 +12,24 @@ use Getopt::Long
 sub usage;
 sub blather;
 
-my $tty = -t STDERR ? \*STDERR : undef;
+my $db;
+my $tty;
+my ($verbose, $dryrun, $comment, $end_status, $after, $before, $offset, $limit, $batch_size, $error_file, $end_status);
 
-my ($query, $comment, $dryrun, $limit);
 GetOptions(
-    'q|query=s' => \$query,
-    'm|comment=s' => \$comment,
-    'n|dry-run' => \$dryrun,
-    's|batch-size=i' => \$limit,
+    # General options
+    'v|verbose'         => \$verbose,
+    'n|dry-run'         => \$dryrun,
+    'm|comment=s'       => \$comment,
+    'z|end-status=s'    => \$end_status,
+    'o|offset=s'        => \$offset,
+    'l|limit=s'         => \$limit,
+    's|batch-size=i'    => \$batch_size,
+    'A|after=s'         => \$after,
+    'B|before=s'        => \$before,
+    'e|error-file=s'    => \$error_file,
+    'p|piecemeal'       => \$piecemeal,
 ) or usage;
-
-my $t0 = time;
 
 usage if @ARGV != 1;
 my $site_name = shift;
@@ -32,42 +39,102 @@ my $root = '/usr/local/folio';
 my $folio = Biblio::Folio->new('root' => $root);
 my $site = $folio->site($site_name);
 
-blather "Refreshing local instances DB\n";
+blather "Refreshing local instances DB\n" if $state{'num_total'} == 0;
 
-my $n = 0;
-my @errors;
-my %arg = (
-    defined $query ? ('query' => $query) : (),
-    defined $limit ? ('limit' => $limit) : (),
-    defined $comment ? ('comment' => $comment) : (),
-    defined $dryrun ? ('dry_run' => $dryrun) : (),
-    'progress' => \&progress,
-);
+my %arg;
 
-my $db = $site->local_instances_database;
+sub exec_next_piece {
+    1;
+}
+
+if ($piecemeal) {
+    init_piecemeal();
+}
+else {
+    init();
+}
+
+$db = $site->local_instances_database;
 $db->dbh->do('PRAGMA cache_size = -2000');
 
-progress($n);
+if (!defined $after) {
+    $after = $db->max_after;
+    $after-- if $after;
+}
+
+my @errors;
+progress();
 $db->sync(%arg);
-progress($n);
-print $tty "\n" if $tty;
+progress();
+
+print { tty() } "\n";
 
 print STDERR "error: ", $_, "\n" for @errors;
 
-blather sprintf("Refresh finished in %d second(s)\n", time - $t0);
+blather sprintf("Refresh finished in %d second(s)\n", time - $state{'t0'});
+
+# --- Functions
 
 sub progress {
     my ($n, $errors) = @_;
-    push @errors, @$errors if $errors && @$errors;
+    $n ||= 0;
+    $errors ||= [];
+    if ($n == -1) {
+        # End of sync
+        if ($piecemeal) {
+    }
+    $state{'num_total'} = $n;
+    if ($errors && @$errors) {
+        $state{'num_errors'} = @errors;
+        if (defined $error_file) {
+            # Drain errors
+            my $fh = error_fh();
+            print $fh $_, "\n" for @$errors;
+            @$errors = ();
+        }
+        else {
+            # Accumulate errors
+            push @errors, @$errors if $errors && @$errors;
+        }
+    }
     return if !$tty;
-    my $num_errors = $errors ? @$errors : 0;
-    my $td = time - $t0;
+    my $td = time - $state{'t0'};
     my $min = int($td / 60);
     my $sec = $td % 60;
     my $rate = $td ? $n / $td : 0;
-    printf $tty "\r%8d synced | %5d error | %02d:%02d elapsed | %.1f records/sec", $n, $num_errors, $min, $sec, $rate;
+    printf $tty "\r%8d synced | %5d error | %02d:%02d elapsed | %.1f records/sec", $n, $state{'num_errors'}, $min, $sec, $rate;
+    $total = $n;
+}
+
+sub tty {
+    if (defined $tty) {
+        return $tty;
+    }
+    elsif ($state{'tty'}) {
+        open $tty, '+<', $state{'tty'}
+            or fatal "open $state{'tty'} for reading and writing: $!";
+    }
+    elsif (-t \*STDERR) {
+        $tty = \*STDERR;
+    }
+    else {
+        open $tty, '+<', '/dev/null'
+            or fatal "open /dev/null for reading and writing: $!";
+    }
+    return $tty;
 }
 
 sub blather {
-    print { $tty || \*STDERR } @_;
+    print { tty() } @_;
 }
+
+__END__
+use Biblio::Folio::Util qw(_utc_datetime);
+use constant DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%SZ';
+    sub {
+        $after = _utc_datetime($_[1], DATETIME_FORMAT);
+    },
+    sub {
+        $before = _utc_datetime($_[1], DATETIME_FORMAT);
+    },
+

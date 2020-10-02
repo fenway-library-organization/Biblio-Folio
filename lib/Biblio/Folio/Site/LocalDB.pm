@@ -1,9 +1,29 @@
 package Biblio::Folio::Site::LocalDB;
 
-use Biblio::Folio::Util qw(_unindent);
-
 use strict;
 use warnings;
+
+# ---------------- Folderol to set up DB state constants, etc. -----------------
+our @EXPORT_OK;
+my %is_state;
+sub exportable($) {
+    my ($symbol, $value) = @_;
+    push @EXPORT_OK, $symbol;
+    $is_state{$symbol} = 1;
+    $value = $symbol if !defined $value;
+    return ($symbol, $value);
+}
+# States
+use constant exportable 'DB_READ_WRITE';
+use constant exportable 'DB_READ_ONLY';
+use constant exportable 'DB_SYNC';
+use constant exportable 'DB_BEGIN_SYNC';
+use constant exportable 'DB_END_SYNC';
+require Exporter;
+our @ISA = qw(Exporter);
+# ------------------------------------------------------------------------------
+
+use Biblio::Folio::Util qw(_unindent);
 
 # --- Constructors
 
@@ -65,6 +85,14 @@ sub site { @_ > 1 ? $_[0]{'site'} = $_[1] : $_[0]{'site'} }
 sub name { @_ > 1 ? $_[0]{'name'} = $_[1] : $_[0]{'name'} }
 sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
 
+sub state {
+    my $self = shift;
+    return $self->{'state'} if !@_;
+    my ($state) = @_;
+    die "invalid DB state: $state" if !$is_state{$state};
+    return $self->{'state'} = $state;
+}
+
 # --- Public methods
 
 sub dbh {
@@ -91,6 +119,7 @@ sub init {
     my $name = $self->{'name'};
     my $file = $self->{'file'}
         ||= $site->file("var/db/$name.db");
+    $self->{'state'} ||= DB_READ_WRITE;
     my $exists = -e $file;
     my $create = delete $self->{'create'} || $self->can('create');
     $self->{'sth'} = {};

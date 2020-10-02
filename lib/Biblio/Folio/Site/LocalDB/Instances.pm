@@ -5,25 +5,41 @@ use warnings;
 
 use base qw(Biblio::Folio::Site::LocalDB);
 
+use Biblio::Folio::Site::LocalDB::Instances::Update;
 use Biblio::Folio::Util qw(_utc_datetime);
 use Biblio::Folio::Site::MARC;
-#use Encode qw(decode encode);
 
 sub create {
     my $self = shift;
+    if (@_ % 2) {
+        my $ref = ref $_[0];
+        if ($ref eq 'DBI::db') {
+            unshift @_, 'dbh';
+        }
+        elsif (!$ref) {
+            unshift @_, 'file';
+        }
+    }
     $self = $self->new(@_) if !ref $self;
-    my $file = @_ ? shift : $self->file;
-    die "no file name given when creating a local source DB?"
-        if !defined $file;
+    my $file = $self->file;
     my $dbh = $self->dbh;
-    $dbh->begin_work;
-    $dbh->do($_) for grep { !m{^/\* .+ \*/$} } split /;\n/, <<'EOS';
+    my $sql;
+    if (defined $file) {
+        (my $sqlfile = $file) =~ s{\.[^/.]+$}{.sql};
+        if (-e $sqlfile) {
+            open my $fh, '<', $sqlfile or die "open $sqlfile: $!";
+            local $/;
+            $sql = <$fh>;
+        }
+    }
+    if (!defined $sql) {
+        $sql = <<'EOS';
 CREATE TABLE instances (
     id                  VARCHAR UNIQUE PRIMARY KEY,
     hrid                VARCHAR UNIQUE NOT NULL,
     source_type         VARCHAR NULL,
     source              VARCHAR NULL,
-    last_modified       VARCHAR NOT NULL,
+    last_modified       INTEGER NOT NULL,
     suppressed          INTEGER,
     deleted             INTEGER,
     update_id           INTEGER,
@@ -31,7 +47,7 @@ CREATE TABLE instances (
     CONSTRAINT CHECK    (suppressed IN (0, 1)),
     CONSTRAINT CHECK    (deleted IN (0, 1)),
     */
-    FOREIGN KEY         (update_id) REFERENCES updates(began)
+    FOREIGN KEY         (update_id) REFERENCES updates(id)
 );
 CREATE TABLE holdings (
     instance_id         VARCHAR NOT NULL,
@@ -47,15 +63,18 @@ CREATE TABLE updates (
     began               INTEGER NOT NULL,
     ended               INTEGER NULL,
     type                VARCHAR NOT NULL DEFAULT 'sync',
-    query               VARCHAR,
-    comment             VARCHAR,
     status              VARCHAR NOT NULL DEFAULT 'running',
-    num_records         INTEGER NOT NULL DEFAULT 0
+    comment             VARCHAR,
+    query               VARCHAR NULL,
+    after               INTEGER NULL,
+    before              INTEGER NULL,
+    max_last_modified   INTEGER NULL
+    num_records         INTEGER NOT NULL DEFAULT 0,
     /*
     ,
     CONSTRAINT CHECK    (ended >= began),
-    CONSTRAINT CHECK    (type IN ('sync', 'update')),
-    CONSTRAINT CHECK    (status IN ('ok', 'failed'))
+    CONSTRAINT CHECK    (type IN ('full', 'sync', 'one-time')),
+    CONSTRAINT CHECK    (status IN ('starting', 'running', 'partial', 'ok', 'failed'))
     */
 );
 /* Indexes on instances */
@@ -73,35 +92,82 @@ CREATE INDEX updates_began_index               ON updates (began);
 CREATE INDEX updates_type_index                ON updates (type);
 CREATE INDEX updates_status_index              ON updates (status);
 EOS
+    }
+    $dbh->begin_work;
+    $dbh->do($_) for grep { !m{^/\* .+ \*/$} } split /;\n/, $sql;
     $dbh->commit;
     return $self;
+}
+
+sub max_after {
+    my ($self) = @_;
+    my $sth = $self->sth(q{
+        SELECT  max(after)
+        FROM    updates
+        WHERE   type = 'sync'
+        AND     after IS NOT NULL
+        AND     status IN ('running', 'ok')
+    });
+    $sth->execute;
+    my ($max) = $sth->fetchrow_array;
+    $sth->finish;
+    return $max || 0;
+}
+
+sub last_modified {
+    my ($self) = @_;
+    my $sth = $self->sth(q{
+        SELECT  max(last_modified)
+        FROM    instances
+    });
+    $sth->execute;
+    my ($last) = $sth->fetchrow_array;
+    $sth->finish;
+    return $last || 0;
+}
+
+sub current_update_id {
+    my ($self) = @_;
+    my $sth = $self->sth(q{
+        SELECT  id
+        FROM    updates
+        WHERE   type = 'sync'
+        AND     status = 'running'
+        ORDER   BY began DESC
+    });
+    $sth->execute;
+    my ($last) = $sth->fetchrow_array;
+    $sth->finish;
+    return $last || 0;
 }
 
 sub last_sync {
     my ($self) = @_;
     my $sth = $self->sth(q{
-        SELECT  max(began)
+        SELECT  id
         FROM    updates
         WHERE   type = 'sync'
-        AND     status = 'ok'});
+        AND     status = 'ok'
+        ORDER   BY began DESC
+    });
     $sth->execute;
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
     return $last || 0;
 }
 
-sub last_update {
-    my ($self) = @_;
-    my $sth = $self->sth(q{
-        SELECT  max(began)
-        FROM    updates
-        WHERE   type = 'update'
-        AND     status = 'ok'});
-    $sth->execute;
-    my ($last) = $sth->fetchrow_array;
-    $sth->finish;
-    return $last || 0;
-}
+### sub last_update {
+###     my ($self) = @_;
+###     my $sth = $self->sth(q{
+###         SELECT  max(began)
+###         FROM    updates
+###         WHERE   type = 'update'
+###         AND     status = 'ok'});
+###     $sth->execute;
+###     my ($last) = $sth->fetchrow_array;
+###     $sth->finish;
+###     return $last || 0;
+### }
 
 sub fetch {
     my ($self, $instance_id) = @_;
@@ -136,136 +202,25 @@ sub marcref {
     }
 }
 
-sub sync { goto &update_goldenrod }
-
-sub update_goldenrod {
+sub sync {
     my ($self, %arg) = @_;
-    my $file = $self->file;
-    my $exists = -e $file;
-    my $full;
-    if (!$exists) {
-        $self->create;
-        $full = 1;
-    }
-    my $site = $self->site;
-    $site->dont_cache(qw(instance source_record holdings_record));
-    my ($query, $limit, $comment, $progress, $error) = @arg{qw(query limit comment progress error)};
-    $progress ||= sub {};
-    $error ||= $progress;
-    my @errors;
-    my ($type, $update_id);
-    my $record_this_update = !$arg{'dry_run'};
-    my $dbh = $self->dbh;
-    if (defined $query) {
-        ### die "sync with a query is not allowed";
-        $type = 'update';
-        $record_this_update = 0;
-    }
-    else {
-        $type = 'sync';
-        my $last = $self->last_sync;
-        if ($last) {
-            $query = sprintf 'metadata.updatedDate > "%s"', _utc_datetime($last);
-        }
-        else {
-            $full = 1;
-        }
-        $record_this_update //= 1;
-    }
-    my $began = time;
-    if ($record_this_update) {
-        $dbh->begin_work;
-        $self->sth(q{
-            INSERT INTO updates (began, type, query, comment, num_records) VALUES (?, ?, ?, ?, 0)}
-        )->execute($began, $type, $query, $comment);
-        $update_id = $dbh->sqlite_last_insert_rowid;
-        $dbh->commit;
-    }
-    if ($full) {
-        # Get all source records
-        $limit ||= 1000;
-        my $searcher = $site->searcher('source_record', '@limit' => $limit);
-        my $n = 0;
-        while (my @source_records = $searcher->next) {
-            $dbh->begin_work;
-            foreach my $source_record (@source_records) {
-                $n++;
-                my ($source, $source_type, $err, $instance_hrid);
-            }
-            $dbh->commit;
-            $progress->($n, \@errors);
-        }
-    }
-    else {
-        # Get new and updated instances, then the source record for each
-        $limit ||= 100;
-        my $searcher = $site->searcher('instance', '@query' => $query, '@limit' => $limit);
-        my $n = 0;
-        my $sth_ins;
-        while (my @instances = $searcher->next) {
-            $dbh->begin_work;
-            foreach my $instance (@instances) {
-                $n++;
-                my ($ok, $err, $iid, $ihrid, $source_record, $source_type, $marc21);
-                eval {
-                    $iid = $instance->id;
-                    $ihrid = $instance->hrid;
-                    $source_record = $instance->source_record;  # API call (#@$!?)
-                    $source_type = $source_record->recordType;
-                    die "instance $iid source record is not in MARC format"
-                        if $source_type ne 'MARC';
-                    my $marcjson = $source_record->{'parsedRecord'}{'content'};
-                    my $state = $source_record->{'state'};
-                    if ($state eq 'ACTUAL') {
-                        my $marc = Biblio::Folio::Site::MARC->new('marcjson' => $marcjson);
-                        if (!defined $marc) {
-                            $err = "instance $iid source record can't be parsed";
-                        }
-                        else {
-                            $marc21 = eval { $marc->as_marc21 };
-                            if (!defined $marc21) {
-                                $err = "instance $ihrid can't be exported as MARC21";
-                            }
-                        }
-                    }
-                    $ok = 1;
-                };
-                if (!$ok) {
-                    ($err) = split /\n/, $@ if !defined $err;
-                    $err = 'unknown error' if !length $err;
-                }
-                if (defined $err) {
-                    push @errors, $err;
-                    $error->($n, \@errors);
-                }
-                elsif (defined $marc21) {
-                    my $last_modified = $source_record->{'metadata'}{'updatedDate'};
-                    my $deleted = $source_record->{'deleted'} ? 1 : 0;
-                    my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
-                    $sth_ins ||= $self->sth(q{
-                        INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    });
-                    $sth_ins->execute($iid, $ihrid, $source_type, $marc21, $last_modified, $update_id, $deleted, $suppressed);
-                }
-            }
-            $dbh->commit;
-            $progress->($n, \@errors);
-        }
-    }
-    my $ended = time;
-    if ($record_this_update) {
-        $dbh->begin_work;
-        $self->sth(q{
-            UPDATE  updates
-            SET     ended = ?, status = ?, num_records = ?
-            WHERE   id = ?
-        })->execute($ended, 'ok', $n, $update_id);
-        $dbh->commit;
-    }
+    my $update = $self->update(%arg);
+    $update->run;
 }
 
 sub update {
+    my ($self, @args) = @_;
+    if (@args % 2) {
+        die "odd number of property arguments" if @args != 1;
+        unshift @args, 'id';
+    }
+    return Biblio::Folio::Site::LocalDB::Instances::Update->new(
+        'db' => $self,
+        @args,
+    );
+}
+
+sub update_fameflower {
     my ($self, %arg) = @_;
     my $file = $self->file;
     my $exists = -e $file;
@@ -282,7 +237,7 @@ sub update {
     my $dbh = $self->dbh;
     if (defined $query) {
         ### die "sync with a query is not allowed";
-        $type = 'update';
+        $type = 'one-time';
         $query = sprintf q{(%s) and state==ACTUAL}, $query;
         $record_this_update = 0;
     }
@@ -307,7 +262,7 @@ sub update {
         $dbh->commit;
     }
     # Get new and updated source records
-    my $searcher = $site->searcher('source_record', '@query' => $query, '@limit' => 1000);
+    my $searcher = $site->searcher('source_record')->query($query)->limit(1000);
     my $n = 0;
     my $sth_ins;
     while (my @source_records = $searcher->next) {
@@ -327,7 +282,7 @@ sub update {
                 if ($source_type eq 'MARC') {
                     my ($marc, $hrid);
                     eval {
-                        $marc = Biblio::Folio::Site::MARC->new('marcjson' => \$marcjson);
+                        $marc = Biblio::Folio::Site::MARC->new('marcjson' => $marcjson);
                         $hrid = $marc->field('001')->value;
                         $instance_hrid = $hrid;
                         $source = eval { $marc->as_marc21 };
@@ -352,7 +307,7 @@ sub update {
                 next;
             }
             if (defined $source) {
-                my $last_modified = $source_record->{'metadata'}{'updatedDate'};
+                my $last_modified = _utc_datetime($source_record->{'metadata'}{'updatedDate'}, '%s');
                 my $deleted = $source_record->{'deleted'} ? 1 : 0;
                 my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
                 $sth_ins ||= $self->sth(q{
