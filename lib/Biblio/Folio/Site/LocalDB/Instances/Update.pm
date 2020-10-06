@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Biblio::Folio::Util qw(_utc_datetime);
-use Biblio::Folio::Site::LocalDB::Instances::Constants qw(:status);
+# use Biblio::Folio::Site::LocalDB::Instances::Constants qw(:status);
 use Biblio::Folio::Site::MARC;
 use Time::HiRes qw(time);
 
