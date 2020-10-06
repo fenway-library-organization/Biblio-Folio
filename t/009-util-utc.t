@@ -23,6 +23,7 @@ my @tests = (
 # Fractions of a second
     [ 'epoch to UTC with ms',   '1586620020.123',              '%Y-%m-%dT%H:%M:%S.%JZ', '2020-04-11T15:47:00.123Z' ],
     [ 'epoch to UTC with us',   '1586620020.123456',           '%Y-%m-%dT%H:%M:%S.%KZ', '2020-04-11T15:47:00.123456Z' ],
+    [ 'epoch to UTC with ns',   '1586620020.123456789',        '%Y-%m-%dT%H:%M:%S.%KZ', '2020-04-11T15:47:00.123456Z' ],
     [ 'UTC with ms to epoch',   '2020-04-11T15:47:00.123Z',    '%s.%J' =>               '1586620020.123' ],
     [ 'UTC with us to epoch',   '2020-04-11T15:47:00.123456Z', '%s.%K' =>               '1586620020.123456' ],
     [ 'epoch to epoch with ms (-1)', '1586620020.1',        '%s.%J' => '1586620020.100'    ],
@@ -34,6 +35,7 @@ my @tests = (
     [ 'epoch to epoch with us (-4)', '1586620020.0001',     '%s.%K' => '1586620020.000100' ],
     [ 'epoch to epoch with us (-5)', '1586620020.00001',    '%s.%K' => '1586620020.000010' ],
     [ 'epoch to epoch with us (-6)', '1586620020.000001',   '%s.%K' => '1586620020.000001' ],
+    [ 'epoch with ns to epoch with us', '1586620020.000001234', '%s.%K' => '1586620020.000001' ],
 );
 
 plan tests => (1 + @tests);
