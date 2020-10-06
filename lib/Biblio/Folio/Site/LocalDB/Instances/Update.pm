@@ -10,6 +10,12 @@ use Time::HiRes qw(time);
 
 use constant SRS_DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%S.%JZ';
 
+# Statuses
+use constant RUNNING   => 'running';
+use constant PARTIAL   => 'partial';
+use constant COMPLETED => 'completed';
+use constant FAILED    => 'failed';
+
 sub new {
     my $cls = shift;
     my $self = bless { @_ }, $cls;
@@ -62,26 +68,25 @@ sub init {
 
 sub begin {
     my ($self, $status) = @_;
+    $status ||= RUNNING;
     my $update_id = $self->id;
     if (defined $update_id) {
         # Continue an existing update
         # $self->load;
-        $status ||= 'continuing';
         my $prev_status = $self->status;
-        if ($prev_status eq 'failed') {
+        if ($prev_status eq FAILED) {
             die "update has already failed: $update_id";
         }
-        elsif ($prev_status eq 'completed') {
+        elsif ($prev_status eq COMPLETED) {
             die "update has already been completed: $update_id";
         }
-        elsif ($prev_status ne 'partial') {
+        elsif ($prev_status ne PARTIAL) {
             die "update cannot be continued when status is $status: $update_id";
         }
     }
     else {
-        $status ||= 'starting';
         if (!defined $self->began) {
-            $self->began(sprintf('%.3f', time));
+            $self->began(time);
         }
     }
     $self->make_searcher;
@@ -199,7 +204,7 @@ sub save {
 
 sub sms {
     my $t = @_ ? shift : time;
-    $t =~ s/(?<=\.[0-9]{3})[0-9]+//;  # Strip digits after the milliseconds
+    # $t =~ s/(?<=\.[0-9]{3})[0-9]+//;  # Strip digits after the milliseconds
     return _utc_datetime($t, '%s.%J')
 }
 
@@ -294,9 +299,9 @@ sub errstr {
 
 sub end {
     my ($self, $status) = @_;
-    $self->status($status ||= 'completed');
+    $self->status($status ||= COMPLETED);
     $self->ended(sms())
-        if $status eq 'completed';
+        if $status eq COMPLETED;
     $self->save;
 }
 

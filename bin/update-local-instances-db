@@ -10,6 +10,12 @@ use Time::HiRes qw(time gettimeofday);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
+# Statuses
+use constant RUNNING   => 'running';
+use constant PARTIAL   => 'partial';
+use constant COMPLETED => 'completed';
+use constant FAILED    => 'failed';
+
 sub usage;
 sub fatal;
 sub blather;
@@ -18,6 +24,11 @@ my ($full, $comment, $after, $before);
 my ($part, $update_id) = (0, undef, 0, 0);
 my ($verbose, $dryrun, $max_update_size, $batch_size, $error_file, $tty_file);
 my ($error_fh, $tty_fh);
+my $signal;
+
+$SIG{'TERM'} = $SIG{'INT'} = $SIG{'QUIT'} = sub {
+    ($signal) = @_;
+};
 
 my %options = orient();
 
@@ -31,6 +42,8 @@ my $site = $folio->site($site_name);
 my $db = $site->local_instances_database;
 my $update = make_update(%options);
 run_update($update);
+
+fatal "received signal: $signal" if defined $signal;
 
 # --- Functions
 
@@ -51,32 +64,31 @@ sub run_update {
     $db->dbh->do('PRAGMA cache_size = -2000');
     my $count_before = $update->num_records;
     $update->begin;
-    $update->status('running');
     progress();
     my $ok;
     eval {
         $update->run;
-        $update->end('partial');
-        $ok = 1;
+        $ok = !defined $signal;
     };
     my $count_after = $update->num_records;
     my $count = $count_after - $count_before;
     if (!$ok) {
-        $update->end('failed');
+        $update->end(FAILED);
         progress();
         my $errstr = $update->errstr;
         fatal "update failed: $errstr";
     }
     elsif ($count >= $max_update_size) {
-        $update->status('chaining');
-        blather "\n";
+        # $update->status('chaining');
+        $update->status(PARTIAL);
         progress();
+        blather "\n";
+        $update->save;
         # undef $db;
         exec_next_part();
     }
     else {
-        $update->status('completed');
-        $update->save;
+        $update->end(COMPLETED);
         progress();
         blather "\n", "Update complete\n";
     }
@@ -132,7 +144,13 @@ sub count {
 sub exec_next_part {
     my @cmd = ($0, next_options(), $site_name);
     # unshift @cmd, $^X, '-d' if keys %DB::;
-    exec @cmd;
+    # Last check for a signal
+    if (defined $signal) {
+        $update->end(FAILED);
+    }
+    else {
+        exec @cmd;
+    }
 }
 
 sub max_last_modified {

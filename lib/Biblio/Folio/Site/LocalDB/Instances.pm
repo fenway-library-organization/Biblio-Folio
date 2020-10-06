@@ -9,6 +9,16 @@ use Biblio::Folio::Site::LocalDB::Instances::Update;
 use Biblio::Folio::Util qw(_utc_datetime);
 use Biblio::Folio::Site::MARC;
 
+# Update types
+use constant FULL        => 'full';
+use constant INCREMENTAL => 'incremental';
+
+# Update statuses
+use constant RUNNING   => 'running';
+use constant PARTIAL   => 'partial';
+use constant COMPLETED => 'completed';
+use constant FAILED    => 'failed';
+
 sub create {
     my $self = shift;
     if (@_ % 2) {
@@ -76,7 +86,7 @@ CREATE TABLE updates (
     ,
     CONSTRAINT CHECK    (ended >= began),
     CONSTRAINT CHECK    (type IN ('full', 'incremental', 'one-time')),
-    CONSTRAINT CHECK    (status IN ('starting', 'running', 'partial', 'ok', 'failed'))
+    CONSTRAINT CHECK    (status IN ('starting', 'running', 'partial', 'completed', 'failed'))
     */
 );
 /* Indexes on instances */
@@ -108,11 +118,11 @@ sub max_after {
     my $sth = $self->sth(q{
         SELECT  max(after)
         FROM    updates
-        WHERE   type IN ('full', 'incremental')
+        WHERE   type IN (?, ?)
         AND     after IS NOT NULL
-        AND     status IN ('running', 'ok')
+        AND     status IN (?, ?)
     });
-    $sth->execute;
+    $sth->execute(FULL, INCREMENTAL, RUNNING, COMPLETED);
     my ($max) = $sth->fetchrow_array;
     $sth->finish;
     return $max || 0;
@@ -147,11 +157,11 @@ sub current_update_id {
     my $sth = $self->sth(q{
         SELECT  id
         FROM    updates
-        WHERE   type IN ('full', 'incremental')
-        AND     status IN ('starting', 'running', 'continuing', 'finishing', 'partial')
+        WHERE   type IN (?, ?)
+        AND     status IN (?, ?)
         ORDER   BY began DESC
     });
-    $sth->execute;
+    $sth->execute(FULL, INCREMENTAL, RUNNING, PARTIAL);
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
     return $last || 0;
@@ -162,11 +172,11 @@ sub last_sync {
     my $sth = $self->sth(q{
         SELECT  id
         FROM    updates
-        WHERE   type = IN ('full', 'incremental')
-        AND     status = 'completed'
+        WHERE   type = IN (?, ?)
+        AND     status = ?
         ORDER   BY began DESC
     });
-    $sth->execute;
+    $sth->execute(FULL, INCREMENTAL, COMPLETED);
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
     return $self->update($last) if defined $last;
@@ -245,7 +255,7 @@ sub update_fameflower {
         $record_this_update = 0;
     }
     else {
-        $type = 'incremental';
+        $type = INCREMENTAL;
         my $last = $self->last_sync;
         if ($last) {
             $query = sprintf 'state==ACTUAL and metadata.updatedDate > "%s"', _utc_datetime($last);
@@ -355,7 +365,7 @@ sub update_fameflower {
             UPDATE  updates
             SET     ended = ?, status = ?, num_records = ?
             WHERE   id = ?
-        })->execute($ended, 'ok', $n, $update_id);
+        })->execute($ended, COMPLETED, $n, $update_id);
         $dbh->commit;
     }
 }
@@ -363,8 +373,8 @@ sub update_fameflower {
 sub clean {
     my ($self, %arg) = @_;
     my ($age, $limit) = @arg{qw(age limit)};
-    my $sql = "DELETE FROM updates WHERE num_records = 0 AND status = 'ok'";
-    my @params;
+    my $sql = "DELETE FROM updates WHERE num_records = 0 AND status = ?";
+    my @params = (COMPLETED);
     if (defined $age) {
         $sql .= " AND ended <= ?";
         push @params, time - $age;

@@ -35,7 +35,10 @@ use constant DELETED_INSTANCES => 'deleted instances';
 use constant INSTANCES => 'instances';
 use constant HOLDINGS  => 'holdings';
 use constant ITEMS     => 'items';
-use constant FINISHED  => 'finished';
+
+# Statuses (also treated as phases)
+use constant RUNNING   => 'running';
+use constant COMPLETED => 'completed';
 use constant CANCELLED => 'cancelled';
 use constant FAILED    => 'failed';
 
@@ -331,7 +334,7 @@ sub old_export_full {
 }
 
 sub export_deletes {
-    # my $last_export = last_export(DELETES);
+    # my $last_export_began = last_export_began(DELETES);
     my $need_instance = _identify_deleted_holdings_records('Identify deleted holdings');
     my $isearcher = $site->searcher('instance')
         ->by('set' => [keys %$need_instance])
@@ -343,27 +346,27 @@ sub export_deletes {
 }
 
 sub export_incremental {
-    my $last_export = last_export();
-    blather "Incremental export: changes since $last_export";
+    my $last_export_began = last_export_began();
+    blather "Incremental export: changes since $last_export_began\n";
 ### if ($use_ldp) {
 ###     my $ldp = ldp();
 ###     my $sql = ldp_incremental_sql();
-###     my $sth = $ldp->query($sql, $ldp->timestamp($last_export));
+###     my $sth = $ldp->query($sql, $ldp->timestamp($last_export_began));
 ###     run(INCREMENTAL, sub {
 ###         _export_from_ldp_using_executed_sth(INSTANCES, $sth);
 ###     });
 ### }
 ### elsif ($use_lidb) {
     # Prepare for deletes
-    # my $last_deletes = last_export(DELETES);
+    # my $last_deletes = last_export_began(DELETES);
     # my $ldp = ldp();
     # my $isth = $ldp->query(ldp_deleted_instances_sql());         # XXX Don't include unless necessary: , $ldp->timestamp($last_deletes));
-    my $need_instance = _identify_deleted_holdings_records('Identify deleted holdings', $last_export);
+    my $need_instance = _identify_deleted_holdings_records('Identify deleted holdings', $last_export_began);
     my $dhisearcher = $site->searcher('instance')
         ->by('set' => [keys %$need_instance])
         ->limit($small_batch_size);
     # Prepare for additions and updates
-    my $utc_last_export = _utc_datetime($last_export);
+    my $utc_last_export = _utc_datetime($last_export_began);
     my $cql = "metadata.updatedDate > $utc_last_export";
     my $isearcher = $site->searcher('instance')->query($cql)->limit($large_batch_size);
     my $hsearcher = $site->searcher('holdings_record')->query($cql)->limit($small_batch_size);
@@ -379,7 +382,7 @@ sub export_incremental {
 ### else {
 ###     die "not implemented";
 ###     #my $harvester = $site->harvester('instances_with_holdings');
-###     #$harvester->harvest('since' => $last_export);
+###     #$harvester->harvest('since' => $last_export_began);
 ### }
 }
 
@@ -411,23 +414,28 @@ sub log_beginning {
     my ($began, $mode, $comment) = @_;
     $exports_db = exports_db();
     my $sth = $exports_db->sth(q{
-        INSERT  INTO bib_exports
-                (type, began, status, comment, num_records)
-        VALUES  (?, ?, 'running', ?, 0);
+        INSERT  INTO exports
+                (mode, began, status, comment, num_records)
+        VALUES  (?, ?, ?, ?, 0);
     });
-    $sth->execute($mode, $began, $comment);
+    my $dbh = $exports_db->dbh;
+    $dbh->begin_work;
+    $sth->execute($mode, $began, RUNNING, $comment);
+    my $export_id = $dbh->sqlite_last_insert_rowid;
+    $dbh->commit;
+    return $export_id;
 }
 
 sub log_result {
-    my ($began, $mode, $comment, $status, $ended, $num_records) = @_;
+    my ($export_id, $began, $mode, $comment, $status, $ended, $num_records) = @_;
     my $sth = $exports_db->sth(q{
-        UPDATE  bib_exports
+        UPDATE  exports
         SET     status = ?,
                 ended = ?,
                 num_records = ?
-        WHERE   began = ?
+        WHERE   id = ?
     });
-    $sth->execute($status, $ended, $num_records, $began);
+    $sth->execute($status, $ended, $num_records, $export_id);
 }
 
 sub run {
@@ -435,13 +443,12 @@ sub run {
     $mode = TEST if $test;
     my $exports_db;
     my $began = $t0;
-    log_beginning($began, $mode, $comment)
-        if !$dryrun;
+    my $export_id = $dryrun ? 0 : log_beginning($began, $mode, $comment);
     my $status;
     $DB::single = 1;  # Breakpoint if running in debugger
     eval {
         $sub->();
-        $status = FINISHED;
+        $status = COMPLETED;
     };
     my $err;
     if (!defined $status) {
@@ -458,7 +465,7 @@ sub run {
     my $num_records = $counter{'instance'} - $counter{'nonmarc'};
     #my $num_batches = --$counter{'batch'};
     $DB::single = 1;  # Breakpoint if running in debugger
-    log_result($began, $mode, $comment, $status, $ended, $num_records)
+    log_result($export_id, $began, $mode, $comment, $status, $ended, $num_records)
         if !$dryrun;
     show_progress($status, 'Totals');
     if (defined $err) {
@@ -514,7 +521,7 @@ sub _export_from_ldp_using_executed_sth {
 
 sub _export_deleted_instances {
     my ($phase, $msg) = @_;
-    my $isth = ldp()->query(ldp_deleted_instances_sql());  # XXX Don't include unless necessary: , $ldp->timestamp($last_export));
+    my $isth = ldp()->query(ldp_deleted_instances_sql());  # XXX Don't include unless necessary: , $ldp->timestamp($last_export_began));
     my $batch = batch();
     show_progress($phase, $msg);
     while (!$cancelled) {
@@ -537,10 +544,10 @@ sub _export_deleted_instances {
 }
 
 sub _identify_deleted_holdings_records {
-    my ($msg, $last_export) = @_;
+    my ($msg, $last_export_began) = @_;
     my $batch = batch();
     show_progress(DELETED_HOLDINGS, $msg);
-    my $sth = ldp()->query(ldp_deleted_holdings_records_sql(), ldp()->timestamp($last_export));
+    my $sth = ldp()->query(ldp_deleted_holdings_records_sql(), ldp()->timestamp($last_export_began));
     my %need_instance;
     my @hids;
     while (!$cancelled) {
@@ -777,7 +784,7 @@ sub show_progress {
     my ($phase, $msg) = @_;
     $phase ||= $prev_phase;
     $cur_phase = $phase;
-    my $ending = ($phase eq FINISHED || $phase eq CANCELLED || $phase eq FAILED);
+    my $ending = ($phase eq COMPLETED || $phase eq CANCELLED || $phase eq FAILED);
     my $seen = $counter{'seen'};
     if ($phase ne $prev_phase || $ending || $seen % 100 == 0) {
         # $b-- if !$ending && $b;  # We're still in the middle of the batch
@@ -1016,18 +1023,18 @@ sub report_error {
     }
 }
 
-sub last_export {
+sub last_export_began {
     my @modes = @_;
     @modes = (FULL, INCREMENTAL) if !@modes;
     my $placeholders = join(', ', map { '?' } @modes);
     my $sql = qq{
         SELECT  max(began)
-        FROM    bib_exports
-        WHERE   status = 'finished'
-        AND     type IN ($placeholders)
+        FROM    exports
+        WHERE   status = ?
+        AND     mode IN ($placeholders)
     };
     my $sth = exports_db()->sth($sql);
-    $sth->execute(@modes);
+    $sth->execute(COMPLETED, @modes);
     my ($began) = $sth->fetchrow_array;
     return $began || 0;
 }
@@ -1122,7 +1129,7 @@ sub usage {
     print STDERR "$prog: @_\n" if @_;
     print STDERR <<"EOS";
 usage: $prog [OPTION...] [SITE...]
-export type (default is an incremental export):
+export mode (default is an incremental export):
   -f              perform a full export
   -q QUERY        export by query (single site only)
   -i FILE         export by file of instance IDs (single site only)
