@@ -14,3 +14,5 @@
 /perl5db.pl
 /private
 /util
+.*.swp
+.*.swo

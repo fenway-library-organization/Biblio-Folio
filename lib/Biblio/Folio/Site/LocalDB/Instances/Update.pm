@@ -6,8 +6,9 @@ use warnings;
 use Biblio::Folio::Util qw(_utc_datetime);
 use Biblio::Folio::Site::LocalDB::Instances::Constants qw(:status);
 use Biblio::Folio::Site::MARC;
+use Time::HiRes qw(time);
 
-use constant SRS_DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%SZ';
+use constant SRS_DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%S.%JZ';
 
 sub new {
     my $cls = shift;
@@ -18,8 +19,10 @@ sub new {
 
 sub db { @_ > 1 ? $_[0]{'db'} = $_[1] : $_[0]{'db'} }
 sub dry_run { @_ > 1 ? $_[0]{'dry_run'} = $_[1] : $_[0]{'dry_run'} }
+sub batch_size { @_ > 1 ? $_[0]{'batch_size'} = $_[1] : $_[0]{'batch_size'} }
 sub max_update_size { @_ > 1 ? $_[0]{'max_update_size'} = $_[1] : $_[0]{'max_update_size'} }
 sub searcher { @_ > 1 ? $_[0]{'searcher'} = $_[1] : $_[0]{'searcher'} }
+sub offset { @_ > 1 ? $_[0]{'offset'} = $_[1] : $_[0]{'offset'} }
 
 sub id { @_ > 1 ? $_[0]{'id'} = $_[1] : $_[0]{'id'} }
 sub began { @_ > 1 ? $_[0]{'began'} = $_[1] : $_[0]{'began'} }
@@ -31,6 +34,7 @@ sub query { @_ > 1 ? $_[0]{'query'} = $_[1] : $_[0]{'query'} }
 sub after { @_ > 1 ? $_[0]{'after'} = $_[1] : $_[0]{'after'} }
 sub before { @_ > 1 ? $_[0]{'before'} = $_[1] : $_[0]{'before'} }
 sub num_records { @_ > 1 ? $_[0]{'num_records'} = $_[1] : $_[0]{'num_records'} }
+sub num_errors { @_ > 1 ? $_[0]{'num_errors'} = $_[1] : $_[0]{'num_errors'} }
 sub max_last_modified { @_ > 1 ? $_[0]{'max_last_modified'} = $_[1] : $_[0]{'max_last_modified'} }
 
 sub DESTROY { }
@@ -47,33 +51,12 @@ sub init {
             if defined $update_id;
         $db->create;
     }
-    my ($type, $query, $after, $before, $comment) = @$self{qw(type query after before comment)};
-    my $offset = $self->{'offset'} || 0;
-    my $batch_size = $self->{'batch_size'} ||= 1_000;
+    elsif (defined $update_id) {
+        $self->load;
+    }
+    $self->{'batch_size'} ||= 1_000;
     $self->{'max_update_size'} ||= 10_000;
-    my @errors;
-    $self->{'errors'} = \@errors;
-    my $dbh = $db->dbh;
-    my $searcher = $self->{'searcher'}
-        ||= $site->searcher('source_record')->uri('/source-storage/source-records');
-    $searcher->offset($offset)->limit($batch_size);
-    if (defined $before) {
-        $type ||= 'one-time';
-        $searcher->param('updatedBefore' => _utc_datetime($before, SRS_DATETIME_FORMAT));
-    }
-    if (defined $after) {
-        $type ||= 'sync' if !defined $before;
-        $searcher->param('updatedAfter' => _utc_datetime($after, SRS_DATETIME_FORMAT));
-    }
-    else {
-        $type ||= 'sync';
-        my $last = $self->last_sync;
-        if ($last) {
-            $last--;  # Inclusive to exclusive bound
-            $searcher->param('updatedAfter' => _utc_datetime($last, SRS_DATETIME_FORMAT));
-        }
-    }
-    $self->{'dry_run'} //= 0 if $type eq 'sync' || defined $comment;
+    $self->{'errors'} ||= [];
     return $self;
 }
 
@@ -82,21 +65,7 @@ sub begin {
     my $update_id = $self->id;
     if (defined $update_id) {
         # Continue an existing update
-        my $db = $self->db;
-        my $dbh = $db->dbh;
-        my $sth = $db->sth(q{
-            SELECT  *
-            FROM    updates
-            WHERE   id = ?
-        });
-        $sth->execute($update_id);
-        my $update = $sth->fetchrow_hashref;
-        $sth->finish;
-        die "no such update: $update_id" if !$update;
-        %$self = (
-            %$self,
-            %$update,
-        );
+        # $self->load;
         $status ||= 'continuing';
         my $prev_status = $self->status;
         if ($prev_status eq 'failed') {
@@ -110,10 +79,66 @@ sub begin {
         }
     }
     else {
-        $status ||= 'continuing';
+        $status ||= 'starting';
+        if (!defined $self->began) {
+            $self->began(sprintf('%.3f', time));
+        }
     }
+    $self->make_searcher;
     $self->status($status);
     $self->save;
+}
+
+sub make_searcher {
+    my ($self) = @_;
+    return if defined $self->searcher;
+    my $site = $self->db->site;
+    my $offset = $self->offset || $self->num_records;
+    my $batch_size = $self->batch_size;
+    my ($after, $before, $max_last_modified) = ($self->after, $self->before, $self->max_last_modified);
+    if (defined $max_last_modified) {
+        $after = $max_last_modified;  # XXX +/- 0.001 ???
+        $offset = 0;
+    }
+    elsif (!defined $before && !defined $after) {
+        my $last = $self->db->last_sync;
+        if ($last) {
+            $after = $last->max_last_modified;  # XXX +/- 0.001 ???
+            $offset = 0;
+        }
+    }
+    my $searcher = $site->searcher('source_record')->uri('/source-storage/source-records');
+    $searcher->param('orderBy' => 'updatedDate,ASC')->offset($offset)->limit($batch_size);
+    if (defined $before) {
+        $searcher->param('updatedBefore' => _utc_datetime($before, SRS_DATETIME_FORMAT));
+    }
+    if (defined $after) {
+        $searcher->param('updatedAfter' => _utc_datetime($after, SRS_DATETIME_FORMAT));
+    }
+    else {
+        # Full
+    }
+    return $self->searcher($searcher);
+}
+
+sub load {
+    my ($self) = @_;
+    my $db = $self->db;
+    my $dbh = $db->dbh;
+    my $sth = $db->sth(q{
+        SELECT  *
+        FROM    updates
+        WHERE   id = ?
+    });
+    $sth->execute($self->id);
+    my $row = $sth->fetchrow_hashref;
+    $sth->finish;
+    die "no such update: $self->id" if !$row;
+    %$self = (
+        %$self,
+        %$row,
+    );
+    return $self;
 }
 
 sub save {
@@ -127,21 +152,21 @@ sub save {
     my $sth;
     my @params = (@$self{@columns});
     if (defined $update_id) {
-        my $old_sql = q{
-            UPDATE  updates
-            SET     began = ?,
-                    ended = ?,
-                    type = ?,
-                    status = ?,
-                    comment = ?,
-                    query = ?,
-                    after = ?,
-                    before = ?,
-                    num_records = ?,
-                    num_errors = ?,
-                    max_last_modified = ?
-            WHERE   id = ?
-        };
+###     my $old_sql = q{
+###         UPDATE  updates
+###         SET     began = ?,
+###                 ended = ?,
+###                 type = ?,
+###                 status = ?,
+###                 comment = ?,
+###                 query = ?,
+###                 after = ?,
+###                 before = ?,
+###                 num_records = ?,
+###                 num_errors = ?,
+###                 max_last_modified = ?
+###         WHERE   id = ?
+###     };
         my $joiner = q{,
                     };
         my $sql = sprintf q{
@@ -153,11 +178,11 @@ sub save {
         push @params, $update_id;
     }
     else {
-        my $old_sql = q{
-            INSERT  INTO updates
-                    (began, ended, type, status, comment, query, after, before, num_records, num_errors, max_last_modified)
-            VALUES  (?,     ?,     ?,    ?,      ?,       ?,     ?,     ?,      ?,           ?,          ?                )
-        };
+###     my $old_sql = q{
+###         INSERT  INTO updates
+###                 (began, ended, type, status, comment, query, after, before, num_records, num_errors, max_last_modified)
+###         VALUES  (?,     ?,     ?,    ?,      ?,       ?,     ?,     ?,      ?,           ?,          ?                )
+###     };
         my $sql = sprintf q{
             INSERT  INTO updates
                     (%s)
@@ -172,6 +197,12 @@ sub save {
     return $self;
 }
 
+sub sms {
+    my $t = @_ ? shift : time;
+    $t =~ s/(?<=\.[0-9]{3})[0-9]+//;  # Strip digits after the milliseconds
+    return _utc_datetime($t, '%s.%J')
+}
+
 sub run {
     my ($self) = @_;
     my $update_id = $self->id;
@@ -181,13 +212,16 @@ sub run {
     my $progress = $self->{'progress'} || sub {};
     my $error = $self->{'error'} || $progress;
     my $sth_ins;
-    my $n = $self->num_records;
     my @errors;
     my $batch_size = $self->{'batch_size'};
-    my $remainder = $self->{'max_update_size'} ||= 10_000;
-    while ($remainder > 0) {
-        while (my @source_records = $searcher->next) {
+    my $max_last_modified = $self->max_last_modified || sms(0);
+    my $n = $self->num_records;
+    my $maxn = $n + $self->max_update_size;
+    BATCH:
+    while ($n < $maxn) {
+        if (my @source_records = $searcher->next) {
             $dbh->begin_work;
+            RECORD:
             foreach my $source_record (@source_records) {
                 $n++;
                 my ($source, $source_type, $err, $instance_hrid);
@@ -224,12 +258,13 @@ sub run {
                 }
                 if (defined $err) {
                     push @errors, $err;
-                    $self->num_records($n);
+                    $self->num_errors($self->num_errors + 1);
                     $error->($n, \@errors);
-                    next;
+                    next RECORD;
                 }
                 if (defined $source) {
-                    my $last_modified = _utc_datetime($source_record->{'metadata'}{'updatedDate'}, '%s.%J');
+                    my $last_modified = sms($source_record->{'metadata'}{'updatedDate'});
+                    $max_last_modified = $last_modified if $last_modified > $max_last_modified;
                     my $deleted = $source_record->{'deleted'} ? 1 : 0;
                     my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
                     $sth_ins ||= $db->sth(q{
@@ -239,18 +274,18 @@ sub run {
                     $sth_ins->execute($instance_id, $instance_hrid, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
                 }
             }
-            $dbh->commit;
+            $self->max_last_modified($max_last_modified) if $max_last_modified;  # 0.000 is false
             $self->num_records($n);
-            $self->save;
             $progress->($n, \@errors);
+            $dbh->commit;
+            $self->save;
         }
-        $remainder -= $n;
+        else {
+            # Premature end of data
+            last BATCH;
+        }
     }
-    continue {
-        $self->offset($self->offset + $batch_size);
-    }
-    $self->num_records($n);
-    $self->save;
+    1;
 }
 
 sub errstr {
@@ -260,7 +295,7 @@ sub errstr {
 sub end {
     my ($self, $status) = @_;
     $self->status($status ||= 'completed');
-    $self->ended(_utc_datetime(time, '%s.%J'))
+    $self->ended(sms())
         if $status eq 'completed';
     $self->save;
 }

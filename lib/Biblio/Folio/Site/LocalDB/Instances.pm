@@ -37,11 +37,11 @@ sub create {
 CREATE TABLE instances (
     id                  VARCHAR UNIQUE PRIMARY KEY,
     hrid                VARCHAR UNIQUE NOT NULL,
-    source_type         VARCHAR NULL,
-    source              VARCHAR NULL,
-    last_modified       INTEGER NOT NULL,
-    suppressed          INTEGER,
-    deleted             INTEGER,
+    source_type         VARCHAR     NULL,
+    source              VARCHAR     NULL,
+    last_modified       REAL    NOT NULL,
+    suppressed          INTEGER NOT NULL DEFAULT 0,
+    deleted             INTEGER NOT NULL DEFAULT 0,
     update_id           INTEGER,
     /*
     CONSTRAINT CHECK    (suppressed IN (0, 1)),
@@ -52,6 +52,7 @@ CREATE TABLE instances (
 CREATE TABLE holdings (
     instance_id         VARCHAR NOT NULL,
     holdings_record_id  VARCHAR NOT NULL,
+    suppressed          INTEGER DEFAULT 0,
     deleted             INTEGER DEFAULT 0,
     /*
     CONSTRAINT CHECK    (deleted IN (0, 1)),
@@ -60,20 +61,21 @@ CREATE TABLE holdings (
 );
 CREATE TABLE updates (
     id                  INTEGER PRIMARY KEY,
-    began               INTEGER NOT NULL,
-    ended               INTEGER NULL,
-    type                VARCHAR NOT NULL DEFAULT 'sync',
-    status              VARCHAR NOT NULL DEFAULT 'running',
-    comment             VARCHAR,
-    query               VARCHAR NULL,
-    after               INTEGER NULL,
-    before              INTEGER NULL,
-    max_last_modified   INTEGER NULL
+    type                VARCHAR NOT NULL DEFAULT 'incremental',
+    status              VARCHAR NOT NULL DEFAULT 'starting',
+    query               VARCHAR     NULL,
+    comment             VARCHAR     NULL,
+    began               REAL    NOT NULL,
+    ended               REAL        NULL,
+    after               REAL        NULL,
+    before              REAL        NULL,
+    max_last_modified   REAL        NULL,
     num_records         INTEGER NOT NULL DEFAULT 0,
+    num_errors          INTEGER NOT NULL DEFAULT 0
     /*
     ,
     CONSTRAINT CHECK    (ended >= began),
-    CONSTRAINT CHECK    (type IN ('full', 'sync', 'one-time')),
+    CONSTRAINT CHECK    (type IN ('full', 'incremental', 'one-time')),
     CONSTRAINT CHECK    (status IN ('starting', 'running', 'partial', 'ok', 'failed'))
     */
 );
@@ -84,13 +86,15 @@ CREATE INDEX instances_source_type_index       ON instances (source_type);
 CREATE INDEX instances_last_modified_index     ON instances (last_modified);
 CREATE INDEX instances_suppressed_index        ON instances (suppressed);
 CREATE INDEX instances_deleted_index           ON instances (deleted);
+CREATE INDEX instances_update_id_index         ON instances (update_id);
 /* Indexes on instance holdings */
 CREATE INDEX holdings_instance_id_index        ON holdings (instance_id);
 CREATE INDEX holdings_holdings_record_id_index ON holdings (holdings_record_id);
 /* Indexes on updates */
-CREATE INDEX updates_began_index               ON updates (began);
 CREATE INDEX updates_type_index                ON updates (type);
 CREATE INDEX updates_status_index              ON updates (status);
+CREATE INDEX updates_began_index               ON updates (began);
+CREATE INDEX updates_max_last_modified_index   ON updates (max_last_modified);
 EOS
     }
     $dbh->begin_work;
@@ -104,7 +108,7 @@ sub max_after {
     my $sth = $self->sth(q{
         SELECT  max(after)
         FROM    updates
-        WHERE   type = 'sync'
+        WHERE   type IN ('full', 'incremental')
         AND     after IS NOT NULL
         AND     status IN ('running', 'ok')
     });
@@ -114,13 +118,25 @@ sub max_after {
     return $max || 0;
 }
 
-sub last_modified {
-    my ($self) = @_;
-    my $sth = $self->sth(q{
-        SELECT  max(last_modified)
-        FROM    instances
-    });
-    $sth->execute;
+sub max_last_modified {
+    my ($self, $update_id) = @_;
+    my ($sql, @params);
+    if (defined $update_id) {
+        $sql = q{
+            SELECT  max_last_modified
+            FROM    updates
+            WHERE   id = ?
+        };
+        @params = ($update_id);
+    }
+    else {
+        $sql = q{
+            SELECT  max(last_modified)
+            FROM    instances
+        };
+    }
+    my $sth = $self->sth($sql);
+    $sth->execute(@params);
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
     return $last || 0;
@@ -131,8 +147,8 @@ sub current_update_id {
     my $sth = $self->sth(q{
         SELECT  id
         FROM    updates
-        WHERE   type = 'sync'
-        AND     status = 'running'
+        WHERE   type IN ('full', 'incremental')
+        AND     status IN ('starting', 'running', 'continuing', 'finishing', 'partial')
         ORDER   BY began DESC
     });
     $sth->execute;
@@ -146,28 +162,15 @@ sub last_sync {
     my $sth = $self->sth(q{
         SELECT  id
         FROM    updates
-        WHERE   type = 'sync'
-        AND     status = 'ok'
+        WHERE   type = IN ('full', 'incremental')
+        AND     status = 'completed'
         ORDER   BY began DESC
     });
     $sth->execute;
     my ($last) = $sth->fetchrow_array;
     $sth->finish;
-    return $last || 0;
+    return $self->update($last) if defined $last;
 }
-
-### sub last_update {
-###     my ($self) = @_;
-###     my $sth = $self->sth(q{
-###         SELECT  max(began)
-###         FROM    updates
-###         WHERE   type = 'update'
-###         AND     status = 'ok'});
-###     $sth->execute;
-###     my ($last) = $sth->fetchrow_array;
-###     $sth->finish;
-###     return $last || 0;
-### }
 
 sub fetch {
     my ($self, $instance_id) = @_;
@@ -242,7 +245,7 @@ sub update_fameflower {
         $record_this_update = 0;
     }
     else {
-        $type = 'sync';
+        $type = 'incremental';
         my $last = $self->last_sync;
         if ($last) {
             $query = sprintf 'state==ACTUAL and metadata.updatedDate > "%s"', _utc_datetime($last);

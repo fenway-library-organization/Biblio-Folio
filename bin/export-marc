@@ -434,7 +434,7 @@ sub run {
     my ($mode, $sub) = @_;
     $mode = TEST if $test;
     my $exports_db;
-    my $began = int($t0);
+    my $began = $t0;
     log_beginning($began, $mode, $comment)
         if !$dryrun;
     my $status;
@@ -454,7 +454,7 @@ sub run {
             $failed = 1;
         }
     }
-    my $ended = int(time);
+    my $ended = time;
     my $num_records = $counter{'instance'} - $counter{'nonmarc'};
     #my $num_batches = --$counter{'batch'};
     $DB::single = 1;  # Breakpoint if running in debugger
@@ -781,7 +781,7 @@ sub show_progress {
     my $seen = $counter{'seen'};
     if ($phase ne $prev_phase || $ending || $seen % 100 == 0) {
         # $b-- if !$ending && $b;  # We're still in the middle of the batch
-        my $tdiff = int(time - $tstart);
+        my $tdiff = time - $tstart;
         my $dur = sec2dur($tdiff);
         my $rate = $tdiff ? $counter{'instance'} / $tdiff : 0;
         if ($phase ne $prev_phase) {

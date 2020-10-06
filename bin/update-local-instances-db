@@ -1,0 +1,278 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use lib '/usr/local/folio/lib';
+
+use Biblio::Folio;
+use Time::HiRes qw(time gettimeofday);
+use Getopt::Long
+    qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
+
+sub usage;
+sub fatal;
+sub blather;
+
+my ($full, $comment, $after, $before);
+my ($part, $update_id) = (0, undef, 0, 0);
+my ($verbose, $dryrun, $max_update_size, $batch_size, $error_file, $tty_file);
+my ($error_fh, $tty_fh);
+
+my %options = orient();
+
+usage if @ARGV != 1;
+(my $site_name = shift) =~ s/^[@]//;
+
+my $root = '/usr/local/folio';
+my $folio = Biblio::Folio->new('root' => $root);
+my $site = $folio->site($site_name);
+
+my $db = $site->local_instances_database;
+my $update = make_update(%options);
+run_update($update);
+
+# --- Functions
+
+sub make_update {
+    my %arg = @_;
+    if (!$after) {
+        if ($full) {
+            $arg{'after'} = sms(0);
+        }
+        else {
+            $arg{'after'} = $db->max_last_modified($arg{'id'});
+        }
+    }
+    return $db->update(%arg);
+}
+
+sub run_update {
+    $db->dbh->do('PRAGMA cache_size = -2000');
+    my $count_before = $update->num_records;
+    $update->begin;
+    $update->status('running');
+    progress();
+    my $ok;
+    eval {
+        $update->run;
+        $update->end('partial');
+        $ok = 1;
+    };
+    my $count_after = $update->num_records;
+    my $count = $count_after - $count_before;
+    if (!$ok) {
+        $update->end('failed');
+        progress();
+        my $errstr = $update->errstr;
+        fatal "update failed: $errstr";
+    }
+    elsif ($count >= $max_update_size) {
+        $update->status('chaining');
+        blather "\n";
+        progress();
+        # undef $db;
+        exec_next_part();
+    }
+    else {
+        $update->status('completed');
+        $update->save;
+        progress();
+        blather "\n", "Update complete\n";
+    }
+}
+
+sub sms {
+    my ($sec, $isec, $msec);
+    if (@_) {
+        $sec = shift;
+        $isec = int($sec);
+        $msec = @_ ? shift : int(($sec - $isec) * 1_000);
+    }
+    else {
+        my $usec;
+        ($isec, $usec) = gettimeofday;
+        $msec = int($usec / 1_000);
+    }
+    return sprintf('%d.%03d', $isec, $msec);
+}
+
+sub progress {
+    my (undef, $errors) = @_;  # First param (#records) is ignored
+    $errors ||= [];
+    my $e = @$errors;
+    if ($e) {
+        if (defined $error_file) {
+            # Drain errors
+            if (!defined $error_fh) {
+                open $error_fh, '>>', $error_file or fatal "open $error_file for appending: $!";
+            }
+            print $error_fh $_, "\n" for @$errors;
+        }
+        @$errors = ();
+    }
+    my $n = $update->num_records;
+    $e = $update->num_errors;
+    my $tty_fh = tty();
+    return if !$tty_fh;
+    my $td = time - $update->began;
+    my $min = int($td / 60);
+    my $sec = $td % 60;
+    my $rate = $td ? $n / $td : 0;
+    printf $tty_fh "\rstatus: %-9s | part: %-3s | records: %-8s | errors: %-8s | %02d:%02d elapsed | %.1f records/sec",
+        $update->status, $part, $n, $e, $min, $sec, $rate;
+}
+
+sub count {
+    my ($n, $sg, $pl) = @_;
+    $pl = $sg . 's' if !defined $pl;
+    return $pl if $n != 1;
+}
+
+sub exec_next_part {
+    my @cmd = ($0, next_options(), $site_name);
+    # unshift @cmd, $^X, '-d' if keys %DB::;
+    exec @cmd;
+}
+
+sub max_last_modified {
+    my $sth = $db->sth(q{
+        SELECT  max(last_modified)
+        FROM    instances
+    });
+    $sth->execute;
+    my ($mlm) = $sth->fetchrow_array;
+    return sms($mlm || 0);
+}
+
+sub new_update_args {
+    my $now = sms(time);
+    my $type = $full ? 'full' : 'incremental';
+    my %arg = (
+        'type' => $type,
+        'status' => 'starting',
+        # Set on first part, retrieved for subsequent parts
+        'comment' => $comment,
+        'began' => $now,
+        'after' => $after,  # Will be changed if incremental
+        'before' => $now,
+        # Not stored in new instance
+        #   update_id
+        # Not stored in instance
+        #   part
+        # Variable from part to part
+        'offset' => 0,
+        'num_records' => 0,
+        'num_errors' => 0,
+        # Repeated on every run
+        'batch_size' => $batch_size,
+        'max_update_size' => $max_update_size,
+        # Not stored in instance
+        #   verbose
+        'dry_run' => $dryrun,
+        'error_file' => $error_file,
+        'tty_file' => $tty_file,
+        # Not stored
+        'progress' => \&progress,
+    );
+}
+
+sub existing_update_args {
+    my ($update_id) = @_;
+    my $now = sms(time);
+    return (
+        'id' => $update_id,
+        'batch_size' => $batch_size,
+        'max_update_size' => $max_update_size,
+        'before' => $now,
+    );
+}
+
+sub options {
+    ($max_update_size, $batch_size) = (25_000, 1000);
+    return (
+        # First run only
+        'f|full'              => \$full,
+        'm|comment=s'         => \$comment,
+        'A|after=s'           => \$after,
+        'B|before=s'          => \$before,
+        # Subsequent runs
+        'u|update-id=i'       => \$update_id,
+        'p|part=i'            => \$part,
+        # Every run
+        's|batch-size=i'      => \$batch_size,
+        'S|max-update-size=s' => \$max_update_size,
+        'v|verbose'           => \$verbose,
+        'n|dry-run'           => \$dryrun,
+        'e|error-file=s'      => \$error_file,
+        't|tty=s'             => \$tty_file,
+    );
+}
+
+sub next_options {
+    return (
+        # Subsequent runs
+        '-u' => $update->id,
+        '-p' => $part + 1,
+        # Every run
+        '-s' => $batch_size,
+        '-S' => $max_update_size,
+        $verbose ? ('-v') : (),
+        $dryrun  ? ('-n') : (),
+        defined $error_file ? ('-e' => $error_file) : (),
+        defined $tty_file   ? ('-t' => $tty_file)   : (),
+    );
+}
+
+sub orient {
+    GetOptions(options()) or usage;
+    if ($part == 0) {
+        blather "Populating local instances DB\n";
+        $part++;
+        return new_update_args();
+    }
+    else {
+        return existing_update_args($update_id);
+    }
+}
+
+sub tty {
+    if (defined $tty_fh) {
+        return $tty_fh;
+    }
+    elsif (defined $tty_file) {
+        open $tty_fh, '+<', $tty_file
+            or fatal "open $tty_file for reading and writing: $!";
+    }
+    elsif (-t \*STDERR) {
+        $tty_fh = \*STDERR;
+    }
+    else {
+        open $tty_fh, '+<', '/dev/null'
+            or fatal "open /dev/null for reading and writing: $!";
+    }
+    return $tty_fh;
+}
+
+sub usage {
+    exit 1;
+}
+
+sub fatal {
+    exit 2;
+}
+
+sub blather {
+    print { tty() } @_;
+}
+
+__END__
+use Biblio::Folio::Util qw(_utc_datetime);
+use constant DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%SZ';
+    sub {
+        $after = _utc_datetime($_[1], DATETIME_FORMAT);
+    },
+    sub {
+        $before = _utc_datetime($_[1], DATETIME_FORMAT);
+    },
+
