@@ -579,14 +579,14 @@ sub fetch {
     if (!$objs && defined $uri) {
         # Really fetch the object
         my %content;
-        if (!defined $query && $uri =~ /\?/) {
+        if (defined $query) {
+            $content{'query'} = $query;
+        }
+        elsif ($uri =~ /\?/) {
             $uri = URI->new($uri);
             %content = $uri->query_form;
             $query = $uri->query;
             $uri = $uri->path;
-        }
-        else {
-            $content{'query'} = $query;
         }
         my ($res, $code);
         if (defined $query) {

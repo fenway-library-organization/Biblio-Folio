@@ -58,6 +58,8 @@ our @EXPORT_OK = qw(
     _detect_file_encoding
     _is_valid_utf8
     _force_valid_utf8
+    _is_uuid
+    _bool2int
     $rx_const_token
 );
 
@@ -92,7 +94,7 @@ use constant CQL_TRUE => 'true';
 use constant CQL_FALSE => 'false';
 use constant CQL_NULL => 'null';
 
-use vars qw($rx_const_token);
+use vars qw($rx_const_token $rx_uuid);
 
 my $json = JSON->new->pretty->canonical->convert_blessed->allow_blessed->allow_unknown;
 my $dumper = Data::Dumper->new([])->Terse(1)->Indent(0)->Sortkeys(1)->Sparseseen(1);
@@ -528,6 +530,10 @@ sub _bool {
     $_[0] =~ /^[YyTt1]/ ? JSON::true : JSON::false
 }
 
+sub _bool2int {
+    $_[0] ? 1 : 0
+}
+
 sub _debug {
     print STDERR "DEBUG @_\n" if DEBUGGING;
 }
@@ -796,6 +802,10 @@ sub _force_valid_utf8 {
         defined $1 ? $1 : '?'
     }xeg;
     return $str;
+}
+
+sub _is_uuid {
+    shift() =~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
 }
 
 1;

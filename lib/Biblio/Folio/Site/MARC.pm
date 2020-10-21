@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use Biblio::Folio::Util qw(_optional _json_decode);
-use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
+use MARC::Loop qw(marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS);
 use Scalar::Util qw(blessed);
 use Encode qw(encode decode :fallback_all);
 
@@ -30,6 +30,8 @@ sub new {
     $self->init;
     return $self;
 }
+
+sub must_encode_as { @_ > 1 ? $_[0]{'must_encode_as'} = $_[1] : $_[0]{'must_encode_as'} }
 
 sub init {
     my ($self) = @_;
@@ -311,26 +313,24 @@ sub _marcjson {
         $marcjson = _json_decode($$marcjson);
         $r = ref $marcjson;
     }
-    if (eval { 1 + keys(%$marcjson) }) {
-        # $self->_marcjson(_json_decode($str));
-    }
-    else {
+    if (!eval { 1 + scalar keys(%$marcjson) }) {
         die "can't make a MARCJSON hash out of a(n) $r";
     }
     my %key = map { $_ => 1 } keys %$marcjson;
     die "MARCJSON without a leader" if !delete $key{'leader'};
     die "MARCJSON without fields" if !delete $key{'fields'};
-    if (keys %key) {
-        my $keys = join(', ', sort keys %key);
-        die "MARCJSON with extraneous elements: $keys";
-    }
+    ### if (keys %key) {
+    ###     my $keys = join(', ', sort keys %key);
+    ###     die "MARCJSON with extraneous elements: $keys";
+    ### }
+    delete @$marcjson{keys %key} if keys %key;  # XXX Really???
     return $marcjson;
 }
 
 sub parse {
     my ($self, %what) = @_;
-    my ($marcjson, $marcref);
     return $self if $self->{'is_parsed'};
+    my ($marcjson, $marcref);
     if (defined $what{'marcjson'}) {
         $marcjson = $self->{'marcjson'} = $self->_marcjson($what{'marcjson'});
     }
@@ -348,9 +348,11 @@ sub parse {
         if ($marcjson) {
             $self->{'leader'} = $marcjson->{'leader'};
             my $fields = $marcjson->{'fields'};
+            $self->must_encode_as('UTF-8');
             $self->{'fields'} = [ map {
                 _make_field_from_marcjson($self, $_)
             } @$fields ];
+            $self->must_encode_as(undef);
         }
         elsif ($marcref) {
             my ($leader, $fields) = marcparse($marcref, 'error' => sub {
@@ -594,6 +596,7 @@ sub garnish {
 }
 
 sub _make_field {
+    my ($self) = @_;
     unshift @_, 'Biblio::Folio::Site::MARC::Field';
     goto &Biblio::Folio::Site::MARC::Field::new;
 }
@@ -804,7 +807,9 @@ sub _make_item_fields {
 
 package Biblio::Folio::Site::MARC::Field;
 
-use MARC::Loop qw(marcloop marcparse marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS SUB_ID SUB_VALREF);
+use MARC::Loop qw(marcfield marcbuild TAG DELETE VALREF IND1 IND2 SUBS SUB_ID SUB_VALREF);
+use Encode qw(encode decode :fallback_all);
+use Scalar::Util qw(weaken);
 
 sub new {
 # Control fields:
@@ -818,8 +823,12 @@ sub new {
 #     $field = Biblio::Folio::Site::MARC::Field->new($record, $tag, $ind1, $ind2, @subfields);  
 #     $field = Biblio::Folio::Site::MARC::Field->new($record, marcfield(...));
     my $cls = shift;
-    my %self;
-    $self{'record'} = shift if @_ && Scalar::Util::blessed($_[0]) && $_[0]->isa('Biblio::Folio::Site::MARC');
+    my (%self, $must_encode_as);
+    if (@_ && Scalar::Util::blessed($_[0]) && $_[0]->isa('Biblio::Folio::Site::MARC')) {
+        $self{'record'} = shift;
+        $must_encode_as = $self{'record'}->must_encode_as;
+        weaken($self{'record'});
+    }
     if (@_ == 1) {
         my $ary = shift;
         die "not the output of marcfield(...)" if ref($ary) ne 'ARRAY';
@@ -836,7 +845,6 @@ sub new {
         }
         else {
             my ($ind1, $ind2, @subs) = @_;
-            my $num_subs = 0;
             warn "data field $tag with no subfields?"
                 if !@subs;
             my $val = $ind1 . $ind2;
@@ -856,6 +864,9 @@ sub new {
                 else {
                     die "data field with half-subfield?";
                 }
+                utf8::downgrade($subval) if $must_encode_as;  # XXX  Is this the right thing to do?
+                # utf8::encode($subval) if $must_encode_as;
+                # $subval = encode($must_encode_as, $subval) if $must_encode_as;
                 $content[SUBS+$subnum] = [$subid, \$subval];
                 $subnum++;
                 $val .= "\x1f" . $subid . $subval;

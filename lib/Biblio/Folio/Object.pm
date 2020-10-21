@@ -5,6 +5,7 @@ use warnings;
 
 use Biblio::Folio::Util qw(_camel _unbless);
 use String::ShellQuote qw(shell_quote);
+use Scalar::Util qw(weaken);
 
 use constant qw(LITERAL LITERAL);
 use constant qw(UUID    UUID   );
@@ -24,6 +25,11 @@ sub DESTROY { }
 
 sub init {
     my $self = shift;
+    foreach my $k (qw(_site _json)) {
+        if (defined $self->{$k}) {
+            weaken($self->{$k});
+        }
+    }
     return $self;
 }
 

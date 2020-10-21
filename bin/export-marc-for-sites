@@ -8,6 +8,7 @@ use POSIX qw(strftime);
 use String::ShellQuote;
 use Text::ParseWords;
 use File::Basename qw(basename dirname);
+use Time::HiRes qw(time);
 use Getopt::Long
     qw(:config posix_default gnu_compat require_order bundling no_ignore_case);
 
@@ -27,7 +28,7 @@ my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
 
 my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
 my $mode = INCREMENTAL;
-my ($query, $id_file, $dest, $skipfile, $dryrun, $verbose, $test);
+my ($query, $id_file, $dest, $skipfile, $dryrun, $verbose, $test, $after, $before);
 GetOptions(
     # Export mode
     'f|full' => sub { $mode = FULL },
@@ -38,6 +39,8 @@ GetOptions(
     'v|verbose' => \$verbose,
     'n|dry-run' => \$dryrun,
     's|skip-file=s' => \$skipfile,
+    'after=s' => \$after,
+    'before=s' => \$before,
     # Other options
     'd|destination=s' => \$dest,
     ### 'o|outbox=s' => \@outboxes,
@@ -88,7 +91,15 @@ my $tn = time;
 # --- Support functions
 
 sub export_command_base {
-    my @cmd = ('export-marc');
+    my ($site) = @_;
+    my @cmd = ('export-marc', '-T' => $t0);
+    # Set options from the config file, if it exists
+    my $config_file = "$cwd/site/$site/export.conf";
+    my $have_config_file = -e $config_file;
+    if ($have_config_file) {
+        push @cmd, '-c' => $config_file;
+    }
+    # Set options from the command line
     if ($mode eq FULL) {
         push @cmd, '-f';
     }
@@ -102,9 +113,14 @@ sub export_command_base {
     push @cmd, '-v' if $verbose;
     push @cmd, '-n' if $dryrun;
     push @cmd, '-s' => $skipfile if defined $skipfile;
-    push @cmd, '-b';  # Get source records from local DB
-    ### push @cmd, '-y';  # Sync local source record DB
-    push @cmd, '-L';  # Use fully spelled-out location names
+    push @cmd, '--after' => $after if defined $after;
+    push @cmd, '--before' => $before if defined $before;
+    if (!$have_config_file) {
+        # Set defaults
+        push @cmd, '-b';  # Get source records from local DB
+        ### push @cmd, '-y';  # Sync local source record DB
+        push @cmd, '-L';  # Use fully spelled-out location names
+    }
     return @cmd;
 }
 
@@ -119,13 +135,14 @@ sub export_site {
     blather "Site: $site";
     xmkdir($outroot, "$outroot/tmp", "$outroot/new", $tmpdir, $outdir);
     my @cmd = (
-        export_command_base(),
+        export_command_base($site),
         '-e' => $tmperr,
         $site
     );
     my $cmd = join(' ',
         (map { shell_quote($_) } @cmd),
-        qw(| postproc | gzip >),
+        qw(| gzip >),
+        ### qw(| postproc | gzip >),
         $tmpmarc
     );
     if ($dryrun) {

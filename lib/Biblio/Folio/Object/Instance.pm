@@ -4,12 +4,29 @@ use strict;
 use warnings;
 
 use Biblio::Folio::Site::MARC;
+use Scalar::Util qw(weaken);
 
 # sub _obj_uri { '/instance-storage/instances/%s' }
 
 sub source_record {
     my ($self) = @_;
     return $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/records/%s/formatted?idType=INSTANCE');
+}
+
+sub marcjson {
+    my ($self, $what) = @_;
+    my $r = ref $what;
+    my $marcjson;
+    if (!defined $what) {
+        return $self->{'_marcjson'} if $self->{'_marcjson'};
+        die "not implemented";
+    }
+    elsif ($r eq 'HASH') {
+        return $self->{'_marcjson'} = $what;
+    }
+    else {
+        die "not implemented";
+    }
 }
 
 sub marcref {
@@ -19,8 +36,6 @@ sub marcref {
     if (!defined $what) {
         return $self->{'_marcref'} if $self->{'_marcref'};
         die "not implemented";
-        my $site = $self->site;
-        my $id = $self->{'id'};
     }
     elsif ($r eq 'SCALAR') {
         return $self->{'_marcref'} = $what;
@@ -53,7 +68,10 @@ sub holdings {
         my $site = $self->site;
         $holdings = [$site->object('holdings_record', %$what)];
     }
-    $_->{'_instance'} = $self for @$holdings;
+    foreach (@$holdings) {
+        $_->{'_instance'} = $self;
+        weaken($_->{'_instance'});  # XXX Kind of a hack
+    }
     $self->{'_holdings'} = $holdings;
     return wantarray ? @$holdings : $holdings;
 }
@@ -67,18 +85,31 @@ sub from_marcref {
 
 sub export_marc {
     my ($self, %arg) = @_;
-    my ($marcref, $holdings) = delete @arg{qw(marcref holdings)};
-    $marcref ||= $self->marcref;
-    $holdings ||= $self->holdings if $arg{'with_holdings'} || $self->{'_holdings'};
-    my $marc = Biblio::Folio::Site::MARC->new('marcref' => $marcref);
+    my $marc = $arg{'marc'};
+    if (!$marc) {
+        my $marcjson = $arg{'marcjson'} || $self->{'_marcjson'};
+        my $marcref = $arg{'marcref'} || $self->{'_marcref'};
+        if ($marcjson) {
+            $marc = Biblio::Folio::Site::MARC->new('marcjson' => $marcjson);
+        }
+        elsif ($marcref) {
+            $marc = Biblio::Folio::Site::MARC->new('marcref' => $marcref);
+        }
+        else {
+            die "huh?";
+        }
+    }
     $marc->parse;
     $marc->garnish('instance' => $self);
-    if ($holdings && @$holdings) {
-        $marc->add_holdings(
-            'holdings' => $holdings,
-            'spell_out_locations' => $arg{'spell_out_locations'},
-            'copy_electronic_access' => $arg{'copy_electronic_access'},
-        );
+    if ($arg{'with_holdings'}) {
+        my $holdings = $arg{'holdings'} ? $self->holdings($arg{'holdings'}) : $self->holdings;
+        if ($holdings && @$holdings) {
+            $marc->add_holdings(
+                'holdings' => $holdings,
+                'spell_out_locations' => $arg{'spell_out_locations'},
+                'copy_electronic_access' => $arg{'copy_electronic_access'},
+            );
+        }
     }
     else {
         $marc->delete_holdings;
