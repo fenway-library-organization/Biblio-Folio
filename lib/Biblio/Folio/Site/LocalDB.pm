@@ -3,6 +3,8 @@ package Biblio::Folio::Site::LocalDB;
 use strict;
 use warnings;
 
+use Scalar::Util qw(weaken);
+
 # ---------------- Folderol to set up DB state constants, etc. -----------------
 our @EXPORT_OK;
 my %is_state;
@@ -116,6 +118,7 @@ sub sth {
 sub init {
     my ($self) = @_;
     my $site = $self->{'site'};
+    weaken($self->{'site'});
     my $name = $self->{'name'};
     my $file = $self->{'file'}
         ||= $site->file("var/db/$name.db");
@@ -146,6 +149,7 @@ sub init {
     }
     # $self->{'tables'} = {};
     # $self->_discover_schema;
+    $self->{'transaction_level'} = 0;
     return $self;
 }
 
@@ -198,6 +202,22 @@ sub _create_index {
     # my ($self, $index, $sql) = @_;
     splice @_, 1, 0, 'INDEX';
     goto &_create_table_or_index;
+}
+
+sub transact {
+    my ($self, $sub) = @_;
+    my $dbh = $self->dbh;
+    $dbh->begin_work if $self->{'transaction_level'}++ == 0;
+    my $ok;
+    eval {
+        $sub->();
+        $dbh->commit if --$self->{'transaction_level'} == 0;
+        $ok = 1;
+    };
+    if (!$ok) {
+        $dbh->rollback;
+        die $@;
+    }
 }
 
 sub DESTROY {

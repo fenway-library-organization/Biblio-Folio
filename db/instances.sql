@@ -2,7 +2,7 @@ CREATE TABLE instances (
     id                  VARCHAR UNIQUE PRIMARY KEY,
     hrid                VARCHAR UNIQUE NOT NULL,
     source_type         VARCHAR     NULL,
-    source              VARCHAR     NULL,
+    source              BLOB        NULL,
     last_modified       REAL    NOT NULL,
     suppressed          INTEGER NOT NULL DEFAULT 0,
     deleted             INTEGER NOT NULL DEFAULT 0,

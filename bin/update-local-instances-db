@@ -22,8 +22,9 @@ sub blather;
 
 my ($full, $comment, $after, $before);
 my ($part, $update_id) = (0, undef, 0, 0);
-my ($verbose, $dryrun, $max_update_size, $batch_size, $error_file, $tty_file);
-my ($error_fh, $tty_fh);
+my ($max_update_size, $batch_size) = (1_000_000_000, 1_000);
+my ($verbose, $dryrun, $error_file, $tty_file);
+my ($error_fh, $tty_fh, $error_file_is_tty);
 my $signal;
 
 $SIG{'TERM'} = $SIG{'INT'} = $SIG{'QUIT'} = sub {
@@ -64,7 +65,7 @@ sub run_update {
     $db->dbh->do('PRAGMA cache_size = -2000');
     my $count_before = $update->num_records;
     $update->begin;
-    progress();
+    show_progress();
     my $ok;
     eval {
         $update->run;
@@ -74,14 +75,13 @@ sub run_update {
     my $count = $count_after - $count_before;
     if (!$ok) {
         $update->end(FAILED);
-        progress();
+        show_progress();
         my $errstr = $update->errstr;
         fatal "update failed: $errstr";
     }
     elsif ($count >= $max_update_size) {
-        # $update->status('chaining');
         $update->status(PARTIAL);
-        progress();
+        show_progress();
         blather "\n";
         $update->save;
         # undef $db;
@@ -89,7 +89,7 @@ sub run_update {
     }
     else {
         $update->end(COMPLETED);
-        progress();
+        show_progress();
         blather "\n", "Update complete\n";
     }
 }
@@ -109,7 +109,7 @@ sub sms {
     return sprintf('%d.%03d', $isec, $msec);
 }
 
-sub progress {
+sub show_progress {
     my (undef, $errors) = @_;  # First param (#records) is ignored
     $errors ||= [];
     my $e = @$errors;
@@ -118,8 +118,14 @@ sub progress {
             # Drain errors
             if (!defined $error_fh) {
                 open $error_fh, '>>', $error_file or fatal "open $error_file for appending: $!";
+                $error_file_is_tty = -t $error_fh;
             }
-            print $error_fh $_, "\n" for @$errors;
+            print $error_fh "\n" if $error_file_is_tty;
+            foreach my $err (@$errors) {
+                my $msg = ref($err) ? sprintf("...", @$err{qw(...)}) # TODO
+                                    : $err;
+                print $error_fh $msg;
+            }
         }
         @$errors = ();
     }
@@ -173,7 +179,7 @@ sub new_update_args {
         'comment' => $comment,
         'began' => $now,
         'after' => $after,  # Will be changed if incremental
-        'before' => $now,
+        'before' => $before // $now,
         # Not stored in new instance
         #   update_id
         # Not stored in instance
@@ -191,7 +197,7 @@ sub new_update_args {
         'error_file' => $error_file,
         'tty_file' => $tty_file,
         # Not stored
-        'progress' => \&progress,
+        'progress_handler' => \&show_progress,
     );
 }
 
@@ -207,7 +213,6 @@ sub existing_update_args {
 }
 
 sub options {
-    ($max_update_size, $batch_size) = (25_000, 1000);
     return (
         # First run only
         'f|full'              => \$full,

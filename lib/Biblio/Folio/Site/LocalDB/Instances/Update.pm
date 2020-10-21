@@ -7,10 +7,12 @@ use Biblio::Folio::Util qw(_utc_datetime);
 # use Biblio::Folio::Site::LocalDB::Instances::Constants qw(:status);
 use Biblio::Folio::Site::MARC;
 use Time::HiRes qw(time);
+use Scalar::Util qw(weaken);
 
 use constant SRS_DATETIME_FORMAT => '%Y-%m-%dT%H:%M:%S.%JZ';
 
 # Statuses
+use constant STARTING  => 'starting';
 use constant RUNNING   => 'running';
 use constant PARTIAL   => 'partial';
 use constant COMPLETED => 'completed';
@@ -42,6 +44,8 @@ sub before { @_ > 1 ? $_[0]{'before'} = $_[1] : $_[0]{'before'} }
 sub num_records { @_ > 1 ? $_[0]{'num_records'} = $_[1] : $_[0]{'num_records'} }
 sub num_errors { @_ > 1 ? $_[0]{'num_errors'} = $_[1] : $_[0]{'num_errors'} }
 sub max_last_modified { @_ > 1 ? $_[0]{'max_last_modified'} = $_[1] : $_[0]{'max_last_modified'} }
+sub progress_handler { @_ > 1 ? $_[0]{'progress_handler'} = $_[1] : $_[0]{'progress_handler'} }
+sub error_handler { @_ > 1 ? $_[0]{'error_handler'} = $_[1] : $_[0]{'error_handler'} }
 
 sub DESTROY { }
 
@@ -52,6 +56,9 @@ sub init {
     my $file = $db->file;
     $site->dont_cache(qw(instance source_record holdings_record));
     my $update_id = $self->id;
+    $self->{'batch_size'} ||= 1_000;
+    $self->{'max_update_size'} ||= 10_000;
+    $self->{'errors'} ||= [];
     if (!-e $file) {
         die "DB file is empty, so update ID $update_id is meaningless: $file"
             if defined $update_id;
@@ -60,9 +67,9 @@ sub init {
     elsif (defined $update_id) {
         $self->load;
     }
-    $self->{'batch_size'} ||= 1_000;
-    $self->{'max_update_size'} ||= 10_000;
-    $self->{'errors'} ||= [];
+    ### else {
+    ###     $self->save;
+    ### }
     return $self;
 }
 
@@ -195,10 +202,10 @@ sub save {
         }, join(', ', @columns), join(', ', map { sprintf "%*s", length($_), '?' } @columns);
         $sth = $db->sth($sql);
     }
-    $dbh->begin_work;
-    $sth->execute(@params);
-    $self->{'id'} ||= $dbh->sqlite_last_insert_rowid;
-    $dbh->commit;
+    $db->transact(sub {
+        $sth->execute(@params);
+        $self->{'id'} ||= $dbh->sqlite_last_insert_rowid;
+    });
     return $self;
 }
 
@@ -210,80 +217,51 @@ sub sms {
 
 sub run {
     my ($self) = @_;
-    my $update_id = $self->id;
     my $searcher = $self->searcher;
     my $db = $self->db;
     my $dbh = $db->dbh;
-    my $progress = $self->{'progress'} || sub {};
-    my $error = $self->{'error'} || $progress;
+    my $progress_handler = $self->progress_handler || sub {};
+    my $error_handler = $self->error_handler || $progress_handler;
     my $sth_ins;
     my @errors;
-    my $batch_size = $self->{'batch_size'};
+    my $batch_size = $self->batch_size;
     my $max_last_modified = $self->max_last_modified || sms(0);
     my $n = $self->num_records;
     my $maxn = $n + $self->max_update_size;
     BATCH:
     while ($n < $maxn) {
         if (my @source_records = $searcher->next) {
-            $dbh->begin_work;
+            my @records;
+            my $nerr = 0;
             RECORD:
             foreach my $source_record (@source_records) {
                 $n++;
-                my ($source, $source_type, $err, $instance_hrid);
                 my $instance_id = $source_record->{'externalIdsHolder'}{'instanceId'};
-                if (!defined $instance_id) {
-                    $err = "record #$n doesn't have an instance ID";
-                }
-                else {
-                    $source_type = $source_record->{'recordType'};
-                    my $marcjson = $source_record->{'parsedRecord'}{'content'};
-                    # my $source = $source_record->{'rawRecord'}{'content'};
-                    $instance_hrid = $instance_id;  # XXX Hack
-                    if ($source_type eq 'MARC') {
-                        my ($marc, $hrid);
-                        eval {
-                            $marc = Biblio::Folio::Site::MARC->new('marcjson' => $marcjson);
-                            $hrid = $marc->field('001')->value;
-                            $instance_hrid = $hrid;
-                            $source = eval { $marc->as_marc21 };
-                        };
-                        if (!defined $marc) {
-                            $err = "instance $instance_id source record can't be parsed";
-                        }
-                        elsif (!defined $hrid) {
-                            $err = "instance $instance_id doesn't have an hrid";
-                        }
-                        elsif (!defined $source) {
-                            $err = "instance $instance_hrid can't be exported as MARC21";
-                        }
-                    }
-                    else {
-                        $err = "record $instance_id does not have a MARC source record";
-                    }
-                }
-                if (defined $err) {
-                    push @errors, $err;
-                    $self->num_errors($self->num_errors + 1);
-                    $error->($n, \@errors);
-                    next RECORD;
-                }
-                if (defined $source) {
-                    my $last_modified = sms($source_record->{'metadata'}{'updatedDate'});
-                    $max_last_modified = $last_modified if $last_modified > $max_last_modified;
-                    my $deleted = $source_record->{'deleted'} ? 1 : 0;
-                    my $suppressed = $source_record->{'additionalInfo'}{'suppressDiscovery'} ? 1 : 0;
-                    $sth_ins ||= $db->sth(q{
-                        INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    });
-                    $sth_ins->execute($instance_id, $instance_hrid, $source_type, $source, $last_modified, $update_id, $deleted, $suppressed);
-                }
+                my $last_modified = sms($source_record->{'metadata'}{'updatedDate'});
+                $max_last_modified = $last_modified if $last_modified > $max_last_modified;
+                my $update = $self;
+                weaken($update);
+                push @records, {
+                    'update' => $update,
+                    'record_number' => $n,
+                    'instance_id' => $instance_id,
+                    'source_type' => $source_record->{'recordType'},
+                    'marcjson' => $source_record->{'parsedRecord'}{'content'},
+                    'last_modified' => $last_modified,
+                    ### 'error_handler' => $error_handler,
+                };
             }
             $self->max_last_modified($max_last_modified) if $max_last_modified;  # 0.000 is false
             $self->num_records($n);
-            $progress->($n, \@errors);
-            $dbh->commit;
-            $self->save;
+            $db->transact(sub {
+                $db->store(
+                    'records' => \@records,
+                    'progress_handler' => $progress_handler,
+                    'error_handler' => $error_handler,
+                );
+                $self->save;
+            });
+            $progress_handler->($n);
         }
         else {
             # Premature end of data

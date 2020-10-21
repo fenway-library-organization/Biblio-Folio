@@ -6,8 +6,9 @@ use warnings;
 use base qw(Biblio::Folio::Site::LocalDB);
 
 use Biblio::Folio::Site::LocalDB::Instances::Update;
-use Biblio::Folio::Util qw(_utc_datetime);
+use Biblio::Folio::Util qw(_utc_datetime _is_uuid _bool2int);
 use Biblio::Folio::Site::MARC;
+use Scalar::Util qw(blessed);
 
 # Update types
 use constant FULL        => 'full';
@@ -18,6 +19,10 @@ use constant RUNNING   => 'running';
 use constant PARTIAL   => 'partial';
 use constant COMPLETED => 'completed';
 use constant FAILED    => 'failed';
+
+# Diagnostic levels
+use constant WARNING => 0;
+use constant ERROR   => 1;
 
 sub create {
     my $self = shift;
@@ -48,7 +53,7 @@ CREATE TABLE instances (
     id                  VARCHAR UNIQUE PRIMARY KEY,
     hrid                VARCHAR UNIQUE NOT NULL,
     source_type         VARCHAR     NULL,
-    source              VARCHAR     NULL,
+    source              BLOB        NULL,
     last_modified       REAL    NOT NULL,
     suppressed          INTEGER NOT NULL DEFAULT 0,
     deleted             INTEGER NOT NULL DEFAULT 0,
@@ -89,6 +94,18 @@ CREATE TABLE updates (
     CONSTRAINT CHECK    (status IN ('starting', 'running', 'partial', 'completed', 'failed'))
     */
 );
+CREATE TABLE diagnostics (
+    instance_id         VARCHAR NOT NULL,
+    update_id           INTEGER     NULL,
+    record_number       INTEGER     NULL,
+    level               INTEGER NOT NULL DEFAULT 1,  /* 0 = warning, 1 = error */
+    message             VARCHAR NOT NULL,
+    /*
+    CONSTRAINT CHECK    (level IN (0, 1)),
+    */
+    FOREIGN KEY         (instance_id) REFERENCES instances(id),
+    FOREIGN KEY         (update_id) REFERENCES updates(id)
+);
 /* Indexes on instances */
 CREATE INDEX instances_hrid_index              ON instances (hrid);
 CREATE INDEX instances_hrid_length_index       ON instances (length(hrid));
@@ -105,6 +122,10 @@ CREATE INDEX updates_type_index                ON updates (type);
 CREATE INDEX updates_status_index              ON updates (status);
 CREATE INDEX updates_began_index               ON updates (began);
 CREATE INDEX updates_max_last_modified_index   ON updates (max_last_modified);
+/* Indexes on diagnostics */
+CREATE INDEX diagnostics_instance_index        ON diagnostics (instance_id);
+CREATE INDEX diagnostics_update_index          ON diagnostics (update_id);
+CREATE INDEX diagnostics_type_index            ON diagnostics (level);
 EOS
     }
     $dbh->begin_work;
@@ -197,6 +218,102 @@ sub fetch {
     return $row;
 }
 
+sub store {
+    my ($self, %arg) = @_;
+    my ($records, $progress_handler, $error_handler) = @arg{qw(records progress_handler error_handler)};
+    my ($sth, @results);
+    my $num_errors = 0;
+    foreach my $record (@$records) {
+        my ($instance_id, $instance_hrid) = @$record{qw(instance_id instance_hrid)};
+        my ($update, $record_number)      = @$record{qw(update record_number)};
+        my ($error, $warning)             = @$record{qw(error warning)};
+        my ($source_type, $source)        = @$record{qw(source_type source)};
+        my ($last_modified, $deleted, $suppressed)
+                                          = @$record{qw(last_modified deleted suppressed)};
+        my ($marcjson, $marcref, $marc)   = @$record{qw(marcjson marcref marc)};
+        my @marc_args;
+        my $no_identifier = !defined $instance_id || !defined $instance_hrid;
+        eval {
+            if (defined $error) {
+                return;
+            }
+            elsif (defined $source_type && $source_type ne 'MARC') {
+                return $error = "can't store anything but MARC source records";
+            }
+            elsif (defined $source) {
+                @marc_args = ('marcref' => \$source) if $no_identifier;
+            }
+            elsif (defined $marcref) {
+                $source = $$marcref;
+                @marc_args = ('marcref' => $marcref) if $no_identifier;
+            }
+            elsif (defined $marcjson) {
+                @marc_args = ('marcjson' => $marcjson) if $no_identifier;  # , 'must_encode_as' => 'UTF-8');
+                $last_modified //= _utc_datetime($marcjson->{'metadata'}{'updatedDate'}, '%s.%J');
+                $deleted //= $marcjson->{'deleted'};
+                $suppressed //= $marcjson->{'additionalInfo'}{'suppressDiscovery'};
+            }
+            elsif (!defined $marc) {
+                return $error = "can't make a storable source record without MARC input";
+            }
+            elsif (!ref $marc) {
+                $source = $marc;
+                $marc = Biblio::Folio::Site::MARC->new('marcref' => \$source) if $no_identifier;  # , 'must_encode_as' => 'UTF-8');
+            }
+            # Create a Biblio::Folio::Site::MARC instance if necessary
+            if (@marc_args) {
+                $marc = Biblio::Folio::Site::MARC->new(@marc_args);
+            }
+            if (!defined $instance_id) {
+                my $msg = "MARC record doesn't have a 999 field with an instance ID";
+                my $field = $marc->field('999ff')
+                    or return $error = $msg;
+                $instance_id = $field->subfield('i')
+                    // return $error = $msg;
+            }
+            if (!defined $instance_hrid) {
+                my $field = $marc->field('001') or return $error = "instance $instance_id doesn't have an 001 field";
+                $instance_hrid = $field->value;
+            }
+            if (!defined $source) {
+                $source = eval { $marc->as_marc21 } or return $error = "instance $instance_id can't be rendered as a MARC record";
+            }
+        };
+        if (defined $error) {
+            log_diagnostic(%$record, 'level' => ERROR, 'message' => $error);
+            $error_handler->($record_number, [$record]);
+            $num_errors++;
+        }
+        else {
+            my $update_id = $update ? $update->id : undef;
+            if (defined $warning) {
+                log_diagnostic(%$record, 'level' => WARNING, 'message' => $warning);
+            }
+            $sth ||= $self->sth(q{
+                INSERT OR REPLACE INTO instances (id, hrid, source_type, source, last_modified, update_id, deleted, suppressed)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            });
+            $sth->execute(
+                $instance_id, $instance_hrid, $source_type, $source, $last_modified,
+                $update_id, _bool2int($deleted), _bool2int($suppressed)
+            );
+            $record->{'ok'} = 1;
+            next;
+        }
+    }
+    return @_ if wantarray;
+    return $num_errors == 0;
+}
+
+sub log_diagnostic {
+    my ($self, %arg) = @_;
+    my $sth = $self->sth(q{
+        INSERT INTO diagnostics (instance_id, update_id, record_number, level, message)
+        VALUES (?, ?, ?, ?, ?)
+    });
+    $sth->execute(@arg{qw(instance_id update_id record_number level message)});
+}
+
 sub marcref {
     my $self = shift;
     my $sth;
@@ -242,9 +359,9 @@ sub update_fameflower {
     }
     my $site = $self->site;
     $site->dont_cache(qw(instance source_record holdings_record));
-    my ($query, $comment, $progress, $error) = @arg{qw(query comment progress error)};
-    $progress ||= sub {};
-    $error ||= $progress;
+    my ($query, $comment, $progress_handler, $error_handler) = @arg{qw(query comment progress_handler error_handler)};
+    $progress_handler ||= sub {};
+    $error_handler ||= $progress_handler;
     my @errors;
     my ($type, $record_this_update, $update_id);
     my $dbh = $self->dbh;
@@ -316,7 +433,7 @@ sub update_fameflower {
             }
             if (defined $err) {
                 push @errors, $err;
-                $error->($n, \@errors);
+                $error_handler->($n, \@errors);
                 next;
             }
             if (defined $source) {
@@ -331,7 +448,7 @@ sub update_fameflower {
             }
         }
         $dbh->commit;
-        $progress->($n, \@errors);
+        $progress_handler->($n, \@errors);
     }
     # Add hrids for new instances (hrid set to instance ID, which is 36 bytes long)
     my $sth_nulls = $self->sth(q{
