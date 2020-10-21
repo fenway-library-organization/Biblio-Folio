@@ -303,12 +303,17 @@ sub cmd_instance_source_get {
     my $argv = $self->argv;
     $self->usage("instance source get [-JMT] INSTANCE_ID...") if !@$argv;
     my $format = $arg{'format'} || FORMAT_JSON;
+    my @records;
     foreach my $id (@$argv) {
-        my $source = $site->source('instance' => $id);
+        my $source = $site->source_record('instance' => $id);
+        if (!defined $source) {
+            print STDERR "no source record for instance: $id\n";
+            next;
+        }
         my $rectype = $source->record_type;
         if ($format eq FORMAT_MARC) {
             if ($rectype ne 'MARC') {
-                print STDERR "record not in MARC format; $id\n";
+                print STDERR "record not in MARC format: $id\n";
                 next;
             }
             my $marc = $source->{'rawRecord'}{'content'};
@@ -329,9 +334,19 @@ sub cmd_instance_source_get {
             }
             print $source->{'parsedRecord'}{'formattedContent'};
         }
-        else {
-            print $self->json->encode($source->{'parsedRecord'}{'content'});
+        elsif ($format eq FORMAT_JSON) {
+            push @records, $source;
+            # print $self->json->encode($source->{'parsedRecord'}{'content'});
         }
+        else {
+            fatal "internal error: unrecognized format $format";
+        }
+    }
+    if (@records) {
+        print $self->json->encode({
+            'records' => \@records,
+            'totalRecords' => scalar(@records),
+        });
     }
 }
 
