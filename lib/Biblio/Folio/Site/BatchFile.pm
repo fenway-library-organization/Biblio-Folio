@@ -3,13 +3,17 @@ package Biblio::Folio::Site::BatchFile;
 use strict;
 use warnings;
 
-use Biblio::Folio::Object;
-use Biblio::Folio::Util qw(_run_hooks _int_set_str_to_hash);
+use base qw(Biblio::Folio::Object);
 
+use Biblio::Folio::Util qw(_run_hooks _int_set_str_to_hash);
 use POSIX qw(strftime);
 
-use vars qw(@ISA);
-@ISA = qw(Biblio::Folio::Object);
+sub init {
+    my ($self) = @_;
+    $self->SUPER::init;
+    $self->{'results'} = {};
+    return $self;
+}
 
 sub file { @_ > 1 ? $_[0]{'file'} = $_[1] : $_[0]{'file'} }
 sub fh { @_ > 1 ? $_[0]{'fh'} = $_[1] : $_[0]{'fh'} }
@@ -26,12 +30,6 @@ sub results {
     my $file = shift;
     return $self->{'results'}{$file} if !@_;
     return $self->{'results'}{$file} = shift;
-}
-
-sub init {
-    my ($self) = @_;
-    $self->{'results'} = {};
-    return $self;
 }
 
 sub _open {
