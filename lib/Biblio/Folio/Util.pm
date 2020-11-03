@@ -13,6 +13,8 @@ our @EXPORT_OK = qw(
     ENCODING_UTF8
     ENCODING_LATIN1
     ENCODING_CP1252
+    MIN_UUID_DIGITS
+    MAX_UUID_DIGITS
     _rx_const_token
     _tok2const
     _trim
@@ -38,7 +40,6 @@ our @EXPORT_OK = qw(
     _obj2hash
     _utc_datetime
     _uuid
-    _bool
     _debug
     _cmpable
     _unbless
@@ -59,6 +60,11 @@ our @EXPORT_OK = qw(
     _is_valid_utf8
     _force_valid_utf8
     _is_uuid
+    _parse_uuid_range
+    _normalize_uuid
+    _uuid_predecessor
+    _uuid_successor
+    _bool
     _bool2int
     $rx_const_token
 );
@@ -71,6 +77,9 @@ use constant ENCODING_ASCII => 'ascii';
 use constant ENCODING_UTF8 => 'utf-8';
 use constant ENCODING_LATIN1 => 'iso-8859-1';
 use constant ENCODING_CP1252 => 'cp-1252';
+
+use constant MIN_UUID_DIGITS => '00000000000000000000000000000000';
+use constant MAX_UUID_DIGITS => 'ffffffffffffffffffffffffffffffff';
 
 use constant MICROSECONDS => '000000';
 
@@ -526,14 +535,6 @@ sub _uuid {
     return $obj->{$key} = $uuidgen->create_str;
 }
 
-sub _bool {
-    $_[0] =~ /^[YyTt1]/ ? JSON::true : JSON::false
-}
-
-sub _bool2int {
-    $_[0] ? 1 : 0
-}
-
 sub _debug {
     print STDERR "DEBUG @_\n" if DEBUGGING;
 }
@@ -806,6 +807,131 @@ sub _force_valid_utf8 {
 
 sub _is_uuid {
     shift() =~ /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+}
+
+sub _parse_uuid_range {
+    # A UUID range specifier may take several different forms, as shown below.
+    # Note that all of the examples given are equivalent -- each one specifies
+    # the range of UUIDs beginning with 30000000-0000-0000-0000-000000000000
+    # and ending with 3fffffff-ffff-ffff-ffff-ffffffffffff.
+    # Variant:   Example:
+    #   L        3                                         == [3]
+    #   L,U      3,3                                       == [3,3]
+    #   L,U      3,3fffffff-ffff-ffff-ffff-ffffffffffff    == [3,3fffffff-ffff-ffff-ffff-ffffffffffff]
+    #   [L       [3                                        == [30000000-0000-0000-0000-000000000000
+    #   [L,U]    [30000000-0000-0000-0000-000000000000,3fffffff-ffff-ffff-ffff-ffffffffffff]
+    #   [L]      [3]
+    #   [L,U)    [30000000-0000-0000-0000-000000000000,4)
+    #   [L,U)    [30000000-0000-0000-0000-000000000000,40000000-0000-0000-0000-000000000000)
+    #   (L       (30000000-0000-0000-0000-000000000000,3fffffff-ffff-ffff-ffff-ffffffffffff]
+    #   (L,U)    (3,4) == (
+    #   (L,U]    (2fffffff-ffff-ffff-ffff-ffffffffffff,3fffffff-ffff-ffff-ffff-ffffffffffff]
+    #   (L,U]    (2,3]
+    # Some ranges dont make sense, because they're empty:
+    #   [L)      [3) == [3fffffff-ffff-ffff-ffff-ffffffffffff,3fffffff-ffff-ffff-ffff-ffffffffffff)
+    #   (L]      (3] == (3fffffff-ffff-ffff-ffff-ffffffffffff,3fffffff-ffff-ffff-ffff-ffffffffffff]
+    #   (L)      (3) == (3fffffff-ffff-ffff-ffff-ffffffffffff,3fffffff-ffff-ffff-ffff-ffffffffffff)
+    # L is a prefix of the valid UUID LOWERBOUND, padded with 0 and (if open) decremented.
+    # U is a prefix of the valid UUID UPPERBOUND, padded with f and (if closed) incremented.
+    # Both LOWERBOUND and UPPERLIMIT must be a valid UUID or an initial
+    #   substring of a valid UUID.  Hyphens and case are ignored.
+    # Good prefixes:
+    #   0
+    #   0f
+    #   0F                  [case is ignored]
+    #   1234fEdC-0000-
+    #   12345678-90ab-cdef-1234-567890abcdef
+    #   1234567890ABCDEF12
+    #   12345
+    #   -1-2-3-a-b------c   [hyphens are ignored]
+    # Bad prefixes:
+    #   1234567890abcdef1234567890abcdef99999   -- too long
+    # Infinity may be represented as "$", "n", or "inf" (case-insensitive).  It
+    #   may also be represented as a string of 1 to 32 "f"s, as long as they're
+    #   not followed with the half-open symbol ")".
+    my $str = lc shift;
+    $str =~ tr/-//d;
+    my ($l, $u) = split /,/, $str, 2;
+    $u = $l if !defined $u;
+    $u =~ s/^([\$n]|inf)$/f/;
+    $l =~ s/^([\[\(])//;
+    my $lopen = ($1 eq '(' ? 1 : 0);
+    $u =~ s/([\x29\x5d])$//;  # Easier than escaping
+    # $u =~ s/^([\]\)])$//;
+    my $uopen = ($1 eq ')' ? 1 : 0);
+    $l =~ s/^([0-9a-f]{1,31})$/$1 . substr(MIN_UUID_DIGITS, 0, 32 - length($1))/e;
+    if ($lopen) {
+        $u =~ s/^([0-9a-f]{1,31})$/$1 . substr(MAX_UUID_DIGITS, 0, 32 - length($1))/e;
+        # (4   --> 4fffffffffffffffffffffffffffffff + 1 --> 40000000000000000000000000000000
+        # (45  --> 45ffffffffffffffffffffffffffffff + 1 --> 46000000000000000000000000000000
+        # (456 --> 456fffffffffffffffffffffffffffff + 1 --> 45700000000000000000000000000000
+        $l = _uuid_successor($l);
+    }
+    else {
+        $l =~ s/^([0-9a-f]{1,31})$/$1 . substr(MIN_UUID_DIGITS, 0, 32 - length($1))/e;
+    }
+    if ($uopen) {
+        # 4)   --> 40000000000000000000000000000000 - 1 --> 3fffffffffffffffffffffffffffffff
+        # 45)  --> 45000000000000000000000000000000 - 1 --> 44ffffffffffffffffffffffffffffff
+        # 456) --> 45600000000000000000000000000000 - 1 --> 455fffffffffffffffffffffffffffff
+        $u =~ s/^([0-9a-f]{1,31})$/$1 . substr(MIN_UUID_DIGITS, 0, 32 - length($1))/e;
+        $u = _uuid_predecessor($u);
+    }
+    else {
+        $u =~ s/^([0-9a-f]{1,31})$/$1 . substr(MAX_UUID_DIGITS, 0, 32 - length($1))/e;
+    }
+    return map { _normalize_uuid($_) } ($l, $u);
+}
+
+sub _normalize_uuid {
+    my $uuid = lc shift;
+    $uuid =~ tr/-//d;
+    my $len = length $uuid;
+    foreach my $h (8, 13, 18, 23) {
+        last if $len <= $h;
+        substr($uuid, $h, 0) = '-';
+    }
+    return $uuid;
+}
+
+sub _uuid_predecessor {
+    my $uuid = lc shift;
+    $uuid =~ tr/-//d;
+    my @ints = map hex, ($uuid =~ /([0-9a-f]{4})/g);
+    foreach (reverse @ints) {
+        if ($_ == 0) {
+            $_ = 0x0ffff;
+        }
+        else {
+            $_--;
+            last;
+        }
+    }
+    return _normalize_uuid(join("", map { sprintf "%04x", $_ } @ints));
+}
+
+sub _uuid_successor {
+    my $uuid = lc shift;
+    $uuid =~ tr/-//d;
+    my @ints = map hex, ($uuid =~ /([0-9a-f]{4})/g);
+    foreach (reverse @ints) {
+        if ($_ == 0x0ffff) {
+            $_ = 0x0;
+        }
+        else {
+            $_++;
+            last;
+        }
+    }
+    return _normalize_uuid(join("", map { sprintf "%04x", $_ } @ints));
+}
+
+sub _bool {
+    $_[0] =~ /^[YyTt1]/ ? JSON::true : JSON::false
+}
+
+sub _bool2int {
+    $_[0] ? 1 : 0
 }
 
 1;
