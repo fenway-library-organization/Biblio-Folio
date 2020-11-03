@@ -1,38 +1,81 @@
-#!/bin/sh
+#!/bin/sh -e
 
 dryrun=NO
-if [ $1 = '-n' ]; then
-    dryrun=YES
-    shift
-fi
+verbose=NO
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n) dryrun=YES
+            verbose=YES
+            shift
+            ;;
+        -v) verbose=YES
+            shift
+            ;;
+        /*) break
+            ;;
+        *)
+            echo "usage: ./install [-vn]" >&2
+            exit 1
+            ;;
+    esac
+done
 
 PREFIX=${1:-/usr/local/folio}
-DIRS="bin conf"
-PERLMOD=$(awk '/^PERLMOD  *=  */ {print $3}' config.mk)
-PERLMODPAR=$(awk '/^PERLMODPAR  *=  */ {print $3}' config.mk)
-PERLMODDIR=$(awk '/^PERLMODDIR  *=  */ {print $3}' config.mk)
+BASEDIRS="$DIRS lib"
+DIRS="bin conf util"
+PERLMODFILE=$(awk '/^PERLMODFILE  *=  */ {print $3}' config.mk)
+#PERLMODFILE=lib/Biblio/Folio.pm
+PERLMODDIR=${PERLMODFILE%%.pm}
+PERLMODPAR=${PERLMODFILE%/*.pm}
+#PERLMODPAR=$(awk '/^PERLMODPAR  *=  */ {print $3}' config.mk)
+#PERLMODDIR=$(awk '/^PERLMODDIR  *=  */ {print $3}' config.mk)
+PERLPKG="$(awk '/^package\s/ {print $2}' < $PERLMODFILE | sed -n 's/;.*//; 1p; 1q')"
 if [ -n "$PERLMODDIR" ]; then
     DIRS="${DIRS} ${PERLMODDIR}"
 fi
 
+if [ $verbose = YES ]; then
+    cat >&2 <<EOS
+Installation parameters:
+  prefix: $PREFIX
+  main module: $PERLPKG in $PERLMODFILE
+  submodules dir: $PERLMODDIR
+  parent dir: $PERLMODPAR
+EOS
+fi
+
+# Install the main package (Biblio::Folio)
+if [ -n "$PERLMODFILE" ]; then
+    if [ $verbose = YES ]; then
+        echo "cp $PERLMODFILE $PREFIX/$PERLMODPAR/" >&2
+    fi
+    if [ $dryrun = NO ]; then
+        cp $PERLMODFILE $PREFIX/$PERLMODPAR/
+    fi
+fi
+
+# Install everything else
 for dir in $DIRS; do
     if [ -e $dir ]; then
-        if [ $dryrun = YES ]; then
+        if [ $verbose = YES ]; then
             echo "mkdir -p $PREFIX/$dir" >&2
             echo "rsync -av $dir/ $PREFIX/$dir/" >&2
-        else
+        fi
+        if [ $dryrun = NO ]; then
             mkdir -p $PREFIX/$dir
             rsync -av $dir/ $PREFIX/$dir/
         fi
     fi
 done
 
-if [ -n "$PERLMOD" ]; then
-    if [ $dryrun = YES ]; then
-        echo "cp $PERLMOD $PREFIX/$PERLMODPAR" >&2
-    else
-        cp $PERLMOD $PREFIX/$PERLMODPAR
+# Create local directories as necessary
+for dir in $BASEDIRS; do
+    if [ $verbose = YES ]; then
+        echo mkdir -p "$PREFIX/local/$dir" >&2
     fi
-fi
+    if [ $dryrun = NO ]; then
+        mkdir -p "$PREFIX/local/$dir"
+    fi
+done
 
-chmod a+x $PREFIX/bin/
+chmod -R a+x $PREFIX/bin

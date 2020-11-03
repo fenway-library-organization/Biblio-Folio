@@ -1,2 +1,2 @@
 PREFIX = /usr/local/folio
-PERLMODDIR = lib/Biblio/Folio
+PERLMODFILE = lib/Biblio/Folio.pm
