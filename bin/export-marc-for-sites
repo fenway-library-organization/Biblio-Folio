@@ -28,13 +28,15 @@ my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
 
 my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
 my $mode = INCREMENTAL;
-my ($query, $id_file, $dest, $skipfile, $dryrun, $verbose, $test, $after, $before);
+my ($query, $id_file);
+my ($config_file, $dest, $skipfile, $dryrun, $verbose, $test, $after, $before);
 GetOptions(
     # Export mode
     'f|full' => sub { $mode = FULL },
     'q|query=s' => sub { $query = $_[1]; $mode = SPECIAL },
     'i|id-file=s' => sub { $id_file = $_[1]; $mode = SPECIAL },
     # Options shared by export-marc
+    'c|config-file=s' => \$config_file,
     't|test' => \$test,
     'v|verbose' => \$verbose,
     'n|dry-run' => \$dryrun,
@@ -92,13 +94,20 @@ my $tn = time;
 
 sub export_command_base {
     my ($site) = @_;
-    my @cmd = ('export-marc', '-T' => $t0);
-    # Set options from the config file, if it exists
-    my $config_file = "$cwd/site/$site/export.conf";
-    my $have_config_file = -e $config_file;
-    if ($have_config_file) {
-        push @cmd, '-c' => $config_file;
+    my @cmd = qw(export-marc);
+    # Make sure export-marc uses the same value for "now" 
+    push @cmd, ('-T' => $t0);
+    # Tell export-marc which config file to use, if any.  If the user specified
+    # one on the command line, we pass that along (and export-marc will die if
+    # it doesn't exist).  Otherwise, we pass site/$site/$mode.conf if it
+    # exists, or site/$site/default.conf if it exists, or no config file at all.
+    if (!defined $config_file) {
+        ($config_file) = map {
+            my $f = "$cwd/site/$site/conf/$_.conf";
+            -e $f ? ($f) : ()
+        } $mode, 'default';
     }
+    push @cmd, '-c' => $config_file if defined $config_file;
     # Set options from the command line
     if ($mode eq FULL) {
         push @cmd, '-f';
@@ -115,7 +124,7 @@ sub export_command_base {
     push @cmd, '-s' => $skipfile if defined $skipfile;
     push @cmd, '--after' => $after if defined $after;
     push @cmd, '--before' => $before if defined $before;
-    if (!$have_config_file) {
+    if (!defined $config_file) {
         # Set defaults
         push @cmd, '-b';  # Get source records from local DB
         ### push @cmd, '-y';  # Sync local source record DB

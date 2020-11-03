@@ -8,9 +8,23 @@ use Scalar::Util qw(weaken);
 
 # sub _obj_uri { '/instance-storage/instances/%s' }
 
+sub errors {
+    my $self = shift;
+    my $err = $self->{'_errors'} ||= [];
+    if (@_) {
+        push @$err, @_;
+        return $self;
+    }
+    else {
+        return @$err if wantarray;
+        return $err;
+    }
+}
+
 sub source_record {
     my ($self) = @_;
-    return $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/records/%s/formatted?idType=INSTANCE');
+    my ($source_record) = $self->site->object('source_record', 'id' => $self->{'id'}, 'uri' => '/source-storage/records/%s/formatted?idType=INSTANCE');
+    return $source_record;
 }
 
 sub marcjson {
@@ -53,8 +67,10 @@ sub holdings {
         $holdings = $self->{'_holdings'};
         if (!$holdings) {
             my $site = $self->site;
-            my $id = $self->{'id'};
-            $holdings = [$site->object('holdings_record', 'query' => "instanceId==$id")];
+            if ($site) {
+                my $id = $self->{'id'};
+                $holdings = [$site->object('holdings_record', 'query' => "instanceId==$id")];
+            }
         }
     }
     elsif (!$r) {
@@ -96,25 +112,31 @@ sub export_marc {
             $marc = Biblio::Folio::Site::MARC->new('marcref' => $marcref);
         }
         else {
-            die "huh?";
+            die "can't make up a MARC record";
         }
     }
-    $marc->parse;
-    $marc->garnish('instance' => $self);
-    if ($arg{'with_holdings'}) {
-        my $holdings = $arg{'holdings'} ? $self->holdings($arg{'holdings'}) : $self->holdings;
-        if ($holdings && @$holdings) {
-            $marc->add_holdings(
-                'holdings' => $holdings,
-                'spell_out_locations' => $arg{'spell_out_locations'},
-                'copy_electronic_access' => $arg{'copy_electronic_access'},
-            );
+    my $ok;
+    eval {
+        $marc->parse or die "can't parse";
+        $marc->garnish('instance' => $self) or die "can't garnish";
+        if ($arg{'with_holdings'}) {
+            my $holdings = $arg{'holdings'} ? $self->holdings($arg{'holdings'}) : $self->holdings;
+            if ($holdings && @$holdings) {
+                $marc->add_holdings(
+                    'holdings' => $holdings,
+                    'spell_out_locations' => $arg{'spell_out_locations'},
+                    'copy_electronic_access' => $arg{'copy_electronic_access'},
+                );
+            }
         }
-    }
-    else {
-        $marc->delete_holdings;
-    }
-    return $marc;
+        else {
+            $marc->delete_holdings;
+        }
+        $ok = 1;
+    };
+    return $marc if $ok;
+    push @{ $self->errors }, $@ || "can't make exportable MARC record", $marc->errors;
+    return;
 }
 
 1;

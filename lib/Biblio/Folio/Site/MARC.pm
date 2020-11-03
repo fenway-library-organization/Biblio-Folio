@@ -845,8 +845,8 @@ sub new {
         }
         else {
             my ($ind1, $ind2, @subs) = @_;
-            warn "data field $tag with no subfields?"
-                if !@subs;
+            #warn "data field $tag with no subfields?"
+            #    if !@subs;
             my $val = $ind1 . $ind2;
             $content[VALREF] = \$val;
             my $subnum = 0;
