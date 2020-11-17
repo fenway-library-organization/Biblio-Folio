@@ -29,7 +29,7 @@ my %ok_mode = map { $_ => 1 } FULL, INCREMENTAL, FULL_OR_INCREMENTAL, SPECIAL;
 my $root = $ENV{'FOLIO_ROOT'} ||= '/usr/local/folio';
 my $mode = INCREMENTAL;
 my ($query, $id_file);
-my ($config_file, $dest, $skipfile, $dryrun, $verbose, $test, $after, $before);
+my ($config_file, $dest, $skipfile, $dryrun, $verbose, $test, $after, $before, $use_ldp);
 GetOptions(
     # Export mode
     'f|full' => sub { $mode = FULL },
@@ -37,6 +37,7 @@ GetOptions(
     'i|id-file=s' => sub { $id_file = $_[1]; $mode = SPECIAL },
     # Options shared by export-marc
     'c|config-file=s' => \$config_file,
+    'l|use-ldp' => \$use_ldp,
     't|test' => \$test,
     'v|verbose' => \$verbose,
     'n|dry-run' => \$dryrun,
@@ -121,6 +122,7 @@ sub export_command_base {
     push @cmd, '-t' if $test;
     push @cmd, '-v' if $verbose;
     push @cmd, '-n' if $dryrun;
+    push @cmd, '-l' if $use_ldp;
     push @cmd, '-s' => $skipfile if defined $skipfile;
     push @cmd, '--after' => $after if defined $after;
     push @cmd, '--before' => $before if defined $before;
