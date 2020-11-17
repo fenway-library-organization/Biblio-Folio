@@ -142,12 +142,14 @@ sub export_site {
     my ($tmpbase, $outbase) = map { "$_/$now" } $tmpdir, $outdir;
     my ($tmpmarc, $outmarc) = map { "$_.mrc.gz" } $tmpbase, $outbase;
     my ($tmperr,  $outerr ) = map { "$_.err" } $tmpbase, $outbase;
+    my ($tmplog,  $outlog ) = map { "$_.log" } $tmpbase, $outbase;
     blather "----------------------------------------------------------------------------";
     blather "Site: $site";
     xmkdir($outroot, "$outroot/tmp", "$outroot/new", $tmpdir, $outdir);
     my @cmd = (
         export_command_base($site),
         '-e' => $tmperr,
+        '-a' => $tmplog,
         $site
     );
     my $cmd = join(' ',
@@ -162,12 +164,14 @@ Temporary files:
   tmpdir  = $tmpdir
   tmpmarc = $tmpmarc
   tmperr  = $tmperr
+  tmplog  = $tmplog
 EOS
         blather <<"EOS";
 Output files:
   outdir  = $outdir
   outmarc = $outmarc
   outerr  = $outerr
+  outlog  = $outlog
 EOS
     }
     blather_path();
@@ -175,9 +179,10 @@ EOS
     if ($tmpdir ne $outdir) {
         xrename($tmpdir, $outdir);
     }
-    return ($tmpdir, $tmpmarc, $tmperr) if $dryrun;
+    return ($tmpdir, $tmpmarc, $tmperr, $tmplog) if $dryrun;
     # Clean up empty files
     unlink $outerr  if !-s $outerr;   # No output to stderr
+    unlink $outlog  if !-s $outlog;   # No output to stdlog
     if (-s $outmarc < 26) {
         # Impossibly small -- no records output
         unlink $outmarc;
