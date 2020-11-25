@@ -29,6 +29,10 @@ use constant DELETES     => 'deletes';
 use constant SPECIAL     => 'special';
 use constant TEST        => 'test';
 
+# Indices into the next several constants
+use constant PHASE_OR_STATUS_ID   => 0;
+use constant PHASE_OR_STATUS_NAME => 1;
+
 # Phases
 use constant NONE              => [ 0, 'none'];
 use constant BEGINNING         => [ 1, 'beginning'];
@@ -242,7 +246,9 @@ blatherf "Elapsed time: %s\n", sec2dur(time - $tstart);
 blather "Cancelled\n" if $cancelled;
 blather "Failed\n" if $failed;
 
+$log_fh->flush if defined $log_fh;
 STDOUT->flush;
+
 if (!close STDOUT) {
     if (defined $postproc) {
         my $err = $!
@@ -485,13 +491,13 @@ sub log_record {
     my $opt_error = optional_error_string($error);
     my $opt_notes = optional_notes_string($notes);  # TODO
     printf $log_fh "exp=%d phase=%s recnum=%d id=%s hrid=%s updated_date=%s source_type=%s suppressed=%d deleted=%d%s%s\n",
-        $export_id, phase_code($phase), $number, $iid, $hrid, $lastmod, $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0, $opt_notes, $opt_error;
+        $export_id, code($phase), $number, $iid, $hrid, $lastmod, $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0, $opt_notes, $opt_error;
 ### my $sth = sth($exports_db, q{
 ###     INSERT  INTO instances
 ###             (export, record_number, id, hrid, last_modified, phase, source_type, suppressed, deleted)
 ###     VALUES  (?,      ?,             ?,  ?,    ?,             ?,     ?,           ?,          ?      )
 ### });
-### $sth->execute($export_id, $number, $iid, $hrid, $lastmod, phase_id($phase), $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0);
+### $sth->execute($export_id, $number, $iid, $hrid, $lastmod, code($phase), $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0);
 }
 
 sub optional_error_string {
@@ -517,7 +523,7 @@ sub log_beginning {
     });
     my $dbh = $exports_db->dbh;
     $dbh->begin_work;
-    $sth->execute($mode, $began, RUNNING, $comment);
+    $sth->execute($mode, $began, code(RUNNING), $comment);
     my $eid = $dbh->sqlite_last_insert_rowid;
     $dbh->commit;
     return $eid;
@@ -532,7 +538,7 @@ sub log_result {
                 num_records = ?
         WHERE   id = ?
     });
-    $sth->execute($status, $ended, $num_records, $eid);
+    $sth->execute(code($status), $ended, $num_records, $eid);
 }
 
 sub run {
@@ -985,7 +991,7 @@ sub show_progress {
         }
         my $batch_str = sprintf('%10s', "batch $counter{'batch'}");
         blatherf "\r   %-17s : %s : %7d seen | %7d instances : %7d skipped : %7d holdings : %4d errors : %4d suppressed : %4d deleted : %4d no source : %4d non-MARC : %s elapsed : %5.1f/sec",
-            phase_name($phase), $batch_str, @counter{qw(seen instance skip holdings error suppressed deleted no_source not_marc)}, $dur, $rate;
+            name($phase), $batch_str, @counter{qw(seen instance skip holdings error suppressed deleted no_source not_marc)}, $dur, $rate;
         blather "\n" if $ending;
         $progress{'last_report'} = $tnow;
         $progress{'next_report'} = $tnow + $progress{'report_interval'};
@@ -993,10 +999,10 @@ sub show_progress {
     $progress{'previous_phase'} = $phase;
 }
 
-sub phase_id   { shift()->[0] }
-sub phase_name { shift()->[1] }
-sub phase_code {
-    local $_ = phase_name(@_);
+sub id   { shift()->[PHASE_OR_STATUS_ID] }
+sub name { shift()->[PHASE_OR_STATUS_NAME] }
+sub code {
+    local $_ = name(@_);
     tr/ /_/;
     return $_;
 }
@@ -1264,7 +1270,7 @@ sub last_export_began {
         AND     mode IN ($placeholders)
     };
     my $sth = $exports_db->sth($sql);
-    $sth->execute(COMPLETED, @modes);
+    $sth->execute(code(COMPLETED), @modes);
     my ($began) = $sth->fetchrow_array;
     return $began || 0;
 }
