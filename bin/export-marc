@@ -655,7 +655,7 @@ sub _export_deleted_instances {
             my ($data) = $isth->fetchrow_array;
             if (defined $data) {
                 my $instance = $json->decode($data);
-                if (!defined $since || $data->{'metadata'}{'updatedDate'} ge $since) {
+                if (!defined $since || $instance->{'metadata'}{'updatedDate'} ge $since) {
                     %record = ('instance_id' => $instance->{'id'}, 'instance_hrid' => $instance->{'hrid'});
                 }
             }
