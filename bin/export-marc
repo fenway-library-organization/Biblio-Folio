@@ -192,8 +192,8 @@ if (defined $skip_file) {
 
 my $folio = Biblio::Folio->new('root' => $root);
 my $site = $folio->site($site_name);
-my $weak_site = $site;
-weaken($weak_site);
+# my $weak_site = $site;
+# weaken($weak_site);
 
 my $exports_db = exports_db();
 my $ldp = ldp();
@@ -289,8 +289,12 @@ sub export_full {
             _export_from_lidb_using_executed_sth(INSTANCES, $sth, 'Full export', with(@_, 'mode' => FULL, 'sql' => $sql));
         });
     }
+    elsif (@range) {
+        usage('options -f and -r are mutually incompatible unless -b is given');
+    }
     else {
         my $ssearcher = $site->searcher('source_record')->uri('/source-storage/source-records')->limit($large_batch_size);
+        $ssearcher->offset($offset) if defined $offset;
         run(FULL, sub {
             _export_source_records(SOURCE, $ssearcher, 'Export all source records with associated holdings', with(@_, 'mode' => FULL));
         });
@@ -300,7 +304,7 @@ sub export_full {
 sub _export_from_lidb_using_executed_sth {
     my ($phase, $sth, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress($phase, $msg, %ctx);
+    progress($phase, $msg, %ctx);
     my $prev_iid = '(none)';
     while (!$cancelled) {
         my $ok;
@@ -356,7 +360,7 @@ sub _export_from_lidb_using_executed_sth {
         $prev_iid = $iid;
     }
     continue {
-        show_progress();
+        progress();
     }
 }
 
@@ -483,15 +487,19 @@ sub params {
 }
 
 sub log_record {
-    return if !defined $log_fh;
     my ($record) = @_;
-    my ($instance, $source_record, $phase, $number, $source_type, $suppressed, $deleted, $notes, $error) = @$record{qw(instance source_record phase number source_type suppressed deleted notes error)};
-    my ($iid, $hrid) = @$instance{qw(id hrid)};
-    my $lastmod = ($instance && $instance->{'metadata'}{'updatedDate'}) || ($source_record && $source_record->{'metadata'}{'updatedDate'}) || '1970-01-01T00:00:00.000+0000';
-    my $opt_error = optional_error_string($error);
-    my $opt_notes = optional_notes_string($notes);  # TODO
-    printf $log_fh "exp=%d phase=%s recnum=%d id=%s hrid=%s updated_date=%s source_type=%s suppressed=%d deleted=%d%s%s\n",
-        $export_id, code($phase), $number, $iid, $hrid, $lastmod, $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0, $opt_notes, $opt_error;
+    if (defined $log_fh) {
+        my ($instance, $source_record, $phase, $number, $source_type, $suppressed, $deleted, $notes, $error) = @$record{qw(instance source_record phase number source_type suppressed deleted notes error)};
+        $instance = {} if !ref $instance;
+        my ($iid, $hrid) = @$instance{qw(id hrid)};
+        my $lastmod = ($instance && $instance->{'metadata'}{'updatedDate'}) || ($source_record && $source_record->{'metadata'}{'updatedDate'}) || '1970-01-01T00:00:00.000+0000';
+        my $opt_error = optional_error_string($error);
+        my $opt_notes = optional_notes_string($notes);  # TODO
+        $_ //= '<null>' for $export_id, $number, $iid, $hrid, $lastmod, $source_type;
+        printf $log_fh "exp=%s phase=%s recnum=%s id=%s hrid=%s updated_date=%s source_type=%s suppressed=%s deleted=%s%s%s\n",
+            $export_id, code($phase), $number, $iid, $hrid, $lastmod, $source_type, $suppressed ? 1 : 0, $deleted ? 1 : 0, $opt_notes, $opt_error
+    }
+    report_error($record) if has_error($record);
 ### my $sth = sth($exports_db, q{
 ###     INSERT  INTO instances
 ###             (export, record_number, id, hrid, last_modified, phase, source_type, suppressed, deleted)
@@ -573,12 +581,12 @@ sub run {
         }
     }
     my $ended = time;
-    my $num_records = $counter{'instance'} - $counter{'not_marc'};
+    my $num_instances = $counter{'instance'} - $counter{'not_marc'};
     #my $num_batches = --$counter{'batch'};
     # $DB::single = 1;  # Breakpoint if running in debugger
-    log_result($export_id, $began, $mode, $comment, $status, $ended, $num_records)
+    log_result($export_id, $began, $mode, $comment, $status, $ended, $num_instances)
         if !$dryrun;
-    show_progress($status, 'Totals', %ctx);
+    progress($status, 'Totals', %ctx);
     if (defined $err) {
         print STDERR "Error: $err\n";
     }
@@ -587,7 +595,7 @@ sub run {
 sub _export_from_ldp_using_executed_sth {
     my ($phase, $sth, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress($phase, $msg, %ctx);
+    progress($phase, $msg, %ctx);
     my $prev_iid = '(none)';
     while (!$cancelled) {
         my $ok;
@@ -631,14 +639,14 @@ sub _export_from_ldp_using_executed_sth {
         $prev_iid = $iid;
     }
     continue {
-        show_progress();
+        progress();
     }
 }
 
 sub _export_deleted_instances {
     my ($phase, $since, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress($phase, $msg, %ctx);
+    progress($phase, $msg, %ctx);
     my ($isth, $searcher);
     if ($use_ldp) {
         $isth = $ldp->query(ldp_deleted_instances_sql());  # XXX Don't include unless necessary: , $ldp->timestamp($last_export_began));
@@ -688,13 +696,13 @@ sub _export_deleted_instances {
         }
     }
     continue {
-        show_progress();
+        progress();
     }
 }
 
 sub _instances_with_deleted_holdings_records {
     my ($msg, $last_export_began, $now) = @_;
-    show_progress(DELETED_HOLDINGS, $msg);
+    progress(DELETED_HOLDINGS, $msg);
     my $sth = $ldp->query(ldp_deleted_holdings_records_sql_and_params($last_export_began, $now));
     my %need_instance;
     while (!$cancelled) {
@@ -716,7 +724,7 @@ sub _instances_with_deleted_holdings_records {
         $need_instance{$iid} = 1;
     }
     continue {
-        show_progress();
+        progress();
     }
     return keys %need_instance;
 }
@@ -738,7 +746,7 @@ sub hids2iids {
 sub _export_instances {
     my ($phase, $searcher, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress(INSTANCES, $msg, %ctx);
+    progress(INSTANCES, $msg, %ctx);
     while (!$cancelled) {
         my $instance = $searcher->next;
         if ($instance) {
@@ -760,19 +768,19 @@ sub _export_instances {
         }
     }
     continue {
-        show_progress();
+        progress();
     }
 }
 
 sub skip {
-    my ($phase, $record) = @_;
+    my ($record, $message) = @_;
     # TODO?
 }
 
 sub _export_source_records {
     my ($phase, $searcher, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress($phase, $msg, %ctx);
+    progress($phase, $msg, %ctx);
     while (!$cancelled) {
         my $source_record = $searcher->next;
         if ($source_record) {
@@ -785,19 +793,32 @@ sub _export_source_records {
                 'deleted' => $deleted,
                 'suppressed' => $suppressed,
             );
-            if ($instance_seen{$iid}) {
-                skip($phase, \%record);
+            if (!defined $iid) {
+                # *Sigh!*  It happens...
+                error(\%record, 'no instance ID');
+                log_record(\%record);
+            }
+            elsif ($instance_seen{$iid}) {
+                skip(\%record, 'instance has already been seen');
             }
             else {
-                if (!defined $iid) {
-                    error($phase, \%record, 'no instance ID');
-                }
                 $counter{'instance'}++;
                 $counter{'seen'}++;
-                add_to_batch(
-                    $batch,
-                    %record,
-                );
+                my $ok;
+                eval {
+                    add_to_batch(
+                        $batch,
+                        %record,
+                    );
+                    $ok = 1;
+                };
+                if (!$ok) {
+                    # Hopefully this will never happen!
+                    error(\%record, "couldn't add instance to batch: $@");
+                    # We have to do this here, because this record won't be
+                    # seen in process_batch:
+                    log_record(\%record);
+                }
             }
         }
         my $size = $batch->{'size'};
@@ -808,7 +829,7 @@ sub _export_source_records {
         }
     }
     continue {
-        show_progress();
+        progress();
     }
 }
 
@@ -819,7 +840,7 @@ sub log_skipped {
 sub _export_holdings {
     my ($phase, $searcher, $msg, %ctx) = @_;
     my $batch = batch($phase);
-    show_progress(HOLDINGS, $msg, %ctx);
+    progress(HOLDINGS, $msg, %ctx);
     my %need_instance;
     while (!$cancelled) {
         my $holdings_record = $searcher->next or last;
@@ -830,7 +851,7 @@ sub _export_holdings {
         $need_instance{$iid} = 1;
     }
     continue {
-        show_progress();
+        progress();
     }
     my $isearcher = $site->searcher('instance')
         ->by('set' => [keys %need_instance])
@@ -841,7 +862,7 @@ sub _export_holdings {
 ### sub _export_using_item_searcher {
 ###     my ($phase, $searcher, $msg, %ctx) = @_;
 ###     my $batch = batch($phase);
-###     show_progress(ITEMS, $msg, %ctx);
+###     progress(ITEMS, $msg, %ctx);
 ###     my %need_holdings;
 ###     while (!$cancelled) {
 ###         my $item = $searcher->next or last;
@@ -850,7 +871,7 @@ sub _export_holdings {
 ###         $need_holdings{$hid} = 1;
 ###     }
 ###     continue {
-###         show_progress();
+###         progress();
 ###     }
 ###     my $hsearcher = $site->searcher('holdings_record')
 ###         ->by('set' => [keys %need_holdings])
@@ -894,18 +915,6 @@ sub make_instance {
     else {
         $instance = $record->{'instance'} ||= stub_instance($iid, 'hrid' => $hrid, 'deleted' => $record->{'deleted'});
     }
-### if (!defined $instance) {
-###     my $sourceref = $record->{'sourceref'};
-###     if (!$sourceref) {
-###         return error(???, $record, 'no source reference!?');
-###     }
-###     $instance = eval { $site->instance($json->decode($$sourceref)) };
-###     if (!defined $instance) {
-###         my ($msg) = split /\n/, $@;
-###         return error(???, $record, $msg);
-###     }
-### }
-### elsif ($instance->{'discoverySuppress'}) {
     if ($instance && $instance->{'discoverySuppress'}) {
         $record->{'suppressed'} = 1;
         $counter{'suppressed'}++;
@@ -944,7 +953,7 @@ sub add_to_batch {
     my $n = ++$batch->{'size'};
     $record{'phase'} = $batch->{'phase'};
     $record{'number_in_batch'} = $n;
-    $record{'number'} = $batch->{'record_number_base'} + $n,
+    $record{'number'} = $counter{'seen'};  # $batch->{'record_number_base'} + $n,
     my ($error, $source_record) = @record{qw(error source_record)};
     if ($error) {
         # TODO
@@ -968,15 +977,15 @@ sub add_to_batch {
 ###     'number_in_batch' => $n,
 ###     'number' => $batch->{'record_number_base'} + $n,
 ### };
-    show_progress() if ($n % 10) == 1;
+    progress() if ($n % 10) == 1;
 }
 
-sub show_progress {
-    return if !$verbose;
+sub progress {
     my ($phase, $msg, %ctx) = @_;
     my $prev_phase = $progress{'previous_phase'};
     $phase ||= $prev_phase;
     $progress{'phase'} = $phase;
+    return if !$verbose;
     my $ending = ($phase eq COMPLETED || $phase eq CANCELLED || $phase eq FAILED);
     my $seen = $counter{'seen'};
     my $tnow = time;
@@ -999,8 +1008,14 @@ sub show_progress {
     $progress{'previous_phase'} = $phase;
 }
 
-sub id   { shift()->[PHASE_OR_STATUS_ID] }
-sub name { shift()->[PHASE_OR_STATUS_NAME] }
+sub id   {
+    my $phase = shift || $progress{phase};
+    return $phase->[PHASE_OR_STATUS_ID];
+}
+sub name   {
+    my $phase = shift || $progress{phase};
+    return $phase->[PHASE_OR_STATUS_NAME];
+}
 sub code {
     local $_ = name(@_);
     tr/ /_/;
@@ -1032,6 +1047,8 @@ sub stub_instance {
     my ($id, %arg) = @_;
     my $instance = Biblio::Folio::Object::Instance->new('id' => $id);
     %$instance = ( %$instance, %arg ) if %arg;
+my $weak_site = $site;
+weaken($weak_site);
     $instance->site($weak_site);
     return $instance;
 }
@@ -1057,8 +1074,8 @@ sub process_batch {
         }
         next if $instance_seen{$iid}++;
         $instance = make_instance($record);
-        make_marc($phase, $record);
-        # make_marc($phase, $record, 'instance' => $instance, 'instance_id' => $iid, 'instance_hrid' => $hrid);
+        make_marc($record);
+        # make_marc($record, 'instance' => $instance, 'instance_id' => $iid, 'instance_hrid' => $hrid);
         if ($instance && !$record->{'deleted'} && !$record->{'suppressed'}) {
             $instance->{'_holdings'} ||= [];
             $id2instance{$iid} = $instance;
@@ -1118,7 +1135,9 @@ sub process_batch {
                 )
             };
             if (!defined $marc) {
-                error($phase, $record, $instance->errors);
+                my @errors = $instance->errors;
+                @errors = ("couldn't export instance MARC record") if !@errors;
+                error($record, $_) for @errors;
                 next;
             }
             if ($record->{'suppressed'} || $record->{'deleted'} || !$holdings_records && !$include_bare_instances) {
@@ -1129,34 +1148,33 @@ sub process_batch {
             }
             my $marc21 = eval { $marc->as_marc21 };
             if (!defined $marc21) {
-                error($phase, $record, 'could not build MARC record');
+                error($record, "couldn't generate MARC21 record");
                 next;
             }
             print($marc21) or fatal "print record $n: $!";
         }
         else {
             # Instance is deleted or suppressed, and the user doesn't want those
-            # error($phase, $record, 'unknown reason for undefined instance');
+            # error($record, 'unknown reason for undefined instance');
         }
     }
     continue {
         log_record($record);
-        report_error($record) if error($record);
     }
     $cancelled = 1 if defined $max_num_batches && $counter{'batch'} == $max_num_batches;
 }
 
 sub make_marc {
-    my ($phase, $record) = @_;
+    my ($record) = @_;
     my $marc = $record->{'marc'};
     return if defined $marc;
     return if $record->{'no_source'} || $record->{'not_marc'};
     # my $deleted = $record->{'deleted'};
     my ($marcjson, $marcref);
     $marcjson = marcjson($record)
-        or $marcref = marcref($phase, $record)
+        or $marcref = marcref($record)
         #or $deleted
-        or return error($phase, $record, 'no way to build a MARC record');
+        or return error($record, 'no way to build a MARC record');
     my ($instance, $iid, $hrid) = @$record{qw(instance instance_id instance_hrid)};
     # $instance ||= $record->{'instance'};
     $instance->{'_marcjson'} = $marcjson;
@@ -1174,10 +1192,10 @@ sub make_marc {
     else {
         # All we have is the instance ID
         # No instance hrid, and no MARC record whose 001 field we can get it from
-        return error($phase, $record, "can't build a MARC record to delete an instance unless we have its hrid");
+        return error($record, "can't build a MARC record to delete an instance unless we have its hrid");
     }
     if (!$marc->is_valid) {
-        return error($phase, $record, "can't parse MARC record", $marc->errors);
+        return error($record, "can't parse MARC record", $marc->errors);
     }
     if (!$record->{'deleted'} && !$record->{'suppressed'}) {
         # Fix record status if it happens to be "d" (Deleted)
@@ -1190,7 +1208,7 @@ sub make_marc {
         # XXX This code assumes that the 001 field should contain the
         #     instance's hrid, not its id!!!
         my $f001 = $marc->field('001')  # XXX I don't think this is possible, but...
-            or return error($phase, $record, "can't build a MARC record to delete an instance unless its source record has an 001 field");
+            or return error($record, "can't build a MARC record to delete an instance unless its source record has an 001 field");
         $instance->{'hrid'} = $f001->value;
     }
     $record->{'marc'} = $marc;
@@ -1202,21 +1220,55 @@ sub marcjson {
 }
 
 sub marcref {
-    my ($phase, $record) = @_;
+    my ($record) = @_;
     return $record->{'marcref'}
         if defined $record->{'marcref'};
     my $iid = $record->{'instance_id'};
     my $marcref = eval { local_instances_db()->marcref($iid) }
-        or return error($phase, $record, 'no MARC source record for instance in local DB');
+        or return error($record, 'no MARC source record for instance in local DB');
     return $marcref;
 }
 
+sub has_error {
+    shift()->{'errors'}
+}
+
 sub error {
-    my $record = shift;
-    return $record->{'error'} if !@_;
-    $record->{'error'} ||= [$progress{'phase'}, $record->{'number'} || $counter{'instance'}, $counter{'batch'}, $record->{'instance_id'}, @_];
+    my ($record, $message) = @_;
+    $message = 'unknown error' if !defined $message;
+    push @{ $record->{'errors'} ||= [] }, {
+        'phase' => name($progress{'phase'}),
+        'record_number' => $counter{'seen'},  # $record->{'number'}
+        'batch_number' => $counter{'batch'},
+        'instance_id' => $record->{'instance_id'},
+        'message' => $message,
+    };
     $counter{'error'}++;
     return undef;
+}
+
+sub report_error {
+    my ($record) = @_;
+    my $errors = $record->{'errors'};
+    my @fields = qw(phase record_number batch_number instance_id message);
+    $err_fh ||= open_err_file(@fields);
+    foreach my $err (@$errors) {
+        print $err_fh join("\t", map { $_ // '' } @$err{@fields}), "\n";
+    }
+}
+
+sub open_err_file {
+    my @header = @_;
+    my $fh;
+    if (!defined $err_file || $err_file eq '-' || $err_file eq '/dev/stderr') {
+        $fh = \*STDERR;
+    }
+    else {
+        open $fh, '>', $err_file or fatal "open $err_file for writing: $!";
+    }
+    $fh->autoflush(1);
+    print $fh join("\t", @header), "\n";
+    return $fh;
 }
 
 sub sync_local_instances_db {
@@ -1232,31 +1284,6 @@ sub sync_local_instances_db {
     });
     printf STDERR "\r%8d records synced\n", $num_synced;
     print STDERR "error: ", $_, "\n" for @errors;
-}
-
-sub report_error {
-    my ($record) = @_;
-    my $err = $record->{'error'};
-    $err_fh ||= open_err_file();
-    my @err = @$err;
-    my @pfx = splice(@err, 0, 4);
-    @err = ('unknown error') if !@err;
-    foreach my $msg (@err) {
-        print $err_fh join("\t", @pfx, $msg), "\n";
-    }
-}
-
-sub open_err_file {
-    my $fh;
-    if (!defined $err_file || $err_file eq '-' || $err_file eq '/dev/stderr') {
-        $fh = \*STDERR;
-    }
-    else {
-        open $fh, '>', $err_file or fatal "open $err_file for writing: $!";
-    }
-    $fh->autoflush(1);
-    print $fh join("\t", qw(phase record_number batch_number instance_id error)), "\n";
-    return $fh;
 }
 
 sub last_export_began {
